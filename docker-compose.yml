@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: optical_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://optical:optical123@db:5432/optical_db
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/google-credentials.json
+    volumes:
+      - ./backend:/app
+      - ./credentials:/app/credentials:ro
+      - uploads:/app/uploads
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    container_name: optical_db
+    environment:
+      POSTGRES_USER: optical
+      POSTGRES_PASSWORD: optical123
+      POSTGRES_DB: optical_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: optical_dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads:
