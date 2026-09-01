@@ -7,3 +7,5 @@ pillow==10.2.0
 opencv-python==4.9.0.0
 pytesseract==0.3.10
 numpy==1.26.3
+
+alembic==1.19.1

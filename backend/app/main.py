@@ -1,29 +1,18 @@
-"""
-التطبيق الرئيسي النهائي - FastAPI
+﻿"""
+التطبيق الرئيسي - FastAPI
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 
-from app.database import engine, Base
 from app.routers import companies, lens_models, prescriptions, pdf_import, uploads
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created")
-    yield
-    print("👋 Application shutting down")
 
 
 app = FastAPI(
     title="Optical Lens Matcher API - Final",
-    description="API نهائي لمطابقة العدسات البصرية - يدعم Transposition, Aspherical, Stock/RX, PDF Import, Preview & Confirm",
+    description="API نهائي لمطابقة العدسات البصرية",
     version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -54,9 +43,9 @@ def root():
             "PDF Hybrid Parser",
             "Preview & Confirm Workflow",
             "Dynamic Company Management",
-            "Google Vision OCR"
+            "Google Vision OCR",
         ],
-        "docs": "/docs"
+        "docs": "/docs",
     }
 
 

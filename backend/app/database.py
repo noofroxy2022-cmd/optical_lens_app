@@ -1,14 +1,13 @@
-"""
-إعداد قاعدة البيانات - PostgreSQL للإنتاج
+﻿"""
+إعداد قاعدة البيانات.
 """
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://optical:optical123@localhost:5432/optical_db")
-# للتطوير: SQLite
-DATABASE_URL = "sqlite:///./optical_lens.db"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./optical_lens.db")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
