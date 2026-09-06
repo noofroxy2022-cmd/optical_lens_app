@@ -4,6 +4,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 
 
@@ -30,10 +31,29 @@ class MaterialType(str, Enum):
     HIGH_INDEX_174 = "high_index_1.74"
 
 class DesignType(str, Enum):
+    # Optical geometry / type ONLY.
     SPHERICAL = "spherical"
     ASPHERICAL = "aspherical"
     DOUBLE_ASPHERICAL = "double_aspherical"
-    FREE_FORM = "free_form"
+    FREE_FORM = "free_form"  # LEGACY - commercial "Free Form" belongs in design_variant
+
+
+class CatalogStatus(str, Enum):
+    DRAFT = "draft"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+
+
+class CoatingExtractionStatus(str, Enum):
+    RESOLVED = "resolved"
+    EXPLICIT_NONE = "explicit_none"
+    NOT_FOUND = "not_found"
+
+
+class PricingAvailability(str, Enum):
+    STOCK = "stock"
+    RX = "rx"
 
 
 # ===== Company =====
@@ -73,6 +93,24 @@ class CompanyResponse(CompanyBase):
     catalogs_count: int = 0
 
 
+# ===== Coating =====
+class CoatingBase(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    name_ar: Optional[str] = None
+    description: Optional[str] = None
+    is_active: bool = True
+
+class CoatingCreate(CoatingBase):
+    pass
+
+class CoatingResponse(CoatingBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
 # ===== Catalog =====
 class CatalogResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -84,6 +122,9 @@ class CatalogResponse(BaseModel):
     page_count: Optional[int]
     processing_status: str
     processing_errors: Optional[str]
+    status: str
+    confirmed_at: Optional[datetime] = None
+    confirmed_by: Optional[str] = None
     created_at: datetime
 
 
@@ -102,6 +143,10 @@ class CatalogExtractionBase(BaseModel):
     add_max: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
+    extracted_coating: Optional[str] = None
+    coating_id: Optional[int] = None
+    coating_extraction_status: Optional[CoatingExtractionStatus] = None
+    coating_confidence: Optional[float] = None
 
 class CatalogExtractionCreate(CatalogExtractionBase):
     catalog_id: int
@@ -120,6 +165,12 @@ class CatalogExtractionUpdate(BaseModel):
     add_max: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
+    # coating human correction / review (mirrors CatalogExtraction)
+    extracted_coating: Optional[str] = None
+    coating_id: Optional[int] = None
+    coating_extraction_status: Optional[CoatingExtractionStatus] = None
+    coating_confidence: Optional[float] = None
+    coating_review_notes: Optional[str] = None
     status: Optional[str] = None
     review_notes: Optional[str] = None
     modified_data: Optional[Dict[str, Any]] = None
@@ -131,6 +182,7 @@ class CatalogExtractionResponse(CatalogExtractionBase):
     status: str
     reviewed_by: Optional[str]
     review_notes: Optional[str]
+    coating_review_notes: Optional[str] = None
     modified_data: Optional[Dict[str, Any]]
     created_at: datetime
     reviewed_at: Optional[datetime]
@@ -153,12 +205,17 @@ class PowerRangeBase(BaseModel):
 class PowerRangeCreate(PowerRangeBase):
     lens_model_id: int
     variant_id: Optional[int] = None
+    # Required at the DB level (a PowerRange cannot exist without pricing). Kept
+    # Optional here so legacy callers fail loudly rather than silently; commercial
+    # callers must supply it.
+    pricing_id: Optional[int] = None
 
 class PowerRangeResponse(PowerRangeBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     lens_model_id: int
     variant_id: Optional[int]
+    pricing_id: Optional[int] = None
     created_at: datetime
 
 
@@ -166,9 +223,12 @@ class PowerRangeResponse(PowerRangeBase):
 class LensVariantBase(BaseModel):
     material: MaterialType
     index_value: float = Field(..., ge=1.0, le=2.0)
+    # DEPRECATED / NON-AUTHORITATIVE: commercial availability lives on VariantPricing.
     availability: LensAvailability = LensAvailability.STOCK
-    design_type: DesignType = DesignType.SPHERICAL
+    design_type: DesignType = DesignType.SPHERICAL  # optical geometry ONLY
     is_aspherical: bool = False
+    design_variant: Optional[str] = Field(None, max_length=50)  # commercial design line
+    color_variant: Optional[str] = Field(None, max_length=50)   # commercial colour line
     price: float = Field(..., ge=0)
     currency: str = "USD"
     diameter: Optional[int] = Field(None, ge=50, le=80)
@@ -218,6 +278,40 @@ class LensModelResponse(LensModelBase):
     variants: List[LensVariantResponse] = []
     power_ranges: List[PowerRangeResponse] = []
     variants_count: int = 0
+
+
+# ===== Variant Pricing (commercial, append-only) =====
+class VariantPricingCreate(BaseModel):
+    """Internal creation payload. There is no public update/delete counterpart."""
+    variant_id: int
+    coating_id: Optional[int] = None
+    availability: PricingAvailability
+    # Exact fixed-point money. Phase 2 converts extracted float/text -> Decimal at
+    # this commercial-write boundary.
+    price_pair: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+    currency: str = "EGP"
+    source_catalog_id: int
+    source_extraction_id: Optional[int] = None
+    effective_from: Optional[datetime] = None
+    power_scope: Optional[str] = Field(None, max_length=50)
+    market_scope: Optional[str] = Field(None, max_length=50)
+
+class VariantPricingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    variant_id: int
+    coating_id: Optional[int]
+    availability: PricingAvailability
+    price_pair: Decimal
+    currency: str
+    source_catalog_id: int
+    source_extraction_id: Optional[int]
+    effective_from: datetime
+    effective_to: Optional[datetime]
+    power_scope: Optional[str]
+    market_scope: Optional[str]
+    created_at: datetime
+    updated_at: datetime
 
 
 # ===== Prescription =====

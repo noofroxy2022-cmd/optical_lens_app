@@ -3,6 +3,7 @@ CRUD النهائي - يدعم Preview & Confirm + Transposition
 """
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
+from datetime import datetime
 from typing import List, Optional
 from app import models, schemas
 
@@ -304,3 +305,164 @@ def delete_prescription(db: Session, prescription_id: int) -> bool:
         db.commit()
         return True
     return False
+
+
+# ===== Coating =====
+def get_coating(db: Session, coating_id: int) -> Optional[models.Coating]:
+    return db.query(models.Coating).filter(models.Coating.id == coating_id).first()
+
+def get_coating_by_code(db: Session, code: str) -> Optional[models.Coating]:
+    return db.query(models.Coating).filter(models.Coating.code == code).first()
+
+def list_coatings(db: Session, include_inactive: bool = False) -> List[models.Coating]:
+    query = db.query(models.Coating)
+    if not include_inactive:
+        query = query.filter(models.Coating.is_active == True)
+    return query.order_by(models.Coating.code).all()
+
+def get_or_create_coating(
+    db: Session, code: str, name: Optional[str] = None, name_ar: Optional[str] = None
+) -> models.Coating:
+    existing = get_coating_by_code(db, code)
+    if existing:
+        return existing
+    coating = models.Coating(code=code, name=name or code, name_ar=name_ar)
+    db.add(coating)
+    db.commit()
+    db.refresh(coating)
+    return coating
+
+
+# ===== Variant Pricing (append-only commercial history) =====
+# Reads --------------------------------------------------------------------------
+def _current_pricing_query(db: Session, variant_id: int):
+    return db.query(models.VariantPricing).filter(
+        models.VariantPricing.variant_id == variant_id,
+        models.VariantPricing.effective_to.is_(None),
+    )
+
+def get_current_pricing_for_variant(db: Session, variant_id: int) -> List[models.VariantPricing]:
+    """All rows that are currently in effect for a variant."""
+    return _current_pricing_query(db, variant_id).all()
+
+def get_current_pricing(
+    db: Session,
+    variant_id: int,
+    availability,
+    coating_id: Optional[int] = None,
+    power_scope: Optional[str] = None,
+    market_scope: Optional[str] = None,
+) -> Optional[models.VariantPricing]:
+    """The single current row for a precise commercial identity (NULL-aware)."""
+    query = _current_pricing_query(db, variant_id).filter(
+        models.VariantPricing.availability == availability
+    )
+    query = query.filter(
+        models.VariantPricing.coating_id == coating_id
+        if coating_id is not None
+        else models.VariantPricing.coating_id.is_(None)
+    )
+    query = query.filter(
+        models.VariantPricing.power_scope == power_scope
+        if power_scope is not None
+        else models.VariantPricing.power_scope.is_(None)
+    )
+    query = query.filter(
+        models.VariantPricing.market_scope == market_scope
+        if market_scope is not None
+        else models.VariantPricing.market_scope.is_(None)
+    )
+    return query.first()
+
+def get_pricing_history(
+    db: Session,
+    variant_id: int,
+    coating_id: Optional[int] = None,
+    availability=None,
+) -> List[models.VariantPricing]:
+    """Full append-only history for a variant, oldest first."""
+    query = db.query(models.VariantPricing).filter(
+        models.VariantPricing.variant_id == variant_id
+    )
+    if coating_id is not None:
+        query = query.filter(models.VariantPricing.coating_id == coating_id)
+    if availability is not None:
+        query = query.filter(models.VariantPricing.availability == availability)
+    return query.order_by(
+        models.VariantPricing.effective_from.asc(), models.VariantPricing.id.asc()
+    ).all()
+
+# Writes (lifecycle only - no manual update/delete) -----------------------------
+def create_variant_pricing_internal(
+    db: Session, data: schemas.VariantPricingCreate
+) -> models.VariantPricing:
+    """The ONLY way to add a price. Appends a new current row."""
+    payload = data.model_dump()
+    if payload.get("effective_from") is None:
+        payload["effective_from"] = datetime.utcnow()
+    payload["availability"] = models.PricingAvailability(data.availability.value)
+    pricing = models.VariantPricing(**payload)
+    db.add(pricing)
+    db.commit()
+    db.refresh(pricing)
+    return pricing
+
+def close_current_pricing(
+    db: Session, pricing_id: int, effective_to: Optional[datetime] = None
+) -> Optional[models.VariantPricing]:
+    """Close a single current row by stamping effective_to. No-op if already closed."""
+    pricing = db.query(models.VariantPricing).filter(
+        models.VariantPricing.id == pricing_id
+    ).first()
+    if not pricing or pricing.effective_to is not None:
+        return pricing
+    pricing.effective_to = effective_to or datetime.utcnow()
+    db.commit()
+    db.refresh(pricing)
+    return pricing
+
+def supersede_pricing(
+    db: Session,
+    old_pricing_id: int,
+    new_data: schemas.VariantPricingCreate,
+    at: Optional[datetime] = None,
+) -> models.VariantPricing:
+    """Close the old current row and append its replacement at the same instant."""
+    at = at or datetime.utcnow()
+    old = db.query(models.VariantPricing).filter(
+        models.VariantPricing.id == old_pricing_id
+    ).first()
+    if old is not None and old.effective_to is None:
+        old.effective_to = at
+        db.flush()
+    payload = new_data.model_dump()
+    payload["effective_from"] = at
+    payload["availability"] = models.PricingAvailability(new_data.availability.value)
+    replacement = models.VariantPricing(**payload)
+    db.add(replacement)
+    db.commit()
+    db.refresh(replacement)
+    return replacement
+
+def close_company_current_pricing(
+    db: Session, company_id: int, effective_to: Optional[datetime] = None
+) -> int:
+    """Close every current price for a company (used when a catalog is replaced).
+
+    Returns the number of rows closed.
+    """
+    stamp = effective_to or datetime.utcnow()
+    rows = (
+        db.query(models.VariantPricing)
+        .join(models.LensVariant, models.VariantPricing.variant_id == models.LensVariant.id)
+        .join(models.LensModel, models.LensVariant.lens_model_id == models.LensModel.id)
+        .filter(
+            models.LensModel.company_id == company_id,
+            models.VariantPricing.effective_to.is_(None),
+        )
+        .all()
+    )
+    for row in rows:
+        row.effective_to = stamp
+    db.commit()
+    return len(rows)

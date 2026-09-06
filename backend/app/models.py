@@ -11,7 +11,7 @@
 """
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Text,
-    Enum, JSON, Index, CheckConstraint, Table
+    Enum, JSON, Index, CheckConstraint, Table, text, Numeric
 )
 from sqlalchemy.orm import relationship, validates
 from datetime import datetime
@@ -43,10 +43,57 @@ class MaterialType(str, PyEnum):
     HIGH_INDEX_174 = "high_index_1.74"
 
 class DesignType(str, PyEnum):
+    # Optical geometry / type ONLY. Not a commercial/marketing label.
     SPHERICAL = "spherical"
     ASPHERICAL = "aspherical"
     DOUBLE_ASPHERICAL = "double_aspherical"
+    # LEGACY: kept for backward compatibility. Commercial "Free Form" now belongs
+    # in LensVariant.design_variant, not here. Do not write new commercial data to
+    # this value; do not remove the value yet.
     FREE_FORM = "free_form"
+
+
+class CatalogStatus(str, PyEnum):
+    """Editorial lifecycle of a catalog (separate from parser processing_status)."""
+    DRAFT = "draft"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+
+
+class CoatingExtractionStatus(str, PyEnum):
+    """How a coating value was resolved during extraction.
+
+    RESOLVED       -> a concrete coating was identified (extracted_coating / coating_id set)
+    EXPLICIT_NONE  -> the source explicitly states there is no coating
+    NOT_FOUND      -> no coating information was present at all (distinct from EXPLICIT_NONE)
+    """
+    RESOLVED = "resolved"
+    EXPLICIT_NONE = "explicit_none"
+    NOT_FOUND = "not_found"
+
+
+class PricingAvailability(str, PyEnum):
+    """Commercial availability at the pricing level. STOCK / RX only - never BOTH."""
+    STOCK = "stock"
+    RX = "rx"
+
+
+# ===== الطبقات (Coatings) =====
+class Coating(Base):
+    """Catalog of coating options referenced by commercial pricing."""
+    __tablename__ = "coatings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(50), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    name_ar = Column(String(100), nullable=True)
+    description = Column(Text, nullable=True)
+
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 # ===== الشركات =====
@@ -87,13 +134,33 @@ class Catalog(Base):
     file_size = Column(Integer, nullable=True)
     page_count = Column(Integer, nullable=True)
 
+    # Parser / processing state - preserved separately from the editorial lifecycle.
     processing_status = Column(String(20), default="pending")
     processing_errors = Column(Text, nullable=True)
+
+    # Editorial lifecycle: draft -> confirmed / rejected / superseded.
+    status = Column(
+        Enum(CatalogStatus), nullable=False,
+        default=CatalogStatus.DRAFT, server_default=CatalogStatus.DRAFT.name, index=True
+    )
+    confirmed_at = Column(DateTime, nullable=True)
+    confirmed_by = Column(String(100), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
     company = relationship("Company", back_populates="catalogs")
     extractions = relationship("CatalogExtraction", back_populates="catalog", cascade="all, delete-orphan")
+    pricing_records = relationship("VariantPricing", back_populates="source_catalog")
+
+    __table_args__ = (
+        # Exactly one CONFIRMED catalog per company. PostgreSQL-compatible partial
+        # unique index; mirrored for SQLite. Enum is persisted by NAME, hence 'CONFIRMED'.
+        Index(
+            "uq_one_confirmed_catalog_per_company", "company_id", unique=True,
+            postgresql_where=text("status = 'CONFIRMED'"),
+            sqlite_where=text("status = 'CONFIRMED'"),
+        ),
+    )
 
 
 # ===== البيانات المستخرجة (Preview & Confirm) =====
@@ -122,6 +189,17 @@ class CatalogExtraction(Base):
     extracted_price = Column(Float, nullable=True)
     extracted_features = Column(JSON, nullable=True)
 
+    # ----- Coating extraction semantics -----
+    # extracted_coating: raw/normalised coating text as found in the source (if any).
+    # coating_id: resolved Coating row when coating_extraction_status == RESOLVED.
+    # coating_extraction_status: RESOLVED vs EXPLICIT_NONE vs NOT_FOUND - the last two
+    #   are deliberately distinct (source said "no coating" vs source said nothing).
+    extracted_coating = Column(String(100), nullable=True)
+    coating_id = Column(Integer, ForeignKey("coatings.id"), nullable=True)
+    coating_extraction_status = Column(Enum(CoatingExtractionStatus), nullable=True)
+    coating_confidence = Column(Float, nullable=True)
+    coating_review_notes = Column(Text, nullable=True)
+
     # حالة التأكيد
     status = Column(String(20), default="pending")  # pending, confirmed, rejected, modified
     reviewed_by = Column(String(100), nullable=True)
@@ -134,6 +212,7 @@ class CatalogExtraction(Base):
     reviewed_at = Column(DateTime, nullable=True)
 
     catalog = relationship("Catalog", back_populates="extractions")
+    coating = relationship("Coating")
 
 
 # ===== نماذج العدسات =====
@@ -172,11 +251,28 @@ class LensVariant(Base):
 
     material = Column(Enum(MaterialType), nullable=False)
     index_value = Column(Float, nullable=False)
+    # DEPRECATED / NON-AUTHORITATIVE as of Phase 1. Authoritative commercial
+    # availability lives on VariantPricing.availability. Retained temporarily
+    # because the matcher and legacy PDF import still read/write it. New
+    # commercial CRUD must never use this column.
     availability = Column(Enum(LensAvailability), nullable=False, default=LensAvailability.STOCK)
 
     # التصميم
-    design_type = Column(Enum(DesignType), default=DesignType.SPHERICAL)
-    is_aspherical = Column(Boolean, default=False)  # للبحث السريع
+    # design_type = optical geometry / type ONLY (see DesignType).
+    # NOT NULL: this is an optical identity dimension of uq_variant_identity; a NULL
+    # here would let two otherwise-identical variants bypass the unique constraint
+    # on PostgreSQL (NULLs compare distinct). Safe existing default preserved.
+    design_type = Column(
+        Enum(DesignType), nullable=False, default=DesignType.SPHERICAL
+    )
+    # NOT NULL for the same reason. Safe existing default preserved.
+    is_aspherical = Column(Boolean, nullable=False, default=False)  # للبحث السريع
+    # design_variant = commercial / manufacturing design line, e.g.
+    #   "Free Form", "High Definition", "Core", "Advance", "Premium", "D Type", "KT Type".
+    #   This is the authoritative destination for commercial "Free Form".
+    design_variant = Column(String(50), nullable=True)
+    # color_variant = commercial colour / tint line, e.g. "Clear", "Transmatic/G/B".
+    color_variant = Column(String(50), nullable=True)
 
     price = Column(Float, nullable=False)
     currency = Column(String(10), default="USD")
@@ -189,11 +285,117 @@ class LensVariant(Base):
 
     lens_model = relationship("LensModel", back_populates="variants")
     power_ranges = relationship("PowerRange", back_populates="variant", cascade="all, delete-orphan")
+    # NO delete / delete-orphan cascade: historical and current commercial pricing
+    # must NEVER be destroyed because a variant is deleted. The VariantPricing ->
+    # LensVariant FK is ON DELETE RESTRICT and passive_deletes=True lets the
+    # database refuse the parent delete instead of SQLAlchemy touching (or NULLing
+    # the NOT NULL) child rows. A variant with pricing history cannot be hard-deleted.
+    pricing_records = relationship(
+        "VariantPricing", back_populates="variant", passive_deletes=True
+    )
 
     __table_args__ = (
         Index('idx_variant_model_material', 'lens_model_id', 'material'),
         Index('idx_variant_model_index', 'lens_model_id', 'index_value'),
         Index('idx_variant_aspherical', 'is_aspherical'),
+        # Minimum safe variant identity. Preserves every optical distinction already
+        # representable on this table (model + material + index + geometry +
+        # aspherical flag) and adds the two commercial axes. Nullable commercial
+        # axes are made deterministic with COALESCE; identity comparison is
+        # case/whitespace-insensitive via lower(trim(...)) while the stored value
+        # keeps its display casing.
+        Index(
+            "uq_variant_identity",
+            text("lens_model_id"),
+            text("material"),
+            text("index_value"),
+            text("design_type"),
+            text("is_aspherical"),
+            text("lower(trim(coalesce(design_variant, '')))"),
+            text("lower(trim(coalesce(color_variant, '')))"),
+            unique=True,
+        ),
+    )
+
+
+# ===== التسعير التجاري (append-only) =====
+class VariantPricing(Base):
+    """Commercial catalog pricing for a variant (+ optional coating).
+
+    Append-only history. A row with effective_to IS NULL is the *current* price
+    for its (variant, coating, availability, power_scope, market_scope) tuple.
+    Superseding a price closes the old row (sets effective_to) and inserts a new
+    one. There is deliberately no public manual update/delete path.
+    """
+    __tablename__ = "variant_pricing"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # ON DELETE RESTRICT: a LensVariant that still has pricing history cannot be
+    # hard-deleted. variant_id stays required.
+    variant_id = Column(
+        Integer, ForeignKey("lens_variants.id", ondelete="RESTRICT"),
+        nullable=False, index=True,
+    )
+    coating_id = Column(Integer, ForeignKey("coatings.id"), nullable=True, index=True)
+
+    # STOCK / RX only - never BOTH (enum has no BOTH; CHECK enforces it at the DB).
+    availability = Column(Enum(PricingAvailability), nullable=False)
+
+    # Catalog price for exactly ONE pair (both lenses). Exact fixed-point money -
+    # PostgreSQL NUMERIC(12,2); SQLite round-trips 2dp Decimals exactly via the
+    # scale-aware result processor. Never Float (binary rounding drift on sums,
+    # markups, currency formatting, and "did the price change?" comparisons).
+    price_pair = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="EGP", server_default="EGP")
+
+    source_catalog_id = Column(Integer, ForeignKey("catalogs.id"), nullable=False)
+    source_extraction_id = Column(Integer, ForeignKey("catalog_extractions.id"), nullable=True)
+
+    effective_from = Column(DateTime, nullable=False, default=datetime.utcnow)
+    effective_to = Column(DateTime, nullable=True)
+
+    # Optional narrowing scopes (nullable). Part of the "current price" identity.
+    power_scope = Column(String(50), nullable=True)
+    market_scope = Column(String(50), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    variant = relationship("LensVariant", back_populates="pricing_records")
+    coating = relationship("Coating")
+    source_catalog = relationship("Catalog", back_populates="pricing_records")
+    source_extraction = relationship("CatalogExtraction")
+    # NO delete cascade. The PowerRange -> VariantPricing FK is ON DELETE RESTRICT;
+    # a pricing row that still has power ranges cannot be hard-deleted, and its
+    # ranges are never silently cascaded away.
+    power_ranges = relationship(
+        "PowerRange", back_populates="pricing", passive_deletes=True
+    )
+
+    __table_args__ = (
+        # No BOTH at the pricing level (enum is persisted by NAME).
+        CheckConstraint(
+            "availability IN ('STOCK', 'RX')", name="ck_variant_pricing_availability"
+        ),
+        # Zero-length / inverted effective intervals are invalid.
+        CheckConstraint(
+            "effective_to IS NULL OR effective_from < effective_to",
+            name="ck_variant_pricing_effective_interval",
+        ),
+        # At most one CURRENT price per commercial identity. COALESCE gives the
+        # nullable axes deterministic values so NULLs collide as expected.
+        Index(
+            "uq_variant_pricing_current",
+            text("variant_id"),
+            text("coalesce(coating_id, -1)"),
+            text("availability"),
+            text("coalesce(power_scope, '')"),
+            text("coalesce(market_scope, '')"),
+            unique=True,
+            postgresql_where=text("effective_to IS NULL"),
+            sqlite_where=text("effective_to IS NULL"),
+        ),
+        Index("idx_variant_pricing_lookup", "variant_id", "coating_id", "effective_to"),
     )
 
 
@@ -204,6 +406,12 @@ class PowerRange(Base):
     id = Column(Integer, primary_key=True, index=True)
     lens_model_id = Column(Integer, ForeignKey("lens_models.id"), nullable=False)
     variant_id = Column(Integer, ForeignKey("lens_variants.id"), nullable=True)
+    # A PowerRange cannot exist without a commercial price. A VariantPricing row
+    # may legitimately have zero PowerRanges (typical for RX). ON DELETE RESTRICT:
+    # commercial pricing that still has ranges cannot be hard-deleted.
+    pricing_id = Column(
+        Integer, ForeignKey("variant_pricing.id", ondelete="RESTRICT"), nullable=False
+    )
 
     sph_min = Column(Float, nullable=False)
     sph_max = Column(Float, nullable=False)
@@ -224,12 +432,14 @@ class PowerRange(Base):
 
     lens_model = relationship("LensModel", back_populates="power_ranges")
     variant = relationship("LensVariant", back_populates="power_ranges")
+    pricing = relationship("VariantPricing", back_populates="power_ranges")
 
     __table_args__ = (
         Index('idx_power_sph', 'sph_min', 'sph_max'),
         Index('idx_power_cyl', 'cyl_min', 'cyl_max'),
         Index('idx_power_add', 'add_min', 'add_max'),
         Index('idx_power_variant', 'variant_id', 'sph_min', 'sph_max'),
+        Index('idx_power_pricing', 'pricing_id'),
     )
 
     @validates('sph_min', 'sph_max')
