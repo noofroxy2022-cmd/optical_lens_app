@@ -366,11 +366,16 @@ class LensFilters(BaseModel):
     index_value: Optional[float] = None
     min_index: Optional[float] = None
     max_index: Optional[float] = None
-    availability: Optional[LensAvailability] = None
+    # commercial filters -> resolved against the CURRENT VariantPricing row,
+    # never against legacy LensVariant.price / .availability
+    availability: Optional[LensAvailability] = None      # STOCK / RX (BOTH = no filter)
+    max_price: Optional[float] = None                    # compared to VariantPricing.price_pair
+    coating: Optional[str] = None                        # coating code on the pricing row
+    market_scope: Optional[str] = None                   # generic catalog market key (e.g. egypt / out_of_egypt)
+    # optical filters (unchanged)
     design_type: Optional[DesignType] = None
     prefer_aspherical: Optional[bool] = None
     features: Optional[List[str]] = None
-    max_price: Optional[float] = None
     company_id: Optional[int] = None
     is_active: Optional[bool] = True
 
@@ -387,11 +392,26 @@ class LensMatchResult(BaseModel):
     variant: LensVariantResponse
     match_score: float = Field(..., ge=0, le=100)
     reason: str
+    # matched PowerRange for a STOCK candidate (belongs to `source_pricing_id`);
+    # None for RX made-to-order without an explicit range
     power_range: Optional[PowerRangeResponse] = None
     is_recommended: bool = True
     index_recommended: bool = False
     aspherical_recommended: bool = False
     stock_available: bool = True
+    # ----- authoritative commercial data (from the CURRENT VariantPricing) -----
+    availability: str = "rx"                     # "stock" / "rx"
+    price_pair: Decimal
+    currency: str = "EGP"
+    coating_id: Optional[int] = None
+    coating_code: Optional[str] = None
+    coating_name: Optional[str] = None
+    market_scope: Optional[str] = None
+    power_scope: Optional[str] = None
+    design_variant: Optional[str] = None
+    color_variant: Optional[str] = None
+    source_pricing_id: int
+    source_catalog_id: Optional[int] = None
 
 class MatchResponse(BaseModel):
     prescription: PrescriptionResponse

@@ -9,8 +9,14 @@
 5. ADD Support: توجيه Progressive/Bifocal
 """
 from typing import List, Optional, Tuple
-from sqlalchemy.orm import Session, joinedload
+from decimal import Decimal
+from sqlalchemy.orm import Session, joinedload, selectinload
 from app import models, schemas
+
+
+def _norm_scope(value: Optional[str]) -> str:
+    """Deterministic key for a nullable market/power scope string."""
+    return (value or "").strip().lower()
 
 
 class TranspositionEngine:
@@ -182,24 +188,34 @@ class LensMatcherFinal:
         self,
         lens_model: models.LensModel,
         variant: models.LensVariant,
-        power_range: models.PowerRange,
+        pricing: models.VariantPricing,
+        power_range: Optional[models.PowerRange],
         prescription: models.Prescription,
         filters: Optional[schemas.LensFilters] = None,
         prefer_stock: bool = True,
         prefer_aspherical: bool = True
     ) -> float:
-        """حساب درجة المطابقة (0-100)"""
+        """حساب درجة المطابقة (0-100).
+
+        Commercial inputs (availability, price) come ONLY from `pricing`
+        (VariantPricing), never from the legacy LensVariant columns.
+        `power_range` is None for RX made-to-order without an explicit range.
+        """
         score = 0.0
         max_sph = max(abs(prescription.od_sph), abs(prescription.os_sph))
         max_cyl = max(abs(prescription.od_cyl or 0), abs(prescription.os_cyl or 0))
 
         # 1. دقة نطاق القوة (30%)
-        sph_center = (power_range.sph_min + power_range.sph_max) / 2
-        sph_range = power_range.sph_max - power_range.sph_min
-        od_dist = abs(prescription.od_sph - sph_center)
-        os_dist = abs(prescription.os_sph - sph_center)
-        avg_dist = (od_dist + os_dist) / 2
-        power_score = max(0, 30 * (1 - avg_dist / (sph_range / 2))) if sph_range > 0 else (30 if avg_dist < 0.5 else 0)
+        if power_range is not None:
+            sph_center = (power_range.sph_min + power_range.sph_max) / 2
+            sph_range = power_range.sph_max - power_range.sph_min
+            od_dist = abs(prescription.od_sph - sph_center)
+            os_dist = abs(prescription.os_sph - sph_center)
+            avg_dist = (od_dist + os_dist) / 2
+            power_score = max(0, 30 * (1 - avg_dist / (sph_range / 2))) if sph_range > 0 else (30 if avg_dist < 0.5 else 0)
+        else:
+            # RX made-to-order: no discrete range to score against
+            power_score = 18.0
         score += power_score
 
         # 2. Index مناسب (20%)
@@ -217,14 +233,9 @@ class LensMatcherFinal:
         elif need_aspherical and not variant.is_aspherical:
             score += 5   # يحتاج لكن غير متوفر
 
-        # 4. التوفر (15%)
+        # 4. التوفر (15%) - authoritative availability is on VariantPricing
         if prefer_stock:
-            if variant.availability == models.LensAvailability.STOCK:
-                score += 15
-            elif variant.availability == models.LensAvailability.BOTH:
-                score += 12
-            else:
-                score += 6
+            score += 15 if pricing.availability == models.PricingAvailability.STOCK else 8
         else:
             score += 15
 
@@ -236,9 +247,9 @@ class LensMatcherFinal:
             feature_score = (matched / len(filters.features)) * 10
         score += feature_score
 
-        # 6. السعر (7%)
-        if filters and filters.max_price:
-            score += 7 if variant.price <= filters.max_price else 0
+        # 6. السعر (7%) - authoritative price is VariantPricing.price_pair (Decimal)
+        if filters and filters.max_price is not None:
+            score += 7 if pricing.price_pair <= Decimal(str(filters.max_price)) else 0
         else:
             score += 7
 
@@ -250,6 +261,103 @@ class LensMatcherFinal:
 
         return min(100, max(0, round(score, 1)))
 
+    # ----- helpers -------------------------------------------------------------
+    def _best_matching_range(
+        self, ranges: List[models.PowerRange], prescription: models.Prescription
+    ) -> Optional[models.PowerRange]:
+        """Return the covering PowerRange closest to the prescription, or None."""
+        best = None
+        best_dist = None
+        for pr in ranges:
+            od_valid, _ = self.check_power_range(pr, prescription, "od")
+            os_valid, _ = self.check_power_range(pr, prescription, "os")
+            if not (od_valid and os_valid):
+                continue
+            center = (pr.sph_min + pr.sph_max) / 2
+            dist = abs(prescription.od_sph - center) + abs(prescription.os_sph - center)
+            if best_dist is None or dist < best_dist:
+                best, best_dist = pr, dist
+        return best
+
+    def _passes_commercial_and_optical_filters(
+        self,
+        variant: models.LensVariant,
+        lens_model: models.LensModel,
+        pricing: models.VariantPricing,
+        filters: Optional[schemas.LensFilters],
+    ) -> bool:
+        if not filters:
+            return True
+        # optical / structural
+        if filters.material and variant.material != filters.material:
+            return False
+        if filters.index_value and abs(variant.index_value - filters.index_value) > 0.01:
+            return False
+        if filters.min_index and variant.index_value < filters.min_index:
+            return False
+        if filters.max_index and variant.index_value > filters.max_index:
+            return False
+        if filters.design_type and variant.design_type != filters.design_type:
+            return False
+        if filters.prefer_aspherical and not variant.is_aspherical:
+            return False
+        if filters.category and lens_model.category != filters.category:
+            return False
+        if filters.company_id and lens_model.company_id != filters.company_id:
+            return False
+        # commercial -> VariantPricing only
+        if filters.availability is not None and filters.availability != schemas.LensAvailability.BOTH:
+            if pricing.availability.value != filters.availability.value:
+                return False
+        if filters.max_price is not None and pricing.price_pair > Decimal(str(filters.max_price)):
+            return False
+        if filters.coating:
+            code = (pricing.coating.code if pricing.coating else "")
+            if code.strip().lower() != filters.coating.strip().lower():
+                return False
+        if filters.market_scope:
+            if _norm_scope(pricing.market_scope) != _norm_scope(filters.market_scope):
+                return False
+        return True
+
+    def _current_pricing_candidates(
+        self, db: Session, filters: Optional[schemas.LensFilters]
+    ) -> List[models.VariantPricing]:
+        """Every CURRENT (effective_to IS NULL) VariantPricing row on an active
+        variant/model/company, eagerly loaded to avoid N+1."""
+        query = (
+            db.query(models.VariantPricing)
+            .join(models.LensVariant, models.VariantPricing.variant_id == models.LensVariant.id)
+            .join(models.LensModel, models.LensVariant.lens_model_id == models.LensModel.id)
+            .join(models.Company, models.LensModel.company_id == models.Company.id)
+            .filter(
+                models.VariantPricing.effective_to.is_(None),   # CURRENT ONLY - never history
+                models.LensVariant.is_active == True,
+                models.LensModel.is_active == True,
+                models.LensModel.is_deleted == False,
+                models.Company.is_active == True,
+                models.Company.is_deleted == False,
+            )
+            .options(
+                joinedload(models.VariantPricing.variant)
+                .joinedload(models.LensVariant.lens_model)
+                .joinedload(models.LensModel.company),
+                joinedload(models.VariantPricing.coating),
+                selectinload(models.VariantPricing.power_ranges),
+                joinedload(models.VariantPricing.variant)
+                .selectinload(models.LensVariant.power_ranges),
+                joinedload(models.VariantPricing.variant)
+                .joinedload(models.LensVariant.lens_model)
+                .selectinload(models.LensModel.variants),
+                joinedload(models.VariantPricing.variant)
+                .joinedload(models.LensVariant.lens_model)
+                .selectinload(models.LensModel.power_ranges),
+            )
+        )
+        if filters and filters.company_id:
+            query = query.filter(models.LensModel.company_id == filters.company_id)
+        return query.all()
+
     def match_lenses(
         self,
         db: Session,
@@ -259,107 +367,101 @@ class LensMatcherFinal:
         prefer_aspherical: bool = True
     ) -> Tuple[List[schemas.LensMatchResult], int, int, str, str]:
         """
-        مطابقة الوصفة
+        مطابقة الوصفة - candidates come from CURRENT VariantPricing only.
 
         Returns: (results, stock_count, rx_count, index_rec, aspherical_rec)
         """
-        results = []
-        stock_count = 0
-        rx_count = 0
-
         max_sph = max(abs(prescription.od_sph), abs(prescription.os_sph))
         max_cyl = max(abs(prescription.od_cyl or 0), abs(prescription.os_cyl or 0))
-
-        # التوصيات
         recommended_index, index_desc = self.recommender.recommend_index(max_sph)
         need_aspherical, aspherical_desc = self.recommender.recommend_aspherical(max_sph, max_cyl)
 
-        # جلب العدسات
-        query = db.query(models.LensModel).options(
-            joinedload(models.LensModel.company),
-            joinedload(models.LensModel.variants).joinedload(models.LensVariant.power_ranges)
-        ).join(models.Company).filter(
-            models.Company.is_active == True,
-            models.Company.is_deleted == False,
-            models.LensModel.is_active == True,
-            models.LensModel.is_deleted == False,
-        )
+        # 1) gather (pricing, variant, model, matched_range, is_stock) candidates
+        raw = []
+        for pricing in self._current_pricing_candidates(db, filters):
+            variant = pricing.variant
+            if variant is None or not variant.is_active:
+                continue
+            lens_model = variant.lens_model
+            if not self._passes_commercial_and_optical_filters(variant, lens_model, pricing, filters):
+                continue
 
-        if filters:
-            if filters.company_id:
-                query = query.filter(models.LensModel.company_id == filters.company_id)
-            if filters.category:
-                query = query.filter(models.LensModel.category == filters.category)
+            own_ranges = list(pricing.power_ranges)          # ONLY ranges of THIS pricing row
+            is_stock = pricing.availability == models.PricingAvailability.STOCK
 
-        lens_models = query.all()
+            if is_stock:
+                matched = self._best_matching_range(own_ranges, prescription)
+                if matched is None:
+                    continue                                  # STOCK needs its own covering range
+                raw.append((pricing, variant, lens_model, matched, True))
+            else:
+                if own_ranges:
+                    matched = self._best_matching_range(own_ranges, prescription)
+                    if matched is None:
+                        continue                              # RX with explicit limits that don't cover
+                    raw.append((pricing, variant, lens_model, matched, False))
+                else:
+                    raw.append((pricing, variant, lens_model, None, False))   # RX made-to-order
 
-        for lens_model in lens_models:
-            for variant in lens_model.variants:
-                if not variant.is_active:
-                    continue
+        # 2) STOCK-over-RX suppression, grouped by (variant, coating, market_scope)
+        stock_groups = {
+            (p.variant_id, p.coating_id, _norm_scope(p.market_scope))
+            for (p, _v, _m, _r, is_stock) in raw if is_stock
+        }
+        kept = [
+            c for c in raw
+            if c[4] or (c[0].variant_id, c[0].coating_id, _norm_scope(c[0].market_scope)) not in stock_groups
+        ]
 
-                # فلترة
-                if filters:
-                    if filters.material and variant.material != filters.material:
-                        continue
-                    if filters.index_value and abs(variant.index_value - filters.index_value) > 0.01:
-                        continue
-                    if filters.min_index and variant.index_value < filters.min_index:
-                        continue
-                    if filters.max_index and variant.index_value > filters.max_index:
-                        continue
-                    if filters.availability and variant.availability != filters.availability:
-                        continue
-                    if filters.design_type and variant.design_type != filters.design_type:
-                        continue
-                    if filters.prefer_aspherical is not None:
-                        if filters.prefer_aspherical and not variant.is_aspherical:
-                            continue
-                    if filters.max_price and variant.price > filters.max_price:
-                        continue
+        # 3) build results
+        results: List[schemas.LensMatchResult] = []
+        for pricing, variant, lens_model, matched_range, is_stock in kept:
+            score = self.calculate_match_score(
+                lens_model, variant, pricing, matched_range,
+                prescription, filters, prefer_stock, prefer_aspherical
+            )
+            reason = self._build_reason(
+                lens_model, variant, pricing, matched_range, prescription, score,
+                recommended_index, need_aspherical
+            )
+            results.append(schemas.LensMatchResult(
+                lens_model=schemas.LensModelResponse.model_validate(lens_model),
+                variant=schemas.LensVariantResponse.model_validate(variant),
+                match_score=score,
+                reason=reason,
+                power_range=(
+                    schemas.PowerRangeResponse.model_validate(matched_range)
+                    if matched_range is not None else None
+                ),
+                is_recommended=score >= 60,
+                index_recommended=abs(variant.index_value - recommended_index) < 0.1,
+                aspherical_recommended=bool(variant.is_aspherical and need_aspherical),
+                stock_available=is_stock,
+                availability=pricing.availability.value,
+                price_pair=pricing.price_pair,
+                currency=pricing.currency,
+                coating_id=pricing.coating_id,
+                coating_code=(pricing.coating.code if pricing.coating else None),
+                coating_name=(pricing.coating.name if pricing.coating else None),
+                market_scope=pricing.market_scope,
+                power_scope=pricing.power_scope,
+                design_variant=variant.design_variant,
+                color_variant=variant.color_variant,
+                source_pricing_id=pricing.id,
+                source_catalog_id=pricing.source_catalog_id,
+            ))
 
-                # التحقق من نطاقات القوة
-                for power_range in variant.power_ranges:
-                    od_valid, _ = self.check_power_range(power_range, prescription, "od")
-                    os_valid, _ = self.check_power_range(power_range, prescription, "os")
+        # 4) sort: optical quality, then STOCK before RX, then cheaper current price
+        results.sort(key=lambda r: (-r.match_score, 0 if r.availability == "stock" else 1, r.price_pair))
 
-                    if od_valid and os_valid:
-                        score = self.calculate_match_score(
-                            lens_model, variant, power_range,
-                            prescription, filters, prefer_stock, prefer_aspherical
-                        )
-
-                        reason = self._build_reason(lens_model, variant, power_range, prescription, score, 
-                                                    recommended_index, need_aspherical)
-
-                        result = schemas.LensMatchResult(
-                            lens_model=schemas.LensModelResponse.model_validate(lens_model),
-                            variant=schemas.LensVariantResponse.model_validate(variant),
-                            match_score=score,
-                            reason=reason,
-                            power_range=schemas.PowerRangeResponse.model_validate(power_range),
-                            is_recommended=score >= 60,
-                            index_recommended=abs(variant.index_value - recommended_index) < 0.1,
-                            aspherical_recommended=variant.is_aspherical and need_aspherical,
-                            stock_available=variant.availability in [models.LensAvailability.STOCK, models.LensAvailability.BOTH]
-                        )
-
-                        results.append(result)
-
-                        if variant.availability in [models.LensAvailability.STOCK, models.LensAvailability.BOTH]:
-                            stock_count += 1
-                        if variant.availability in [models.LensAvailability.RX, models.LensAvailability.BOTH]:
-                            rx_count += 1
-
-        results.sort(key=lambda x: x.match_score, reverse=True)
-
+        stock_count = sum(1 for r in results if r.availability == "stock")
+        rx_count = sum(1 for r in results if r.availability == "rx")
         return results, stock_count, rx_count, index_desc, aspherical_desc
 
-    def _build_reason(self, lens_model, variant, power_range, prescription, score, 
+    def _build_reason(self, lens_model, variant, pricing, power_range, prescription, score,
                       rec_index, need_aspherical):
-        """بناء رسالة توصية"""
+        """بناء رسالة توصية - commercial facts come from `pricing` (VariantPricing)."""
         reasons = []
-        max_sph = max(abs(prescription.od_sph), abs(prescription.os_sph))
 
         if score >= 90:
             reasons.append("⭐ مطابقة ممتازة")
@@ -368,30 +470,47 @@ class LensMatcherFinal:
         elif score >= 60:
             reasons.append("✓ مطابقة مقبولة")
 
-        # Index
         if abs(variant.index_value - rec_index) < 0.1:
             reasons.append(f"Index {variant.index_value} مثالي")
 
-        # Aspherical
         if variant.is_aspherical and need_aspherical:
             reasons.append("✓ Aspherical للقوة العالية")
 
-        # التوفر
-        avail_map = {
-            models.LensAvailability.STOCK: "📦 متوفر فوراً",
-            models.LensAvailability.RX: "⏱ يحتاج تصنيع",
-            models.LensAvailability.BOTH: "📦 متوفر Stock & RX"
-        }
-        reasons.append(avail_map.get(variant.availability, ""))
+        # commercial design / colour lines
+        if variant.design_variant:
+            reasons.append(f"تصميم: {variant.design_variant}")
+        if variant.color_variant:
+            reasons.append(f"لون: {variant.color_variant}")
 
-        # ميزات
+        # availability - authoritative from VariantPricing
+        if pricing.availability == models.PricingAvailability.STOCK:
+            if power_range is not None:
+                reasons.append(
+                    f"📦 STOCK ضمن النطاق [{power_range.sph_min}, {power_range.sph_max}]"
+                )
+            else:
+                reasons.append("📦 STOCK")
+        else:
+            reasons.append("⏱ RX - يحتاج تصنيع")
+
+        # coating
+        if pricing.coating is not None:
+            reasons.append(f"طلاء: {pricing.coating.name}")
+
+        # market
+        if pricing.market_scope:
+            reasons.append(f"سوق: {pricing.market_scope}")
+
+        # price - VariantPricing.price_pair (Decimal), never LensVariant.price
+        reasons.append(f"السعر: {pricing.price_pair} {pricing.currency} / زوج")
+
         features = lens_model.features or []
         if features:
             feature_names = {
                 "anti_reflective": "AR",
                 "photochromic": "Photo",
                 "blue_light_filter": "Blue Light",
-                "uv_protection": "UV"
+                "uv_protection": "UV",
             }
             feature_list = [feature_names.get(f, f) for f in features[:3]]
             reasons.append(f"ميزات: {', '.join(feature_list)}")
