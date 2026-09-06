@@ -2,8 +2,9 @@
 CRUD النهائي - يدعم Preview & Confirm + Transposition
 """
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_
-from datetime import datetime
+from sqlalchemy import and_, or_, func
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import List, Optional
 from app import models, schemas
 
@@ -452,7 +453,15 @@ def close_company_current_pricing(
     Returns the number of rows closed.
     """
     stamp = effective_to or datetime.utcnow()
-    rows = (
+    rows = _company_current_pricing_rows(db, company_id)
+    for row in rows:
+        row.effective_to = stamp
+    db.commit()
+    return len(rows)
+
+
+def _company_current_pricing_rows(db: Session, company_id: int) -> List[models.VariantPricing]:
+    return (
         db.query(models.VariantPricing)
         .join(models.LensVariant, models.VariantPricing.variant_id == models.LensVariant.id)
         .join(models.LensModel, models.LensVariant.lens_model_id == models.LensModel.id)
@@ -462,7 +471,448 @@ def close_company_current_pricing(
         )
         .all()
     )
-    for row in rows:
-        row.effective_to = stamp
+
+
+# ===== Catalog processing status (parser/processing state, NOT the lifecycle) =====
+def update_catalog_status(db: Session, catalog_id: int, status: str, errors: Optional[str] = None):
+    catalog = get_catalog(db, catalog_id)
+    if not catalog:
+        return None
+    catalog.processing_status = status
+    if errors is not None:
+        catalog.processing_errors = errors
     db.commit()
-    return len(rows)
+    db.refresh(catalog)
+    return catalog
+
+
+# ===== Phase 2: commercial import / confirmation ================================
+class CommercialValidationError(Exception):
+    """Raised when a catalog cannot be commercially confirmed. Carries every
+    reason found (the whole catalog is blocked, never partially applied)."""
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        super().__init__("; ".join(str(e) for e in self.errors))
+
+
+def _fmt_scope_num(value) -> str:
+    return f"{float(value):+.2f}"
+
+
+def build_power_scope(
+    sph_min=None, sph_max=None, cyl_min=None, cyl_max=None, add_min=None, add_max=None
+) -> Optional[str]:
+    """Canonical, deterministic power-scope key (single source of truth).
+
+    - Built only from normalised numeric range bounds, never from raw strings.
+    - Order-independent (min/max swapped) and precision-independent
+      (-6, -6.0, -6.00 all collapse to the same token).
+    - Returns None when no real range is represented (e.g. RX with no
+      manufacturing limits).
+    """
+    def real(a, b):
+        vals = [v for v in (a, b) if v is not None]
+        return bool(vals) and any(float(v) != 0.0 for v in vals)
+
+    parts = []
+    if real(sph_min, sph_max):
+        lo, hi = sorted((float(sph_min or 0.0), float(sph_max or 0.0)))
+        parts.append(f"sph:{_fmt_scope_num(lo)}/{_fmt_scope_num(hi)}")
+    if real(cyl_min, cyl_max):
+        lo, hi = sorted((float(cyl_min or 0.0), float(cyl_max or 0.0)))
+        parts.append(f"cyl:{_fmt_scope_num(lo)}/{_fmt_scope_num(hi)}")
+    if real(add_min, add_max):
+        lo, hi = sorted((float(add_min or 0.0), float(add_max or 0.0)))
+        parts.append(f"add:{_fmt_scope_num(lo)}/{_fmt_scope_num(hi)}")
+    return "|".join(parts) if parts else None
+
+
+def to_price_decimal(value) -> Decimal:
+    """Safe conversion of an extracted price (float/str/Decimal) to a 2dp Decimal
+    at the commercial-write boundary. Never rounds a real value and never does
+    commercial arithmetic - it only pads scale (19.9 -> 19.90) and rejects
+    anything not representable as an exact catalog price."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("missing price")
+    try:
+        d = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"invalid price {value!r}")
+    if not d.is_finite() or d <= 0:
+        raise ValueError(f"non-positive price {value!r}")
+    if d.as_tuple().exponent < -2:
+        raise ValueError(f"price {value!r} has more than 2 decimal places")
+    d = d.quantize(Decimal("0.01"))
+    if len(d.as_tuple().digits) > 12:
+        raise ValueError(f"price {value!r} exceeds NUMERIC(12,2)")
+    return d
+
+
+def _coerce_enum(enum_cls, value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, enum_cls):
+        return value
+    s = str(value).strip()
+    for member in enum_cls:
+        if s == member.value or s.lower() in (member.value.lower(), member.name.lower()):
+            return member
+    return default
+
+
+def _norm(text_value) -> str:
+    return (text_value or "").strip().lower()
+
+
+def _prepare_extraction_row(ext) -> dict:
+    """Build the effective commercial view of one extraction and validate it.
+
+    Returns {"row": <dict>} on success or {"errors": [...]} on failure. Human
+    review lives in ext.modified_data (overlaying the parser's extracted_* fields);
+    the commercial identity axes design_variant / color_variant / market_scope /
+    design_type / is_aspherical come only from that review overlay.
+    """
+    tag = f"extraction {ext.id}"
+    errors = []
+    md = ext.modified_data or {}
+
+    if ext.status != "confirmed":
+        return {"errors": [f"{tag}: not review-approved (status={ext.status!r})"]}
+
+    cs = ext.coating_extraction_status
+    coating_ref = None
+    if cs is None or cs == models.CoatingExtractionStatus.NOT_FOUND:
+        errors.append(f"{tag}: coating unresolved (not_found)")
+    elif cs == models.CoatingExtractionStatus.RESOLVED:
+        if ext.coating_id is not None:
+            coating_ref = ("id", int(ext.coating_id))
+        elif ext.extracted_coating:
+            coating_ref = ("code", str(ext.extracted_coating).strip())
+        else:
+            errors.append(f"{tag}: coating RESOLVED but no coating_id / extracted_coating")
+    # EXPLICIT_NONE -> coating_ref stays None (valid)
+
+    avail_raw = _norm(md.get("availability") or ext.extracted_availability)
+    availability = None
+    if avail_raw in ("stock", "rx"):
+        availability = (
+            models.PricingAvailability.STOCK if avail_raw == "stock"
+            else models.PricingAvailability.RX
+        )
+    else:
+        errors.append(f"{tag}: invalid commercial availability {avail_raw!r} (STOCK/RX only)")
+
+    price = None
+    try:
+        price = to_price_decimal(md.get("price", ext.extracted_price))
+    except ValueError as ve:
+        errors.append(f"{tag}: {ve}")
+
+    sph_min = md.get("sph_min", ext.sph_min)
+    sph_max = md.get("sph_max", ext.sph_max)
+    cyl_min = md.get("cyl_min", ext.cyl_min)
+    cyl_max = md.get("cyl_max", ext.cyl_max)
+    add_min = md.get("add_min", ext.add_min)
+    add_max = md.get("add_max", ext.add_max)
+    power_scope = build_power_scope(sph_min, sph_max, cyl_min, cyl_max, add_min, add_max)
+    has_range = power_scope is not None
+    if availability == models.PricingAvailability.STOCK and not has_range:
+        errors.append(f"{tag}: STOCK requires PowerRange data (no numeric sph/cyl/add range)")
+
+    name = (md.get("name") or ext.extracted_name or "").strip()
+    if not name:
+        errors.append(f"{tag}: missing product name")
+
+    material_enum = _coerce_enum(
+        models.MaterialType, md.get("material") or ext.extracted_material or "CR39"
+    )
+    if material_enum is None:
+        errors.append(f"{tag}: invalid material {md.get('material') or ext.extracted_material!r}")
+
+    idx_raw = md.get("index", ext.extracted_index)
+    idx = None
+    if idx_raw is None:
+        errors.append(f"{tag}: missing index")
+    else:
+        try:
+            idx = round(float(idx_raw), 2)
+        except (TypeError, ValueError):
+            errors.append(f"{tag}: invalid index {idx_raw!r}")
+
+    design_type_enum = _coerce_enum(
+        models.DesignType, md.get("design_type"), models.DesignType.SPHERICAL
+    )
+    if design_type_enum is None:
+        errors.append(f"{tag}: invalid design_type {md.get('design_type')!r}")
+    is_asph = bool(md.get("is_aspherical", False))
+    category_enum = _coerce_enum(
+        models.LensCategory, md.get("category") or ext.extracted_category,
+        models.LensCategory.SINGLE_VISION,
+    )
+    design_variant = md.get("design_variant") or None
+    color_variant = md.get("color_variant") or None
+    market_scope = md.get("market_scope") or None
+
+    if errors:
+        return {"errors": errors}
+
+    return {
+        "row": {
+            "ext": ext,
+            "name": name,
+            "category_enum": category_enum,
+            "material_enum": material_enum,
+            "idx": idx,
+            "design_type_enum": design_type_enum,
+            "is_asph": is_asph,
+            "design_variant": design_variant,
+            "color_variant": color_variant,
+            "market_scope": market_scope,
+            "coating_ref": coating_ref,
+            "availability": availability,
+            "price": price,
+            "power_scope": power_scope,
+            "has_range": has_range,
+            "sph_min": sph_min, "sph_max": sph_max,
+            "cyl_min": cyl_min, "cyl_max": cyl_max,
+            "add_min": add_min, "add_max": add_max,
+            "identity": (
+                name.strip().lower(), material_enum.value, idx,
+                design_type_enum.value, is_asph,
+                _norm(design_variant), _norm(color_variant),
+                coating_ref or ("none",), availability.value,
+                power_scope or "", _norm(market_scope),
+            ),
+        }
+    }
+
+
+def _resolve_or_create_variant(db: Session, model, row) -> models.LensVariant:
+    dv_n = _norm(row["design_variant"])
+    cv_n = _norm(row["color_variant"])
+    existing = (
+        db.query(models.LensVariant)
+        .filter(
+            models.LensVariant.lens_model_id == model.id,
+            models.LensVariant.material == row["material_enum"],
+            models.LensVariant.index_value == row["idx"],
+            models.LensVariant.design_type == row["design_type_enum"],
+            models.LensVariant.is_aspherical == row["is_asph"],
+            func.lower(func.trim(func.coalesce(models.LensVariant.design_variant, ""))) == dv_n,
+            func.lower(func.trim(func.coalesce(models.LensVariant.color_variant, ""))) == cv_n,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+    variant = models.LensVariant(
+        lens_model_id=model.id,
+        material=row["material_enum"],
+        index_value=row["idx"],
+        design_type=row["design_type_enum"],
+        is_aspherical=row["is_asph"],
+        design_variant=row["design_variant"],
+        color_variant=row["color_variant"],
+        # legacy / NON-AUTHORITATIVE mirror; commercial availability is on VariantPricing
+        availability=(
+            models.LensAvailability.RX
+            if row["availability"] == models.PricingAvailability.RX
+            else models.LensAvailability.STOCK
+        ),
+        price=0.0,          # legacy column; real money lives on VariantPricing.price_pair
+        currency="EGP",
+    )
+    db.add(variant)
+    db.flush()
+    return variant
+
+
+def confirm_catalog_commercial(
+    db: Session, catalog_id: int, reviewed_by: str = "admin", _fault_hook=None
+) -> dict:
+    """The ONE commercial writer.
+
+    Validates every extraction in the catalog first (whole catalog blocked on any
+    failure), then performs a single atomic transaction: close all current company
+    pricing, resolve/create model+variant+coating, append new VariantPricing (+
+    PowerRange only for real ranges), mark this catalog CONFIRMED and the previous
+    confirmed catalog SUPERSEDED. Any failure rolls the whole thing back.
+    """
+    catalog = get_catalog(db, catalog_id)
+    if catalog is None:
+        raise CommercialValidationError([f"catalog {catalog_id}: not found"])
+    if catalog.status == models.CatalogStatus.CONFIRMED:
+        raise CommercialValidationError([f"catalog {catalog_id}: already CONFIRMED"])
+
+    company_id = catalog.company_id
+    considered = [
+        e for e in get_extractions_by_catalog(db, catalog_id) if e.status != "rejected"
+    ]
+
+    # ---------- PHASE A: validate everything, collect every reason ----------
+    errors: List[str] = []
+    if not considered:
+        errors.append(f"catalog {catalog_id}: no confirmable extractions")
+
+    prepared: List[dict] = []
+    identity_seen: dict = {}
+    for ext in considered:
+        result = _prepare_extraction_row(ext)
+        if "errors" in result:
+            errors.extend(result["errors"])
+            continue
+        row = result["row"]
+        ident = row["identity"]
+        if ident in identity_seen:
+            errors.append(
+                f"extraction {ext.id}: duplicate commercial identity in catalog "
+                f"(collides with extraction {identity_seen[ident]})"
+            )
+            continue
+        identity_seen[ident] = ext.id
+        prepared.append(row)
+
+    if errors:
+        raise CommercialValidationError(errors)
+
+    # ---------- PHASE B: one atomic write ----------
+    try:
+        now = datetime.utcnow()
+
+        # 1. close ALL current pricing for this company
+        current_rows = _company_current_pricing_rows(db, company_id)
+        if current_rows:
+            latest = max(
+                (r.effective_from for r in current_rows if r.effective_from), default=now
+            )
+            if now <= latest:
+                now = latest + timedelta(microseconds=1)
+        for r in current_rows:
+            r.effective_to = now
+        db.flush()
+
+        model_cache: dict = {}
+        coating_cache: dict = {}
+        written: List[models.VariantPricing] = []
+
+        for row in prepared:
+            # 2a. resolve / create LensModel
+            mkey = row["name"].strip().lower()
+            model = model_cache.get(mkey)
+            if model is None:
+                model = (
+                    db.query(models.LensModel)
+                    .filter(
+                        models.LensModel.company_id == company_id,
+                        func.lower(func.trim(models.LensModel.name)) == mkey,
+                    )
+                    .first()
+                )
+            if model is None:
+                model = models.LensModel(
+                    company_id=company_id, name=row["name"], category=row["category_enum"]
+                )
+                db.add(model)
+                db.flush()
+            model_cache[mkey] = model
+
+            # 2b. resolve / create LensVariant (full commercial identity)
+            variant = _resolve_or_create_variant(db, model, row)
+
+            # 2c. resolve / create Coating
+            coating_id = None
+            if row["coating_ref"] is not None:
+                kind, val = row["coating_ref"]
+                if kind == "id":
+                    coating_id = val
+                else:
+                    ckey = val.strip().lower()
+                    coating = coating_cache.get(ckey)
+                    if coating is None:
+                        coating = (
+                            db.query(models.Coating)
+                            .filter(func.lower(models.Coating.code) == ckey)
+                            .first()
+                        )
+                    if coating is None:
+                        coating = models.Coating(code=val, name=val)
+                        db.add(coating)
+                        db.flush()
+                    coating_cache[ckey] = coating
+                    coating_id = coating.id
+
+            # 3. new current VariantPricing (Decimal price, verbatim)
+            pricing = models.VariantPricing(
+                variant_id=variant.id,
+                coating_id=coating_id,
+                availability=row["availability"],
+                price_pair=row["price"],
+                currency="EGP",
+                source_catalog_id=catalog.id,
+                source_extraction_id=row["ext"].id,
+                effective_from=now,
+                effective_to=None,
+                power_scope=row["power_scope"],
+                market_scope=row["market_scope"],
+            )
+            db.add(pricing)
+            db.flush()
+
+            # 4/5/6. PowerRange ONLY for real ranges (STOCK always, RX iff limits given)
+            if row["has_range"]:
+                db.add(
+                    models.PowerRange(
+                        lens_model_id=model.id,
+                        variant_id=variant.id,
+                        pricing_id=pricing.id,
+                        sph_min=float(row["sph_min"]) if row["sph_min"] is not None else 0.0,
+                        sph_max=float(row["sph_max"]) if row["sph_max"] is not None else 0.0,
+                        cyl_min=float(row["cyl_min"]) if row["cyl_min"] is not None else -10.0,
+                        cyl_max=float(row["cyl_max"]) if row["cyl_max"] is not None else 0.0,
+                        add_min=row["add_min"],
+                        add_max=row["add_max"],
+                    )
+                )
+                db.flush()
+
+            row["ext"].reviewed_by = reviewed_by
+            row["ext"].reviewed_at = now
+            written.append(pricing)
+
+        # 8. previous CONFIRMED catalog(s) -> SUPERSEDED (before we claim CONFIRMED,
+        #    so the "one confirmed catalog per company" index is never violated)
+        superseded = (
+            db.query(models.Catalog)
+            .filter(
+                models.Catalog.company_id == company_id,
+                models.Catalog.status == models.CatalogStatus.CONFIRMED,
+                models.Catalog.id != catalog.id,
+            )
+            .all()
+        )
+        for prev in superseded:
+            prev.status = models.CatalogStatus.SUPERSEDED
+        db.flush()
+
+        # 7. mark this catalog CONFIRMED
+        catalog.status = models.CatalogStatus.CONFIRMED
+        catalog.confirmed_at = now
+        catalog.confirmed_by = reviewed_by
+        db.flush()
+
+        if _fault_hook is not None:
+            _fault_hook(db)
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "catalog_id": catalog.id,
+        "status": models.CatalogStatus.CONFIRMED.value,
+        "priced_rows": len(written),
+        "closed_previous_current": len(current_rows),
+        "superseded_catalogs": [c.id for c in superseded],
+    }

@@ -72,13 +72,32 @@ def delete_lens_model(model_id: int, db: Session = Depends(get_db)):
 # ===== Variants =====
 @router.post("/{model_id}/variants", response_model=schemas.LensVariantResponse)
 def create_variant(model_id: int, variant: schemas.LensVariantCreate, db: Session = Depends(get_db)):
-    """إضافة متغير لنموذج"""
+    """Structural creation of a LensVariant ONLY.
+
+    Legacy commercial fields on the request body are NOT persisted as authoritative
+    data: `price` / `currency` are forced to a non-authoritative placeholder and a
+    request carrying a real price (> 0) is rejected; `availability` is forced to the
+    deprecated/non-commercial default. Authoritative commercial pricing (and the
+    LensVariant.availability mirror) is written solely by
+    POST /pdf-import/bulk-confirm/{catalog_id}.
+    """
     model = crud.get_lens_model(db, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="النموذج غير موجود")
 
+    if variant.price and float(variant.price) > 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Writing a commercial price through LensVariant is disabled. "
+                   "Commercial pricing is created only via "
+                   "POST /pdf-import/bulk-confirm/{catalog_id}.",
+        )
+
     variant_data = variant.model_dump()
     variant_data["lens_model_id"] = model_id
+    variant_data["price"] = 0.0                                   # legacy column, non-authoritative
+    variant_data["currency"] = "EGP"
+    variant_data["availability"] = schemas.LensAvailability.STOCK  # deprecated / non-commercial
     return crud.create_lens_variant(db, schemas.LensVariantCreate(**variant_data))
 
 
@@ -89,16 +108,21 @@ def list_variants(model_id: int, db: Session = Depends(get_db)):
 
 
 # ===== Power Ranges =====
-@router.post("/{model_id}/power-ranges", response_model=schemas.PowerRangeResponse)
-def create_power_range(model_id: int, power_range: schemas.PowerRangeCreate, db: Session = Depends(get_db)):
-    """إضافة نطاق قوة"""
-    model = crud.get_lens_model(db, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="النموذج غير موجود")
+@router.post("/{model_id}/power-ranges", deprecated=True)
+def create_power_range(model_id: int, db: Session = Depends(get_db)):
+    """DISABLED.
 
-    range_data = power_range.model_dump()
-    range_data["lens_model_id"] = model_id
-    return crud.create_power_range(db, schemas.PowerRangeCreate(**range_data))
+    A PowerRange is part of authoritative commercial pricing: every range must be
+    linked to a VariantPricing row. Ranges are therefore created only through
+    catalog bulk confirmation (POST /pdf-import/bulk-confirm/{catalog_id}). This
+    endpoint used to create orphan ranges and now returns a deterministic 410
+    instead of crashing on the required pricing link.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Endpoint disabled. Commercial PowerRanges are created only via "
+               "POST /pdf-import/bulk-confirm/{catalog_id}.",
+    )
 
 
 @router.get("/{model_id}/power-ranges", response_model=List[schemas.PowerRangeResponse])
