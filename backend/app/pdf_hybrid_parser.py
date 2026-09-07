@@ -167,6 +167,10 @@ class ExtractedPowerRange:
     review_status: str = "pending"          # pending / needs_review
     review_reasons: List[str] = field(default_factory=list)
     notes: Optional[str] = None
+    # row-level product/family text read from an explicit "Type"/"Model" column
+    # (e.g. "Hilux 1.5" -> "Hilux"); used only when relationship evidence cannot
+    # resolve the family. Never a pricing-section heading.
+    model_hint: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
@@ -235,8 +239,23 @@ class PDFHybridParser:
     STOCK_COLORS = [(0, 150, 0), (50, 200, 50), (100, 255, 100)]  # أخضر
     RX_COLORS = [(200, 50, 50), (255, 100, 100), (255, 150, 150)]  # أحمر
 
-    def __init__(self, use_vision: bool = True):
+    # The only accepted value for `dual_price_semantics`. It says the caller has
+    # HUMAN-CONFIRMED, for the catalog being parsed, that an unlabelled two-value
+    # price cell reads LEFT = wholesale/private, RIGHT = retail/customer price.
+    # There is no other accepted value and NOTHING infers this from company
+    # name / filename / page / text / geometry / price magnitude.
+    DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL = "left_wholesale_right_retail"
+
+    def __init__(self, use_vision: bool = True, dual_price_semantics: Optional[str] = None):
         self.use_vision = use_vision
+        # None (default) => an unlabelled multi-value price cell is NEVER guessed:
+        # the row gets no commercial price and is flagged for review. A typo is
+        # coerced to None so a mistake can never silently enable price selection.
+        self.dual_price_semantics = (
+            dual_price_semantics
+            if dual_price_semantics == self.DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL
+            else None
+        )
         self.client = None
         if use_vision and vision is not None:
             try:
@@ -285,15 +304,33 @@ class PDFHybridParser:
                         rows = self._rows_from_section(header, matrix, sect)
                         if not rows:
                             continue
+                        # a reconstruction may report that it could not PROVE how
+                        # several prices under one identity split - carry that
+                        # review reason onto every row it produced.
+                        rr = overrides.get("review_reason")
+                        if rr:
+                            for r in rows:
+                                r.flag_review(rr)
+                        # NOTE: wholesale / raw multi-price values are deliberately
+                        # NOT written to any row field (notes, review reason, ...).
+                        # They stay only on the transient reconstruction result
+                        # (overrides dict) as internal source evidence and are
+                        # discarded here - they must never reach a persisted row,
+                        # a commercial price, a PowerRange, VariantPricing, or the
+                        # matcher / customer-facing output.
                         # family is resolved PER ROW from relationship evidence
                         # (availability/category/market/commercial terms) - never
-                        # from the pricing-section heading, never from price.
+                        # from the pricing-section heading, never from price. An
+                        # explicit per-row "Type"/"Model" column value is catalog
+                        # relationship evidence and is used as a last resort.
                         buckets: Dict[str, list] = {}
                         for r in rows:
                             fam = self._resolve_family(
                                 sect,
                                 {t for t in (r.coating, r.color_variant, r.design_variant) if t},
                             )
+                            if fam is None and getattr(r, "model_hint", None):
+                                fam = r.model_hint
                             if fam is None:
                                 fam = self.UNRESOLVED_FAMILY
                                 r.flag_review("ambiguous/unresolved product family")
@@ -553,6 +590,18 @@ class PDFHybridParser:
         except Exception:
             pass
 
+        # B. sparse merged-cell ruled tables: a ruled table whose header row
+        #    carries real column labels but whose body is mostly empty because
+        #    identity cells (Type / Coating) are vertically merged over many
+        #    Stock-Range sub-rows, and one Type+Coating can carry several prices
+        #    split by an interior horizontal rule. Structural trigger only - no
+        #    company / page / product-name / price constants.
+        try:
+            for ov, hdr, mat in self._reconstruct_merged_price_groups(page):
+                candidates.append((self._matrix_score(mat) + 5, ov, hdr, mat))
+        except Exception as e:
+            self.errors.append(f"merged-price reconstruct: {e}")
+
         # C. text-position tables
         if not candidates:
             try:
@@ -574,6 +623,12 @@ class PDFHybridParser:
                     candidates.append((self._matrix_score(mat) + 1, ov, hdr, mat))
         except Exception as e:
             self.errors.append(f"geometry reconstruct: {e}")
+
+        # a page proven to be a merged-price ruled table is authoritative for
+        # that page - discard the fragment / whole-page-geometry candidates so
+        # they cannot re-emit the same rows without identity.
+        if any(ov.get("_merged") for _, ov, _, _ in candidates):
+            candidates = [c for c in candidates if c[1].get("_merged")]
 
         # de-dup: keep the highest-scoring candidate per (header sig, row sig)
         best = {}
@@ -724,6 +779,291 @@ class PDFHybridParser:
         matrix.extend(rows)
         return header, matrix
 
+    # ---------------------------------------------------- merged-cell ruled tables
+    def _reconstruct_merged_price_groups(self, page):
+        """Rebuild SPARSE merged-cell ruled tables into per-price subgroups.
+
+        Shape handled: a ruled table with a real header row (Type | Coating |
+        Price | Stock Range and similar) whose body rows are almost empty
+        because the Type/Coating identity is one tall merged cell spanning many
+        Stock-Range sub-rows, and one Type+Coating can carry several explicit
+        prices. Commercial rule: a price difference means at least one
+        price-driving dimension differs, so the prices are never merged. When an
+        interior horizontal rule (typically dotted / partial-width) separates
+        them it is used directly; otherwise, if the Stock-Range lines partition
+        cleanly by geometry around each price they are split on that evidence;
+        if the split cannot be proven the rows are kept needs_review. Nothing
+        here is keyed to a company, page or product name.
+
+        Returns [(overrides, header_rows, matrix), ...] for the existing
+        section pipeline. overrides carry '_merged': True and, when relevant,
+        'review_reason'.
+        """
+        try:
+            tables = page.find_tables() or []
+        except Exception:
+            return []
+        out = []
+        for tbl in tables:
+            try:
+                out.extend(self._merged_table_to_subgroups(page, tbl))
+            except Exception as e:
+                self.errors.append(f"merged-price table: {e}")
+        return out
+
+    @staticmethod
+    def _is_sparse_merged_grid(grid, hdr) -> bool:
+        """True when a ruled table has real header labels but its Type/Coating
+        identity and its Stock-Range cells are fully merged, so pdfplumber's
+        per-cell text is unusable and geometry reconstruction is required.
+
+        The test is STRUCTURAL, not a fixed filled-cell threshold: every
+        non-empty body cell must sit in a numeric PRICE column and at least one
+        non-price column must be blank on every row. This stays true whether a
+        row carries one price value or two side-by-side (the updated HOYA
+        layout prints a wholesale and a retail number in the Price column)."""
+        if not grid or len(grid) < 3:
+            return False
+        labels = [_clean(c) for c in hdr]
+        if sum(1 for c in labels if c) < 3:
+            return False
+        data = [r for r in grid[1:] if r is not None]
+        if len(data) < 2:
+            return False
+        ncol = max(len(labels), max((len(r) for r in data), default=0))
+
+        def col_vals(i):
+            return [_clean(r[i]) for r in data if i < len(r) and _clean(r[i])]
+
+        price_cols = {i for i in range(ncol)
+                      if col_vals(i) and all(_is_pure_number(v) for v in col_vals(i))}
+        if not price_cols:
+            return False
+        for r in data:                       # every filled cell is a price cell
+            for i, c in enumerate(r):
+                if _clean(c) and i not in price_cols:
+                    return False
+        # ... and >=1 non-price column is fully merged (blank on every row)
+        return any(i not in price_cols and not col_vals(i) for i in range(ncol))
+
+    def _merged_table_to_subgroups(self, page, tbl):
+        try:
+            bx0, bt, bx1, bb = tbl.bbox
+        except Exception:
+            return []
+        W = bx1 - bx0
+        if W <= 0:
+            return []
+        try:
+            grid = tbl.extract()
+        except Exception:
+            return []
+        if not grid or len(grid) < 3:
+            return []
+        hdr = [_clean(c) for c in grid[0]]
+        if not self._is_sparse_merged_grid(grid, hdr):
+            return []
+        data = [r for r in grid[1:] if r is not None]
+
+        def role(lbl):
+            l = lbl.lower()
+            if (re.search(r"\btype\b|\bmodel\b|\bproduct\b", l) and "design" not in l
+                    and "geometr" not in l and not self._classify_design(lbl)):
+                return "type"
+            if re.search(r"coat", l):
+                return "coating"
+            if re.search(r"\bprice\b|\bcost\b|/pair|\bamount\b", l):
+                return "price"
+            if re.search(r"\brange\b|\bsph\b|\bpower\b|\bcyl\b", l):
+                return "range"
+            return "other"
+
+        roles = [role(h) for h in hdr]
+        if "price" not in roles or "range" not in roles:
+            return []
+        if "type" not in roles and "coating" not in roles:
+            return []
+        i_price = roles.index("price")
+        i_range = roles.index("range")
+
+        hcells = tbl.rows[0].cells if tbl.rows else []
+        bands = []
+        for i in range(len(hdr)):
+            c = hcells[i] if i < len(hcells) else None
+            if c:
+                bands.append((c[0], c[2]))
+            else:
+                bands.append((bx0 + i * W / len(hdr), bx0 + (i + 1) * W / len(hdr)))
+        price_band, range_band = bands[i_price], bands[i_range]
+        ident_x1 = min(price_band[0], range_band[0])
+        hdr_bottom = max((c[3] for c in hcells if c), default=bt + 1)
+
+        try:
+            words = [w for w in page.extract_words()
+                     if bt <= w["top"] <= bb and w["x0"] < bx1 - 1
+                     and (w["x0"] + w["x1"]) / 2 >= bx0 - 2]
+        except Exception:
+            return []
+        body = [w for w in words if w["top"] > hdr_bottom + 1]
+
+        def xc(w):
+            return (w["x0"] + w["x1"]) / 2
+
+        def cluster(ws):
+            ws = sorted(ws, key=lambda w: (round(w["top"], 1), w["x0"]))
+            lines = []
+            for w in ws:
+                if lines and abs(w["top"] - lines[-1][0]) <= 3.5:
+                    lines[-1][1].append(w)
+                else:
+                    lines.append([w["top"], [w]])
+            return [(t, _clean(" ".join(x["text"] for x in sorted(g, key=lambda x: x["x0"]))))
+                    for t, g in lines]
+
+        ident_lines = [(t, s) for t, s in cluster([w for w in body if xc(w) < ident_x1]) if s]
+
+        # Price column. A single number on a line IS the commercial price. When
+        # a line carries 2+ numbers the meaning cannot be read from geometry -
+        # only when the caller EXPLICITLY passed the human-confirmed
+        # `left_wholesale_right_retail` policy for this catalog may the
+        # right-hand number be taken as retail (left = wholesale, source only).
+        # Without that policy the cell is left UNRESOLVED: no price, review
+        # flagged, raw values kept as internal evidence. No magnitude heuristic,
+        # ever.
+        pnums = sorted(
+            ((round(w["top"], 1), xc(w), _clean(w["text"])) for w in body
+             if price_band[0] <= xc(w) < range_band[0] and _is_pure_number(w["text"])),
+            key=lambda p: (p[0], p[1]),
+        )
+        lr_policy = (self.dual_price_semantics
+                     == self.DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL)
+        price_toks = []          # (top, retail_or_None, wholesale_or_None, raw_or_None)
+        k = 0
+        while k < len(pnums):
+            j = k
+            while j + 1 < len(pnums) and abs(pnums[j + 1][0] - pnums[k][0]) <= 3.5:
+                j += 1
+            vals = [t[2] for t in pnums[k:j + 1]]        # x-sorted numbers on the line
+            if len(vals) == 1:
+                price_toks.append((pnums[k][0], vals[0], None, None))
+            elif lr_policy:
+                price_toks.append((pnums[k][0], vals[-1], vals[0], " ".join(vals)))
+            else:
+                price_toks.append((pnums[k][0], None, None, " ".join(vals)))
+            k = j + 1
+
+        range_lines = [(t, s) for t, s in cluster([w for w in body if xc(w) >= range_band[0]]) if s]
+        if not price_toks:
+            return []
+
+        rules = {}
+        srcs = [getattr(page, "lines", []) or [],
+                [e for e in (getattr(page, "edges", []) or []) if e.get("orientation") == "h"]]
+        for src in srcs:
+            for ln in src:
+                y = ln.get("top")
+                if y is None or not (hdr_bottom + 2 < y < bb - 1):
+                    continue
+                if (ln.get("x1", 0) - ln.get("x0", 0)) < 20:
+                    continue
+                d = ln.get("dash")
+                dashed = (isinstance(d, (list, tuple)) and len(d) > 0
+                          and isinstance(d[0], (list, tuple)) and len(d[0]) > 0)
+                full = (ln["x0"] <= bx0 + 0.15 * W) and (ln["x1"] >= bx1 - 0.15 * W)
+                key = round(y, 1)
+                if dashed or (not full and ln["x0"] >= price_band[0] - 6):
+                    rules[key] = "sub"
+                elif full and key not in rules:
+                    rules[key] = "grp"
+        grp_ys = sorted(y for y, k in rules.items() if k == "grp")
+        sub_ys = sorted(y for y, k in rules.items() if k == "sub")
+
+        type_lbl = hdr[roles.index("type")] if "type" in roles else "Type"
+        coat_lbl = hdr[roles.index("coating")] if "coating" in roles else "Coating"
+        header4 = [type_lbl, coat_lbl, hdr[i_price], hdr[i_range]]
+        return self._build_price_subgroups(
+            header4, hdr_bottom, bb, ident_lines, price_toks, range_lines, grp_ys, sub_ys
+        )
+
+    def _build_price_subgroups(self, header4, y_top, y_bot, ident_lines, price_toks,
+                               range_lines, grp_ys, sub_ys):
+        """Pure geometry -> [(overrides, [header4], matrix)] .
+
+        ident_lines / range_lines : [(top, text), ...]
+        price_toks : [(top, retail)] | [(top, retail, wholesale)]
+                   | [(top, retail_or_None, wholesale_or_None, raw_or_None)]
+        grp_ys : full-width solid rule ys (Type/Coating boundaries)
+        sub_ys : partial/dotted rule ys (explicit price-subgroup boundaries)
+
+        Only a resolved RETAIL value is emitted into the matrix price cell
+        (consumed downstream as the commercial price). When retail is None
+        (an unlabelled multi-value cell with no confirmed semantics) the price
+        cell is left empty and the subgroup is flagged for review. WHOLESALE /
+        raw values are carried on the overrides dict as parser-local source
+        evidence ONLY - never a price field, never a second commercial row,
+        never a persisted note.
+        """
+        def _norm(e):
+            return (e[0], e[1],
+                    e[2] if len(e) > 2 else None,
+                    e[3] if len(e) > 3 else None)
+
+        norm = [_norm(e) for e in price_toks]
+
+        bounds = [y_top] + sorted(grp_ys) + [y_bot]
+        groups = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+        out = []
+        for gy0, gy1 in groups:
+            g_ident = [s for t, s in ident_lines if gy0 <= t < gy1]
+            g_prices = [(t, r, w, raw) for t, r, w, raw in norm if gy0 <= t < gy1]
+            g_ranges = [(t, s) for t, s in range_lines if gy0 <= t < gy1]
+            if not g_prices:
+                continue
+            gtype = g_ident[0] if g_ident else ""
+            gcoat = g_ident[1] if len(g_ident) > 1 else ""
+
+            g_subs = sorted(y for y in sub_ys if gy0 < y < gy1)
+            review_reason = None
+            if g_subs:
+                cut = [gy0] + g_subs + [gy1]
+            elif len(g_prices) > 1:
+                mids = [(g_prices[i][0] + g_prices[i + 1][0]) / 2
+                        for i in range(len(g_prices) - 1)]
+                cut = [gy0] + mids + [gy1]
+                if any(any(abs(t - m) <= 2.0 for m in mids) for t, _s in g_ranges):
+                    review_reason = ("multiple prices under one Type+Coating; the range "
+                                     "boundary could not be proven from catalog geometry")
+            else:
+                cut = [gy0, gy1]
+
+            for si in range(len(cut) - 1):
+                sy0, sy1 = cut[si], cut[si + 1]
+                s_entries = [(r, w, raw) for t, r, w, raw in g_prices if sy0 <= t < sy1]
+                s_ranges = [s for t, s in g_ranges if sy0 <= t < sy1]
+                if not s_entries:
+                    continue
+                retail, wholesale, raw = s_entries[0]
+                rr = review_reason
+                if retail is None:
+                    rr = ("multiple unlabelled price values require confirmed "
+                          "price semantics")
+                elif len({r for r, _w, _raw in s_entries if r is not None}) > 1:
+                    rr = "several distinct retail prices fell inside one pricing subgroup"
+                price_cell = retail if retail is not None else ""
+                rows = ([[gtype, gcoat, price_cell, rng] for rng in s_ranges]
+                        if s_ranges else [[gtype, gcoat, price_cell, ""]])
+                ov = {"_merged": True}
+                if retail is not None:
+                    ov["retail_source"] = retail
+                if wholesale:
+                    ov["wholesale_source"] = wholesale
+                if raw:
+                    ov["price_values_source"] = raw     # internal evidence only
+                if rr:
+                    ov["review_reason"] = rr
+                out.append((ov, [list(header4)], [list(header4)] + rows))
+        return out
+
     def _section_context(self, base: "ParserContext", overrides: dict) -> "ParserContext":
         c = ParserContext(
             index=base.index, availability=base.availability,
@@ -771,6 +1111,13 @@ class PDFHybridParser:
             elif re.search(r"\bcyl", hl):
                 m = re.search(r"cyl\s*-?\s*(\d+(?:\.\d+)?)", hl)
                 roles[i] = ("cyltier", float(m.group(1))) if m else "cyl"
+            elif re.search(r"\brange\b", hl):
+                roles[i] = "range"
+            elif (not dv and re.search(r"\btype\b|\bmodel\b|\bproduct\b", hl)
+                  and "design" not in hl and "geometr" not in hl):
+                # an explicit product/model column ("Type", "Model", "Product");
+                # NOT a design-name price column such as "D Type" / "Kt Type"
+                roles[i] = "model"
             elif dv:
                 # a design name in the header -> this column's cells ARE prices for
                 # that design, even if the word "Price" also bleeds into the header
@@ -808,6 +1155,13 @@ class PDFHybridParser:
         i_color = next((i for i, r in roles.items() if r == "color"), None)
         i_design = next((i for i, r in roles.items() if r == "design"), None)
         i_mat = next((i for i, r in roles.items() if r == "material"), None)
+        i_range = next((i for i, r in roles.items() if r == "range"), None)
+        i_model = next((i for i, r in roles.items() if r == "model"), None)
+        i_price_col = next((i for i, r in roles.items() if r == "price"), None)
+        # merged-cell mode: a Type/Model column plus a Stock-Range column. Blank
+        # identity / price cells on a row inherit the current group's values.
+        merged_mode = i_model is not None and i_range is not None
+        carry = {"model": "", "coat": "", "price": ""}
 
         section_text = " ".join(_clean(c).lower() for c in merged)
         out = []
@@ -819,6 +1173,17 @@ class PDFHybridParser:
             def cell(i):
                 return _clean(row[i]) if i is not None and i < len(row) else ""
 
+            if merged_mode:
+                if i_model is not None and not cell(i_model):
+                    row[i_model] = carry["model"]
+                if i_coat is not None and not cell(i_coat):
+                    row[i_coat] = carry["coat"]
+                if i_price_col is not None and not cell(i_price_col):
+                    row[i_price_col] = carry["price"]
+                carry["model"] = cell(i_model) if i_model is not None else carry["model"]
+                carry["coat"] = cell(i_coat) if i_coat is not None else carry["coat"]
+                carry["price"] = cell(i_price_col) if i_price_col is not None else carry["price"]
+
             label = cell(0)
             if self._is_addon_label(label) or self._is_addon_label(section_text) and "treatment" in section_text:
                 continue
@@ -826,9 +1191,13 @@ class PDFHybridParser:
                 continue
 
             idxv = self._extract_index(cell(i_index)) if i_index is not None else None
+            mdl_txt = cell(i_model) if i_model is not None else ""
+            mdl_idx = self._extract_index(mdl_txt) if mdl_txt else None
             if idxv:
                 last_index = idxv
-            index_value = idxv or last_index or ctx.index
+            elif mdl_idx:
+                last_index = mdl_idx
+            index_value = idxv or mdl_idx or last_index or ctx.index
 
             geo = self._classify_geometry(cell(i_design))
             dvar_ctx = self._classify_design(cell(i_design)) or ctx.design_variant
@@ -859,6 +1228,8 @@ class PDFHybridParser:
                 r.coating, r.coating_status, r.coating_confidence = coating, cstatus, cconf
                 if i_mat is not None and cell(i_mat):
                     r.material = cell(i_mat)
+                if i_model is not None:
+                    r.model_hint = self._family_from_type(mdl_txt) or None
                 if color_ambig:
                     r.flag_review("ambiguous colour value")
                 return r
@@ -931,6 +1302,29 @@ class PDFHybridParser:
                         emitted.append(r)
             else:
                 emitted = list(self._parse_table([merged, row], ctx))
+
+            # Stock-Range column: preserve the exact source text. Only a bare
+            # "a to b" / "+-a" cell is turned into a range by the existing
+            # _parse_range; a compound catalog grammar (e.g. "Sph (a To b) Cyl
+            # (c) <dia>") is kept verbatim in notes and left review-blocked -
+            # no sph/cyl values are fabricated here.
+            if i_range is not None:
+                rng_txt = cell(i_range)
+                if rng_txt:
+                    bare = re.fullmatch(
+                        r"[+\-]?\d+(?:\.\d+)?(?:\s*(?:to|~|/|-)\s*[+\-]?\d+(?:\.\d+)?)?",
+                        rng_txt.strip(), re.I,
+                    )
+                    parsed = self._parse_range(rng_txt) if bare else None
+                    for r in emitted:
+                        if r.has_range:
+                            continue
+                        if parsed:
+                            r.sph_min, r.sph_max = parsed
+                            r.has_range = True
+                        else:
+                            r.notes = ((r.notes + " | ") if r.notes else "") + rng_txt
+                            r.flag_review("unparsed stock range grammar")
 
             for r in emitted:
                 # a row must carry at least one piece of real commercial content;
@@ -1075,6 +1469,23 @@ class PDFHybridParser:
                 except:
                     continue
         return None
+
+    def _family_from_type(self, text) -> Optional[str]:
+        """Family/model name from an explicit 'Type'/'Model' cell:
+        'Hilux 1.5' -> 'Hilux', 'Nulux 1.67 (-)' -> 'Nulux',
+        'Nulux PNX 1.53' -> 'Nulux PNX'. Strips a trailing parenthetical, a
+        trailing +/- marker and a trailing refractive index (with anything
+        after it). Source text only - no product dictionary, no page/company
+        assumptions. The catalog value (e.g. 1.50) is read verbatim elsewhere;
+        this helper only removes it from the NAME."""
+        s = _clean(text)
+        if not s:
+            return None
+        s = re.sub(r"\s*\([^)]*\)\s*$", "", s)
+        s = re.sub(r"\s*[+\-]\s*$", "", s)
+        s = re.sub(r"\s*(?<![\d.])1\.\d{1,2}(?![\d]).*$", "", s)
+        s = _clean(s)
+        return s or None
 
     def _detect_availability_by_color(self, page) -> Optional[str]:
         """اكتشاف Stock/RX من ألوان الخلايا"""

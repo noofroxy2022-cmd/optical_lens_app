@@ -1057,3 +1057,555 @@ def test_catfix_F_matcher_category_filter_splits_pixel(parser, db):
     assert {r.lens_model.category for r in pr_res} == {models.LensCategory.PROGRESSIVE}
     assert all(r.availability == "rx" for r in pr_res)
     assert all(r.price_pair == _D("4000.00") for r in pr_res)
+
+
+# ===========================================================================
+# Generic merged-cell ruled table + per-price subgroup reconstruction
+# (Type | Coating | Price | Stock Range, merged identity, dotted subgroup rule)
+# ===========================================================================
+_HOYA = os.path.join(os.path.expanduser("~"), "Downloads", "Hoya_Price_List_2025.pdf")
+
+_H4 = ["Type", "Coating", "Price", "Stock Range"]
+
+
+def _sub(parser, *, ident, prices, ranges, grp_ys=(), sub_ys=(), y_top=0.0, y_bot=100.0):
+    return parser._build_price_subgroups(
+        list(_H4), y_top, y_bot, list(ident), list(prices), list(ranges),
+        sorted(grp_ys), sorted(sub_ys),
+    )
+
+
+def _rowset(matrix):
+    return {tuple(r) for r in matrix[1:]}
+
+
+# -- A. sparse merged-table structural trigger -------------------------------
+def test_mg_A_sparse_merged_grid_detected(parser):
+    sparse = [["Type", "Coating", "Price", "Stock Range"],
+              [None, "", "1350", None], [None, None, "1450", None],
+              [None, "", "3300", None]]
+    assert parser._is_sparse_merged_grid(sparse, sparse[0]) is True
+
+
+def test_mg_K_normal_full_table_not_triggered(parser):
+    full = [["Index", "Coating", "Price"],
+            ["1.5", "Astro", "700"], ["1.56", "Astro+", "900"]]
+    assert parser._is_sparse_merged_grid(full, full[0]) is False
+
+
+# -- B. solid full-width rule -> new Type/Coating group ---------------------
+def test_mg_B_solid_full_width_starts_new_group(parser):
+    subs = _sub(
+        parser,
+        ident=[(10, "Alpha 1.5"), (15, "CoatA"), (55, "Beta 1.6"), (60, "CoatB")],
+        prices=[(20, "700"), (70, "900")],
+        ranges=[(25, "r1"), (75, "r2")],
+        grp_ys=[50],
+    )
+    assert len(subs) == 2
+    a, b = subs[0][2], subs[1][2]
+    assert a[1][0] == "Alpha 1.5" and a[1][1] == "CoatA" and a[1][2] == "700"
+    assert b[1][0] == "Beta 1.6" and b[1][1] == "CoatB" and b[1][2] == "900"
+    # ranges did not cross the group boundary
+    assert _rowset(a) == {("Alpha 1.5", "CoatA", "700", "r1")}
+    assert _rowset(b) == {("Beta 1.6", "CoatB", "900", "r2")}
+
+
+# -- C/D/E/F/G. dotted partial rule -> price subgroups --------------------
+def _two_price_dotted(parser):
+    return _sub(
+        parser,
+        ident=[(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        prices=[(15, "1350"), (60, "1450")],
+        ranges=[(10, "Ra"), (25, "Rb"), (45, "Rc"), (55, "Rd")],
+        sub_ys=[40],
+    )
+
+
+def test_mg_C_dotted_partial_creates_subgroup(parser):
+    subs = _two_price_dotted(parser)
+    assert len(subs) == 2
+    assert {s[2][1][2] for s in subs} == {"1350", "1450"}
+
+
+def test_mg_D_same_type_coating_inherited_across_prices(parser):
+    subs = _two_price_dotted(parser)
+    for ov, hdr, mat in subs:
+        for row in mat[1:]:
+            assert row[0] == "Hilux 1.5" and row[1] == "Hi Vision Aqua"
+
+
+def test_mg_E_price_1350_owns_only_its_ranges(parser):
+    subs = _two_price_dotted(parser)
+    s1350 = next(m for _, _, m in subs if m[1][2] == "1350")
+    assert {r[3] for r in s1350[1:]} == {"Ra", "Rb"}
+
+
+def test_mg_F_price_1450_owns_only_its_ranges(parser):
+    subs = _two_price_dotted(parser)
+    s1450 = next(m for _, _, m in subs if m[1][2] == "1450")
+    assert {r[3] for r in s1450[1:]} == {"Rc", "Rd"}
+
+
+def test_mg_G_range_sets_disjoint(parser):
+    subs = _two_price_dotted(parser)
+    a = {r[3] for r in subs[0][2][1:]}
+    b = {r[3] for r in subs[1][2][1:]}
+    assert a and b and a.isdisjoint(b)
+
+
+# -- H. no dotted rule, multiple prices, clean geometric split ------------
+def test_mg_H_no_separator_multiple_prices_still_split(parser):
+    subs = _sub(
+        parser,
+        ident=[(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        prices=[(15, "1350"), (60, "1450")],
+        ranges=[(10, "a"), (20, "b"), (50, "c"), (70, "d")],  # clean around mid 37.5
+    )
+    assert len(subs) == 2
+    got = {m[1][2]: {r[3] for r in m[1:]} for _, _, m in subs}
+    assert got["1350"] == {"a", "b"} and got["1450"] == {"c", "d"}
+    assert got["1350"].isdisjoint(got["1450"])
+    assert all(not ov.get("review_reason") for ov, _, _ in subs)
+
+
+# -- I. multiple prices, boundary unprovable -> needs_review, no guessing --
+def test_mg_I_unprovable_split_flags_review_never_merges(parser):
+    subs = _sub(
+        parser,
+        ident=[(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        prices=[(15, "1350"), (60, "1450")],
+        ranges=[(10, "a"), (37, "amb"), (55, "d")],  # 'amb' sits on the 37.5 midline
+    )
+    assert len(subs) == 2                       # never merged into one price
+    assert all(ov.get("review_reason") for ov, _, _ in subs)
+    allr = [r[3] for _, _, m in subs for r in m[1:]]
+    assert len(allr) == len(set(allr))         # no range assigned to both prices
+
+
+# -- J. blank continuation inherits identity + price ---------------------
+def test_mg_J_blank_continuation_inherits(parser):
+    matrix = [list(_H4),
+              ["Hilux 1.5", "Hi Vision Aqua", "1350", "0.00 to -4.00"],
+              ["", "", "", "0.00 to -3.00"]]
+    rows = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))
+    assert len(rows) == 2
+    assert all(r.price == 1350.0 for r in rows)
+    assert all(r.model_hint == "Hilux" for r in rows)
+    assert all(r.coating == "Hi Vision Aqua" for r in rows)
+    assert rows[0].sph_min == -4.0 and rows[1].sph_min == -3.0   # bare ranges parse
+
+
+# -- K covered above (test_mg_K_normal_full_table_not_triggered) ---------
+def test_mg_K_normal_section_matrix_behaviour_unchanged(parser):
+    hdr = [["Index", "Coating", "Design", "Color", "Sph", "Cyl", "Price"]]
+    matrix = hdr + [
+        ["1.53", "Astro", "Spheric", "Clear", "0.00 To -6.00", "-2.00", "2500"],
+        ["1.56", "Astro+", "Aspheric", "Clear", "0.00 To -4.00", "-2.00", "4500"],
+    ]
+    rows = parser._rows_from_section(hdr, matrix, ParserContext(availability="stock", market="X"))
+    assert len(rows) == 2
+    assert {r.price for r in rows} == {2500.0, 4500.0}
+    assert rows[0].sph_min == -6.0 and rows[0].has_range
+    assert all(r.model_hint is None for r in rows)
+
+
+# -- M. "Hilux 1.5" -> family Hilux + index 1.50 from source text --------
+def test_mg_M_type_text_yields_family_and_index(parser):
+    assert parser._family_from_type("Hilux 1.5") == "Hilux"
+    assert parser._extract_index("Hilux 1.5") == 1.5          # 1.50, not 1.523
+    matrix = [list(_H4), ["Hilux 1.5", "Hi Vision Aqua", "1350", "Sph (0.00 To -4.00) Cyl (-2.00) 70"]]
+    r = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))[0]
+    assert r.model_hint == "Hilux"
+    assert r.index_value == 1.5
+
+
+# -- N. explicit price stays exact --------------------------------------
+def test_mg_N_explicit_price_exact(parser):
+    matrix = [list(_H4),
+              ["Nulux 1.74", "Hi Vision Meiryo", "16300", "Sph (0.00 To -10.00) Cyl (-2.00) 70"]]
+    r = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))[0]
+    assert r.price == 16300.0
+
+
+# -- O. unsupported Stock Range grammar -> no fabricated PowerRange ------
+def test_mg_O_compound_range_not_fabricated(parser):
+    matrix = [list(_H4),
+              ["Nulux 1.74", "Hi Vision Meiryo", "16300", "Sph (0.00 To -10.00) Cyl (-2.00) 70"]]
+    r = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))[0]
+    assert r.has_range is False
+    assert r.sph_min == 0.0 and r.sph_max == 0.0
+    assert r.cyl_min == -10.0 and r.cyl_max == 0.0          # dataclass default, untouched
+    assert "unparsed stock range grammar" in r.review_reasons
+    assert "Sph (0.00 To -10.00) Cyl (-2.00) 70" in (r.notes or "")
+
+
+# -- P. add-on recognition unchanged in merged mode --------------------
+def test_mg_P_addon_label_still_skipped(parser):
+    matrix = [list(_H4),
+              ["Hilux 1.5", "Hi Vision Aqua", "1350", "0.00 to -4.00"],
+              ["Blue Cut", "", "50", "0.00 to -2.00"]]
+    rows = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))
+    assert len(rows) == 1
+    assert rows[0].price == 1350.0
+
+
+# -- L. PIXEL real-catalog geometry behaviour unchanged ----------------
+@pytest.mark.skipif(not os.path.exists(_PIXEL), reason="real PIXEL catalog not present")
+def test_mg_L_pixel_catalog_unaffected(parser):
+    models = parser.parse_pdf(_PIXEL)
+    rows = [pr for m in models for pr in m.power_ranges]
+    assert len(rows) > 100
+    real_fams = {m.name for m in models if m.name != parser.UNRESOLVED_FAMILY}
+    assert real_fams and all(len(f) <= 24 for f in real_fams)
+    assert any(r.has_range for r in rows)
+    assert any(r.design_variant in ("Core", "Advance", "Premium", "Free Form", "High Definition")
+               for r in rows)
+
+
+# -- real HOYA page 4 only: merged reconstruction + subgroup ownership --
+@pytest.mark.skipif(not os.path.exists(_HOYA), reason="real HOYA catalog not present")
+def test_mg_real_hoya_page4_merged_price_groups(parser):
+    import pdfplumber
+    with pdfplumber.open(_HOYA) as pdf:
+        page = pdf.pages[3]
+        subs = parser._reconstruct_merged_price_groups(page)
+        cands = parser._extract_page_tables(page)
+
+    assert cands and all(ov.get("_merged") for ov, _, _ in cands)   # page is authoritative
+    prices = [m[1][2] for _, _, m in subs]
+    assert prices.count("1350") == 1 and prices.count("1450") == 1
+
+    m1350 = next(m for _, _, m in subs if m[1][2] == "1350")
+    m1450 = next(m for _, _, m in subs if m[1][2] == "1450")
+    assert m1350[1][0] == "Hilux 1.5" and m1350[1][1] == "Hi Vision Aqua"
+    assert m1450[1][0] == "Hilux 1.5" and m1450[1][1] == "Hi Vision Aqua"
+
+    r1350 = [r[3] for r in m1350[1:]]
+    r1450 = [r[3] for r in m1450[1:]]
+    assert r1350 == [
+        "Sph (0.00 To -4.00) Cyl (-2.00) 70",
+        "Sph (0.00 To +3.00) Cyl (+2.00) 65",
+        "Sph (0.00 To +4.00) Cyl (+2.00) 60",
+        "Sph (+0.25 To +1.75) Cyl (-2.00) 65",
+    ]
+    assert r1450 == [
+        "Sph (0.00 To -3.00) Cyl (-2.00) 70",
+        "Sph (0.00 To +1.00) Cyl (+3.00) 65",
+    ]
+    assert set(r1350).isdisjoint(set(r1450))
+
+    # downstream: Type -> family Hilux + index 1.50, price exact, no fabricated range
+    rows = []
+    for ov, hdr, mat in cands:
+        rows += parser._rows_from_section(hdr, mat, parser._section_context(ParserContext(), ov))
+    hil = [r for r in rows if r.model_hint == "Hilux" and r.price == 1350.0]
+    assert hil
+    assert all(r.index_value == 1.5 for r in hil)
+    assert all(r.has_range is False for r in hil)
+    assert all("unparsed stock range grammar" in r.review_reasons for r in hil)
+
+
+# ===========================================================================
+# UPDATED HOYA dual price column.  The meaning of two numeric price values in
+# one cell CANNOT be read from geometry.  Default => no price, needs_review.
+# Only an EXPLICIT, human-confirmed policy string lets the parser take the
+# right-hand value as retail (left = wholesale, source-evidence only).
+# ===========================================================================
+_HOYA_UPD = os.path.join(os.path.expanduser("~"), "Downloads",
+                         "Hoya_Price_List_2025_Updated.pdf")
+_LWRR = PDFHybridParser.DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL
+
+
+@pytest.fixture()
+def parser_lwrr():
+    return PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+
+
+def _dual(parser, *, retail1="1350", wh1="600", retail2="1450", wh2="650"):
+    # two price y-lines; dotted rule at y=40 splits the two PowerRange subgroups.
+    return parser._build_price_subgroups(
+        list(_H4), 0.0, 100.0,
+        [(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        [(15, retail1, wh1, f"{wh1} {retail1}"),
+         (60, retail2, wh2, f"{wh2} {retail2}")],
+        [(10, "Ra"), (25, "Rb"), (45, "Rc"), (55, "Rd")],
+        [], [40],
+    )
+
+
+def _dual_unresolved(parser):
+    # what _merged_table_to_subgroups produces with NO policy: retail=None
+    return parser._build_price_subgroups(
+        list(_H4), 0.0, 100.0,
+        [(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        [(15, None, None, "600 1350"), (60, None, None, "650 1450")],
+        [(10, "Ra"), (25, "Rb"), (45, "Rc"), (55, "Rd")],
+        [], [40],
+    )
+
+
+# -- structural trigger (unchanged) ------------------------------------------
+def test_mgu_trigger_updated_5col_grid(parser):
+    grid = [["Type", "Coating", "Price", "", "Stock Range"],
+            [None, "", "600", "1350", None],
+            [None, None, "650", "1450", None],
+            [None, "", "1500", "3300", None]]
+    assert parser._is_sparse_merged_grid(grid, grid[0]) is True
+    old = [["Type", "Coating", "Price", "Stock Range"],
+           [None, "", "1350", None], [None, None, "1450", None]]
+    assert parser._is_sparse_merged_grid(old, old[0]) is True
+    full = [["Index", "Coating", "Price"],
+            ["1.5", "Astro", "700"], ["1.56", "Astro+", "900"]]
+    assert parser._is_sparse_merged_grid(full, full[0]) is False
+
+
+# -- A. unlabelled dual price + NO policy -> price None, needs_review --------
+def test_mgu_A_no_policy_no_price_needs_review(parser):
+    assert parser.dual_price_semantics is None
+    subs = _dual_unresolved(parser)
+    assert len(subs) == 2
+    for ov, _hdr, mat in subs:
+        assert "retail_source" not in ov          # nothing selected
+        assert "wholesale_source" not in ov       # not labelled either
+        assert ov["price_values_source"] in ("600 1350", "650 1450")
+        assert ov["review_reason"] == (
+            "multiple unlabelled price values require confirmed price semantics")
+        assert {r[2] for r in mat[1:]} == {""}     # empty price cell
+
+
+def test_mgu_A2_no_policy_downstream_row_blocked(parser):
+    # through _rows_from_section + the parse_pdf review-reason application
+    subs = _dual_unresolved(parser)
+    rows = []
+    for ov, hdr, mat in subs:
+        rr = parser._rows_from_section(hdr, mat, parser._section_context(ParserContext(), ov))
+        for r in rr:
+            if ov.get("review_reason"):
+                r.flag_review(ov["review_reason"])
+        rows += rr
+    assert rows
+    assert all(r.price is None for r in rows)
+    assert all(r.review_status == "needs_review" for r in rows)
+    assert all("multiple unlabelled price values require confirmed price semantics"
+               in r.review_reasons for r in rows)
+    # no positional guess leaked anywhere
+    assert not any(v in (str(r.price), r.notes or "") for r in rows for v in ("600", "650"))
+
+
+# -- B/C/D. explicit policy -> right-hand token = retail -------------------
+def test_mgu_B_policy_two_source_values_captured(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    got = {(ov["retail_source"], ov.get("wholesale_source")) for ov, _, _ in subs}
+    assert got == {("1350", "600"), ("1450", "650")}
+
+
+def test_mgu_C_policy_commercial_price_is_retail(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    s1 = next(m for ov, _, m in subs if ov["retail_source"] == "1350")
+    assert {r[2] for r in s1[1:]} == {"1350"}
+    assert "600" not in {r[2] for r in s1[1:]}
+
+
+def test_mgu_D_policy_second_subgroup_retail_1450(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    s2 = next(m for ov, _, m in subs if ov["retail_source"] == "1450")
+    assert {r[2] for r in s2[1:]} == {"1450"}
+    assert "650" not in {r[2] for r in s2[1:]}
+
+
+# -- E. no max()/magnitude: 9999 40 + policy -> retail 40 -----------------
+def test_mgu_E_policy_no_magnitude_heuristic(parser_lwrr):
+    subs = parser_lwrr._build_price_subgroups(
+        list(_H4), 0.0, 100.0,
+        [(12, "X 1.5"), (30, "CoatX")],
+        [(15, "40", "9999", "9999 40")],     # right token 40 is retail, though smaller
+        [(10, "Ra")], [], [],
+    )
+    assert len(subs) == 1
+    ov, _hdr, mat = subs[0]
+    assert ov["retail_source"] == "40" and ov["wholesale_source"] == "9999"
+    assert {r[2] for r in mat[1:]} == {"40"}
+
+
+# -- F. same 9999 40 WITHOUT policy -> price None / needs_review ----------
+def test_mgu_F_no_policy_9999_40_unresolved(parser):
+    subs = parser._build_price_subgroups(
+        list(_H4), 0.0, 100.0,
+        [(12, "X 1.5"), (30, "CoatX")],
+        [(15, None, None, "9999 40")],
+        [(10, "Ra")], [], [],
+    )
+    assert len(subs) == 1
+    ov, _hdr, mat = subs[0]
+    assert "retail_source" not in ov and "wholesale_source" not in ov
+    assert ov["review_reason"] == (
+        "multiple unlabelled price values require confirmed price semantics")
+    assert {r[2] for r in mat[1:]} == {""}
+
+
+# -- G. single-price cell parses normally without any policy -------------
+def test_mgu_G_single_price_unaffected(parser):
+    subs = parser._build_price_subgroups(
+        list(_H4), 0.0, 100.0,
+        [(12, "Hilux 1.5"), (30, "Hi Vision Aqua")],
+        [(15, "1350", None, None)],          # single value = commercial price
+        [(10, "Ra"), (25, "Rb")], [], [],
+    )
+    assert len(subs) == 1
+    ov, _hdr, mat = subs[0]
+    assert ov["retail_source"] == "1350"
+    assert "review_reason" not in ov
+    assert {r[2] for r in mat[1:]} == {"1350"}
+    # legacy 2-tuple price_toks still accepted
+    subs2 = parser._build_price_subgroups(
+        list(_H4), 0.0, 100.0, [(12, "A"), (30, "B")], [(15, "700")],
+        [(10, "r")], [], [])
+    assert subs2[0][0]["retail_source"] == "700"
+
+
+# -- H. wholesale never written to pr.notes -----------------------------
+def test_mgu_H_wholesale_not_in_notes(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    rows = []
+    for ov, hdr, mat in subs:
+        rr = parser_lwrr._rows_from_section(
+            hdr, mat, parser_lwrr._section_context(ParserContext(), ov))
+        for r in rr:
+            if ov.get("review_reason"):
+                r.flag_review(ov["review_reason"])
+        rows += rr
+    assert rows
+    for r in rows:
+        assert "wholesale" not in (r.notes or "").lower()
+        assert "600" not in (r.notes or "") and "650" not in (r.notes or "")
+        assert not any("wholesale" in x.lower() for x in r.review_reasons)
+
+
+# -- I. no wholesale value in emitted commercial price rows -------------
+def test_mgu_I_no_wholesale_in_prices(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    prices = {r[2] for _, _, m in subs for r in m[1:]}
+    assert prices == {"1350", "1450"}
+    assert not ({"600", "650"} & prices)
+
+
+# -- J. merged geometry / dotted subgroup behaviour unchanged ----------
+def test_mgu_J_geometry_and_dotted_split_unchanged(parser_lwrr):
+    subs = _dual(parser_lwrr)
+    assert len(subs) == 2
+    for _ov, _hdr, mat in subs:
+        for row in mat[1:]:
+            assert row[0] == "Hilux 1.5" and row[1] == "Hi Vision Aqua"
+    a = {r[3] for r in subs[0][2][1:]}
+    b = {r[3] for r in subs[1][2][1:]}
+    assert a == {"Ra", "Rb"} and b == {"Rc", "Rd"} and a.isdisjoint(b)
+
+
+# -- real UPDATED HOYA page 4: DEFAULT parser -> fully review-blocked ---
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD),
+                    reason="real UPDATED HOYA catalog not present")
+def test_mgu_real_updated_page4_default_blocked(parser):
+    import pdfplumber
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[3]
+        subs = parser._reconstruct_merged_price_groups(page)
+        cands = parser._extract_page_tables(page)
+        rows = []
+        for ov, hdr, mat in cands:
+            rr = parser._rows_from_section(hdr, mat, parser._section_context(ParserContext(), ov))
+            for r in rr:
+                if ov.get("review_reason"):
+                    r.flag_review(ov["review_reason"])
+            rows += rr
+    assert len(subs) == 10                                # geometry still reconstructs
+    assert all(ov.get("_merged") for ov, _, _ in cands)
+    for ov, _h, _m in subs:                               # nothing selected, evidence kept
+        assert "retail_source" not in ov and "wholesale_source" not in ov
+        assert ov.get("price_values_source")
+        assert ov["review_reason"] == (
+            "multiple unlabelled price values require confirmed price semantics")
+    assert rows and all(r.price is None for r in rows)
+    assert all(r.review_status == "needs_review" for r in rows)
+    assert not any(("wholesale" in (r.notes or "").lower()) for r in rows)
+    assert not any(r.price in (600.0, 650.0, 1350.0, 1450.0) for r in rows)
+
+
+# -- real UPDATED HOYA page 4: EXPLICIT confirmed policy --------------
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD),
+                    reason="real UPDATED HOYA catalog not present")
+def test_mgu_real_updated_page4_confirmed_policy(parser_lwrr):
+    import pdfplumber
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[3]
+        subs = parser_lwrr._reconstruct_merged_price_groups(page)
+        cands = parser_lwrr._extract_page_tables(page)
+        rows = []
+        for ov, hdr, mat in cands:
+            rows += parser_lwrr._rows_from_section(
+                hdr, mat, parser_lwrr._section_context(ParserContext(), ov))
+
+    assert len(subs) == 10
+    groups = {(m[1][0], m[1][1]) for _, _, m in subs}
+    assert len(groups) == 7 and ("Hilux 1.5", "Hi Vision Aqua") in groups
+
+    ov1350 = next(ov for ov, _, m in subs if ov.get("retail_source") == "1350")
+    m1350 = next(m for ov, _, m in subs if ov.get("retail_source") == "1350")
+    ov1450 = next(ov for ov, _, m in subs if ov.get("retail_source") == "1450")
+    m1450 = next(m for ov, _, m in subs if ov.get("retail_source") == "1450")
+
+    # C/D + 8/9: wholesale internal, retail emitted
+    assert ov1350["wholesale_source"] == "600" and ov1350["retail_source"] == "1350"
+    assert ov1450["wholesale_source"] == "650" and ov1450["retail_source"] == "1450"
+    assert {r[2] for r in m1350[1:]} == {"1350"}
+    assert {r[2] for r in m1450[1:]} == {"1450"}
+
+    assert m1450[1][0] == "Hilux 1.5" and m1450[1][1] == "Hi Vision Aqua"
+
+    r1350 = [r[3] for r in m1350[1:]]
+    r1450 = [r[3] for r in m1450[1:]]
+    assert r1350 == [
+        "Sph (0.00 To -4.00) Cyl (-2.00) 70",
+        "Sph (0.00 To +3.00) Cyl (+2.00) 65",
+        "Sph (0.00 To +4.00) Cyl (+2.00) 60",
+        "Sph (+0.25 To +1.75) Cyl (-2.00) 65",
+    ]
+    # K + updated-wins: corrected -3.00 preserved under retail 1450
+    assert r1450 == [
+        "Sph (0.00 To -3.00) Cyl (-3.00) 70",
+        "Sph (0.00 To +1.00) Cyl (+3.00) 65",
+    ]
+    assert "Cyl (-2.00)" not in r1450[0]
+    assert set(r1350).isdisjoint(set(r1450))
+
+    emitted = {r.price for r in rows if r.price is not None}
+    assert 1350.0 in emitted and 1450.0 in emitted
+    assert not any(r.price in (600.0, 650.0, 1500.0, 1550.0, 1250.0, 1300.0, 2000.0) for r in rows)
+    assert not any("wholesale" in (r.notes or "").lower() for r in rows)
+
+    hil = [r for r in rows if r.model_hint == "Hilux" and r.price == 1350.0]
+    assert hil and all(r.index_value == 1.5 for r in hil)
+
+
+# -- L. PIXEL real-catalog geometry behaviour unchanged ---------------
+@pytest.mark.skipif(not os.path.exists(_PIXEL), reason="real PIXEL catalog not present")
+def test_mgu_L_pixel_unaffected():
+    for pol in (None, _LWRR):
+        p = PDFHybridParser(use_vision=False, dual_price_semantics=pol)
+        models_ = p.parse_pdf(_PIXEL)
+        rows = [pr for m in models_ for pr in m.power_ranges]
+        assert len(rows) > 100
+        assert any(r.has_range for r in rows)
+        assert {m.name for m in models_ if m.name != p.UNRESOLVED_FAMILY}
+        assert not any("wholesale" in (r.notes or "").lower() for r in rows)
+
+
+# -- old OLD-catalog single-price real page still reconstructs --------
+@pytest.mark.skipif(not os.path.exists(_HOYA), reason="real OLD HOYA catalog not present")
+def test_mgu_old_hoya_single_price_still_works(parser):
+    import pdfplumber
+    with pdfplumber.open(_HOYA) as pdf:
+        subs = parser._reconstruct_merged_price_groups(pdf.pages[3])
+    prices = [ov.get("retail_source") for ov, _, _ in subs]
+    assert prices.count("1350") == 1 and prices.count("1450") == 1     # single value -> retail
+    assert all("review_reason" not in ov for ov, _, _ in subs)
