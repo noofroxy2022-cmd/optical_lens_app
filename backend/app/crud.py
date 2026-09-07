@@ -131,6 +131,36 @@ def reject_extraction(db: Session, extraction_id: int, notes: str = "") -> Optio
     return ext
 
 
+def apply_family_review_override(
+    db: Session, extraction_id: int, family: str, reviewed_by: str = "reviewer"
+) -> Optional[models.CatalogExtraction]:
+    """Record a human-reviewed product family for one extraction.
+
+    The value is written into the existing modified_data overlay that Phase 2
+    bulk confirmation reads (`modified_data["name"]`), together with provenance
+    marking it as human review rather than parser inference. Generic - `family`
+    is caller-supplied; nothing catalog- or manufacturer-specific is hardcoded,
+    and the parser's own source-derived result is left untouched.
+    """
+    ext = get_extraction(db, extraction_id)
+    if not ext:
+        return None
+    fam = (family or "").strip()
+    if not fam:
+        return ext
+    md = dict(ext.modified_data or {})
+    md["name"] = fam
+    md["family_source"] = "human_review"
+    md["family_reviewed_by"] = reviewed_by
+    md["family_reviewed_at"] = datetime.utcnow().isoformat()
+    ext.modified_data = md
+    note = f"product family set to {fam!r} by {reviewed_by} (human review)"
+    ext.review_notes = "; ".join(x for x in (ext.review_notes, note) if x)
+    db.commit()
+    db.refresh(ext)
+    return ext
+
+
 # ===== Lens Model =====
 def create_lens_model(db: Session, model: schemas.LensModelCreate) -> models.LensModel:
     data = model.model_dump()
@@ -623,6 +653,11 @@ def _prepare_extraction_row(ext) -> dict:
     name = (md.get("name") or ext.extracted_name or "").strip()
     if not name:
         errors.append(f"{tag}: missing product name")
+    elif name == models.UNRESOLVED_FAMILY_NAME:
+        # parser could not derive the family from the PDF; a human review overlay
+        # (modified_data["name"] with family_source == "human_review") must supply it
+        errors.append(f"{tag}: unresolved product family - needs human review")
+        name = ""
 
     material_enum = _coerce_enum(
         models.MaterialType, md.get("material") or ext.extracted_material or "CR39"
@@ -650,9 +685,10 @@ def _prepare_extraction_row(ext) -> dict:
         models.LensCategory, md.get("category") or ext.extracted_category,
         models.LensCategory.SINGLE_VISION,
     )
-    design_variant = md.get("design_variant") or None
-    color_variant = md.get("color_variant") or None
-    market_scope = md.get("market_scope") or None
+    # human review overlay (modified_data) wins over the parser-extracted column
+    design_variant = md.get("design_variant") or ext.extracted_design or None
+    color_variant = md.get("color_variant") or ext.extracted_color_variant or None
+    market_scope = md.get("market_scope") or ext.extracted_market_scope or None
 
     if errors:
         return {"errors": errors}

@@ -79,6 +79,14 @@ class PricingAvailability(str, PyEnum):
     RX = "rx"
 
 
+# Sentinel the parser writes to CatalogExtraction.extracted_name when the source
+# PDF carries no relation that uniquely determines the product family. It must
+# never reach a real LensModel name - a human review overlay (modified_data["name"]
+# with family_source == "human_review") replaces it before bulk confirmation.
+# Keep in sync with PDFHybridParser.UNRESOLVED_FAMILY.
+UNRESOLVED_FAMILY_NAME = "__UNRESOLVED_FAMILY__"
+
+
 # ===== الطبقات (Coatings) =====
 class Coating(Base):
     """Catalog of coating options referenced by commercial pricing."""
@@ -188,6 +196,14 @@ class CatalogExtraction(Base):
 
     extracted_price = Column(Float, nullable=True)
     extracted_features = Column(JSON, nullable=True)
+
+    # ----- Commercial identity extracted by the parser (Phase 4) -----
+    # design_variant / color_variant / market_scope populated by the parser when
+    # confidently read from catalog structure; consumed by confirm_catalog_commercial.
+    # design geometry stays in a separate concept - these never hold optical geometry.
+    extracted_design = Column(String(50), nullable=True)          # commercial design line
+    extracted_color_variant = Column(String(50), nullable=True)   # commercial colour / technology line
+    extracted_market_scope = Column(String(50), nullable=True)    # generic catalog market key
 
     # ----- Coating extraction semantics -----
     # extracted_coating: raw/normalised coating text as found in the source (if any).

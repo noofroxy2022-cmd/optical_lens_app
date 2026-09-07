@@ -143,6 +143,10 @@ class CatalogExtractionBase(BaseModel):
     add_max: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
+    # commercial identity (parser-populated in Phase 4)
+    extracted_design: Optional[str] = None
+    extracted_color_variant: Optional[str] = None
+    extracted_market_scope: Optional[str] = None
     extracted_coating: Optional[str] = None
     coating_id: Optional[int] = None
     coating_extraction_status: Optional[CoatingExtractionStatus] = None
@@ -165,7 +169,10 @@ class CatalogExtractionUpdate(BaseModel):
     add_max: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
-    # coating human correction / review (mirrors CatalogExtraction)
+    # commercial identity + coating human correction / review (mirrors CatalogExtraction)
+    extracted_design: Optional[str] = None
+    extracted_color_variant: Optional[str] = None
+    extracted_market_scope: Optional[str] = None
     extracted_coating: Optional[str] = None
     coating_id: Optional[int] = None
     coating_extraction_status: Optional[CoatingExtractionStatus] = None
