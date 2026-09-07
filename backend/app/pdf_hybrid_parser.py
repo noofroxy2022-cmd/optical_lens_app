@@ -1472,6 +1472,12 @@ class PDFHybridParser:
                     models.CoatingExtractionStatus,
                     self._COATING_STATUS_ENUM.get(pr.coating_status, "NOT_FOUND"),
                 )
+                # Persist range bounds ONLY when the parser actually read an
+                # explicit SPH/CYL/ADD range for this row. When has_range is False
+                # the dataclass fallbacks (sph 0.0/0.0, cyl -10.0/0.0, ...) are NOT
+                # catalog evidence and must be stored as NULL, so downstream
+                # confirmation never fabricates a PowerRange (esp. for RX).
+                _has_range = bool(pr.has_range)
                 extraction = models.CatalogExtraction(
                     catalog_id=catalog_id,
                     extracted_name=model.name,
@@ -1485,12 +1491,12 @@ class PDFHybridParser:
                     extracted_coating=pr.coating,
                     coating_extraction_status=cstatus,
                     coating_confidence=pr.coating_confidence,
-                    sph_min=pr.sph_min,
-                    sph_max=pr.sph_max,
-                    cyl_min=pr.cyl_min,
-                    cyl_max=pr.cyl_max,
-                    add_min=pr.add_min,
-                    add_max=pr.add_max,
+                    sph_min=(pr.sph_min if _has_range else None),
+                    sph_max=(pr.sph_max if _has_range else None),
+                    cyl_min=(pr.cyl_min if _has_range else None),
+                    cyl_max=(pr.cyl_max if _has_range else None),
+                    add_min=(pr.add_min if _has_range else None),
+                    add_max=(pr.add_max if _has_range else None),
                     extracted_price=pr.price,
                     extracted_features=model.features,
                     review_notes=("; ".join(pr.review_reasons) or None),

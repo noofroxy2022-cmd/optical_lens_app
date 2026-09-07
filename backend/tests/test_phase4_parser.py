@@ -744,3 +744,316 @@ def test_override_4_bulk_confirm_prep_reads_the_override(db):
     res = crud._prepare_extraction_row(db.get(models.CatalogExtraction, e2.id))
     assert "row" in res, res
     assert res["row"]["name"] == "Pixel"
+
+
+# ===========================================================================
+# Fabricated-RX-PowerRange defect fix (found by real E2E smoke test)
+# ===========================================================================
+from decimal import Decimal as _D
+from app import crud as _crud
+from app.lens_matcher import lens_matcher as _matcher
+
+
+def _company_catalog(db):
+    co = models.Company(name="RXFIX Co", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="c.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    return co, cat
+
+
+def _persist_via_parser(parser, db, cat, pr, name="RxFam", category="progressive"):
+    parser.extracted_models = [
+        ExtractedLensModel(name=name, category=category, power_ranges=[pr])
+    ]
+    parser.save_extractions_to_db(cat.id, db)
+    return _crud.get_extractions_by_catalog(db, cat.id)[-1]
+
+
+def _rx_norange_pr():
+    # exactly what the real parser emits for a clean rangeless RX Progressive row:
+    # has_range=False, dataclass cyl fallback -10/0 still on the object
+    return ExtractedPowerRange(
+        sph_min=0.0, sph_max=0.0, availability="rx", price=4000.0,
+        index_value=1.5, design_variant="Core", color_variant="Clear",
+        market_scope="Out Of Egypt", coating="Astro", coating_status="resolved",
+        coating_confidence=0.9, has_range=False, review_status="pending",
+    )
+
+
+def test_rxfix_A_parser_persists_none_ranges_for_no_range_row(parser, db):
+    _, cat = _company_catalog(db)
+    ext = _persist_via_parser(parser, db, cat, _rx_norange_pr())
+    assert ext.sph_min is None and ext.sph_max is None
+    assert ext.cyl_min is None and ext.cyl_max is None
+    assert ext.add_min is None and ext.add_max is None
+    assert ext.extracted_availability == "rx"
+    assert ext.extracted_price == 4000.0
+
+
+def test_rxfix_B_prepare_row_no_range_no_power_scope(parser, db):
+    _, cat = _company_catalog(db)
+    ext = _persist_via_parser(parser, db, cat, _rx_norange_pr())
+    ext.status = "confirmed"
+    db.commit()
+    res = _crud._prepare_extraction_row(db.get(models.CatalogExtraction, ext.id))
+    assert "row" in res, res
+    assert res["row"]["has_range"] is False
+    assert res["row"]["power_scope"] is None
+
+
+def test_rxfix_C_bulk_confirm_rx_zero_power_ranges(parser, db):
+    _, cat = _company_catalog(db)
+    ext = _persist_via_parser(parser, db, cat, _rx_norange_pr())
+    _crud.confirm_extraction(db, ext.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    vps = db.query(models.VariantPricing).all()
+    assert len(vps) == 1
+    vp = vps[0]
+    assert vp.availability == models.PricingAvailability.RX
+    assert vp.power_scope is None
+    assert vp.price_pair == _D("4000.00")
+    assert db.query(models.PowerRange).filter_by(pricing_id=vp.id).count() == 0
+
+
+def test_rxfix_D_matcher_returns_rx_for_nonzero_sph(parser, db):
+    company, cat = _company_catalog(db)
+    ext = _persist_via_parser(parser, db, cat, _rx_norange_pr())
+    _crud.confirm_extraction(db, ext.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    vp = db.query(models.VariantPricing).one()
+
+    p = models.Prescription(od_sph_original=-3.0, os_sph_original=-3.0,
+        od_sph=-3.0, os_sph=-3.0, od_cyl_original=-1.0, os_cyl_original=-1.0,
+        od_cyl=-1.0, os_cyl=-1.0, od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+    db.add(p); db.commit(); db.refresh(p)
+    results, sc, rc, *_ = _matcher.match_lenses(db, p, None, True, True)
+    hit = [r for r in results if r.source_pricing_id == vp.id]
+    assert hit, "RX candidate missing for a non-zero SPH prescription"
+    h = hit[0]
+    assert h.availability == "rx"
+    assert h.power_range is None
+    assert h.price_pair == _D("4000.00")
+    assert h.design_variant == "Core" and h.color_variant == "Clear"
+    assert h.market_scope == "Out Of Egypt"
+
+
+def test_rxfix_E_stock_without_range_still_blocks(parser, db):
+    _, cat = _company_catalog(db)
+    stock_pr = ExtractedPowerRange(
+        sph_min=0.0, sph_max=0.0, availability="stock", price=700.0, index_value=1.5,
+        color_variant="Clear", market_scope="Egypt", coating="Astro",
+        coating_status="resolved", coating_confidence=0.9, has_range=False,
+        review_status="pending",
+    )
+    ext = _persist_via_parser(parser, db, cat, stock_pr, name="StockFam",
+                              category="single_vision")
+    _crud.confirm_extraction(db, ext.id, "qa")
+    with pytest.raises(_crud.CommercialValidationError) as exc:
+        _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    assert any("STOCK requires PowerRange" in e for e in exc.value.errors)
+    assert db.query(models.VariantPricing).count() == 0
+
+
+def test_rxfix_F_explicit_rx_range_still_constrains(parser, db):
+    _, cat = _company_catalog(db)
+    rx_ranged = ExtractedPowerRange(
+        sph_min=-6.0, sph_max=-2.0, cyl_min=-2.0, cyl_max=0.0,
+        availability="rx", price=5500.0, index_value=1.6, design_variant="Premium",
+        color_variant="Clear", market_scope="Out Of Egypt", coating="Astro",
+        coating_status="resolved", coating_confidence=0.9, has_range=True,
+        review_status="pending",
+    )
+    ext = _persist_via_parser(parser, db, cat, rx_ranged, name="RxRanged")
+    # explicit range survives the parser -> extraction boundary
+    assert ext.sph_min == -6.0 and ext.sph_max == -2.0
+    _crud.confirm_extraction(db, ext.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    vp = db.query(models.VariantPricing).one()
+    assert vp.power_scope is not None
+    prs = db.query(models.PowerRange).filter_by(pricing_id=vp.id).all()
+    assert len(prs) == 1 and prs[0].sph_min == -6.0 and prs[0].sph_max == -2.0
+
+    def _presc(sph):
+        p = models.Prescription(od_sph_original=sph, os_sph_original=sph, od_sph=sph,
+            os_sph=sph, od_cyl_original=-1.0, os_cyl_original=-1.0, od_cyl=-1.0,
+            os_cyl=-1.0, od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(p); db.commit(); db.refresh(p); return p
+
+    inside = _matcher.match_lenses(db, _presc(-4.0), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in inside)
+    outside = _matcher.match_lenses(db, _presc(3.0), None, True, True)[0]
+    assert not any(r.source_pricing_id == vp.id for r in outside)
+
+
+# ===========================================================================
+# LensModel category-collapse defect fix
+# "Pixel" Single Vision and "Pixel" Progressive must be two distinct LensModels
+# ===========================================================================
+from app import schemas as _schemas
+
+
+def _stock_ranged_pr(index=1.5, price=700.0, design_variant="Core"):
+    return ExtractedPowerRange(
+        sph_min=-6.0, sph_max=6.0, cyl_min=-4.0, cyl_max=0.0,
+        availability="stock", price=price, index_value=index,
+        design_variant=design_variant, color_variant="Clear",
+        market_scope="Egypt", coating="Astro", coating_status="resolved",
+        coating_confidence=0.9, has_range=True, review_status="pending",
+    )
+
+
+def _rx_norange_pr_named(index=1.5, price=4000.0, design_variant="Core"):
+    return ExtractedPowerRange(
+        sph_min=0.0, sph_max=0.0, availability="rx", price=price,
+        index_value=index, design_variant=design_variant, color_variant="Clear",
+        market_scope="Out Of Egypt", coating="Astro", coating_status="resolved",
+        coating_confidence=0.9, has_range=False, review_status="pending",
+    )
+
+
+def _confirm_all(db, cat, reviewer="qa", admin="admin"):
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, reviewer)
+    return _crud.confirm_catalog_commercial(db, cat.id, admin)
+
+
+def _presc(db, sph=-2.0, cyl=-1.0, add=0.0):
+    p = models.Prescription(
+        od_sph_original=sph, os_sph_original=sph, od_sph=sph, os_sph=sph,
+        od_cyl_original=cyl, os_cyl_original=cyl, od_cyl=cyl, os_cyl=cyl,
+        od_axis=0, os_axis=0, od_add=add, os_add=add,
+    )
+    db.add(p); db.commit(); db.refresh(p)
+    return p
+
+
+def test_catfix_A_same_name_two_categories_two_models(parser, db):
+    company, cat = _company_catalog(db)
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(), name="Pixel",
+                        category="single_vision")
+    _persist_via_parser(parser, db, cat, _rx_norange_pr_named(), name="Pixel",
+                        category="progressive")
+    _confirm_all(db, cat)
+
+    pixels = (db.query(models.LensModel)
+              .filter(models.LensModel.company_id == company.id,
+                      models.LensModel.name == "Pixel").all())
+    assert len(pixels) == 2, [(m.id, m.name, m.category) for m in pixels]
+    assert {m.name for m in pixels} == {"Pixel"}
+    assert {m.category for m in pixels} == {
+        models.LensCategory.SINGLE_VISION, models.LensCategory.PROGRESSIVE
+    }
+    assert pixels[0].id != pixels[1].id
+
+
+def test_catfix_B_pricing_points_to_correct_model_category(parser, db):
+    company, cat = _company_catalog(db)
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(price=700.0), name="Pixel",
+                        category="single_vision")
+    _persist_via_parser(parser, db, cat, _rx_norange_pr_named(price=4000.0), name="Pixel",
+                        category="progressive")
+    _confirm_all(db, cat)
+
+    by_cat = {}
+    for vp in db.query(models.VariantPricing).all():
+        lm = vp.variant.lens_model
+        by_cat[lm.category] = (vp, lm)
+
+    sv_vp, sv_lm = by_cat[models.LensCategory.SINGLE_VISION]
+    pr_vp, pr_lm = by_cat[models.LensCategory.PROGRESSIVE]
+    assert sv_lm.name == "Pixel" and pr_lm.name == "Pixel"
+    assert sv_lm.id != pr_lm.id
+    assert sv_vp.availability == models.PricingAvailability.STOCK
+    assert sv_vp.price_pair == _D("700.00")
+    assert pr_vp.availability == models.PricingAvailability.RX
+    assert pr_vp.price_pair == _D("4000.00")
+    assert pr_vp.power_scope is None
+    assert db.query(models.PowerRange).filter_by(pricing_id=pr_vp.id).count() == 0
+
+
+def test_catfix_C_sequential_catalogs_keep_both_models(parser, db):
+    company, cat1 = _company_catalog(db)
+    _persist_via_parser(parser, db, cat1, _stock_ranged_pr(), name="Pixel",
+                        category="single_vision")
+    _confirm_all(db, cat1)
+    sv = (db.query(models.LensModel)
+          .filter_by(company_id=company.id, name="Pixel").one())
+    sv_id, sv_cat = sv.id, sv.category
+    assert sv_cat == models.LensCategory.SINGLE_VISION
+
+    cat2 = models.Catalog(company_id=company.id, filename="c2.pdf", file_path="/x2",
+                          status=models.CatalogStatus.DRAFT)
+    db.add(cat2); db.commit(); db.refresh(cat2)
+    _persist_via_parser(parser, db, cat2, _rx_norange_pr_named(), name="Pixel",
+                        category="progressive")
+    _confirm_all(db, cat2)
+
+    pixels = (db.query(models.LensModel)
+              .filter_by(company_id=company.id, name="Pixel").all())
+    assert len(pixels) == 2
+    sv_after = db.get(models.LensModel, sv_id)
+    assert sv_after.id == sv_id
+    assert sv_after.category == models.LensCategory.SINGLE_VISION
+    assert {m.category for m in pixels} == {
+        models.LensCategory.SINGLE_VISION, models.LensCategory.PROGRESSIVE
+    }
+
+
+def test_catfix_D_same_name_category_diff_index_one_model(parser, db):
+    company, cat = _company_catalog(db)
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(index=1.5, price=700.0),
+                        name="Pixel", category="single_vision")
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(index=1.6, price=900.0),
+                        name="Pixel", category="single_vision")
+    _confirm_all(db, cat)
+
+    pixels = (db.query(models.LensModel)
+              .filter_by(company_id=company.id, name="Pixel").all())
+    assert len(pixels) == 1, [(m.id, m.category) for m in pixels]
+    variants = db.query(models.LensVariant).filter_by(lens_model_id=pixels[0].id).all()
+    assert len(variants) == 2
+    assert {round(v.index_value, 2) for v in variants} == {1.5, 1.6}
+    assert db.query(models.VariantPricing).count() == 2
+
+
+def test_catfix_E_exact_duplicate_including_category_rejected(parser, db):
+    company, cat = _company_catalog(db)
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(index=1.5, price=700.0),
+                        name="Pixel", category="single_vision")
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(index=1.5, price=700.0),
+                        name="Pixel", category="single_vision")
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, "qa")
+    with pytest.raises(_crud.CommercialValidationError) as exc:
+        _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    assert any("duplicate commercial identity" in e for e in exc.value.errors)
+    assert db.query(models.VariantPricing).count() == 0
+
+
+def test_catfix_F_matcher_category_filter_splits_pixel(parser, db):
+    company, cat = _company_catalog(db)
+    _persist_via_parser(parser, db, cat, _stock_ranged_pr(price=700.0), name="Pixel",
+                        category="single_vision")
+    _persist_via_parser(parser, db, cat, _rx_norange_pr_named(price=4000.0), name="Pixel",
+                        category="progressive")
+    _confirm_all(db, cat)
+
+    p = _presc(db, sph=-2.0, cyl=-1.0)
+
+    sv_res = _matcher.match_lenses(
+        db, p, _schemas.LensFilters(category=models.LensCategory.SINGLE_VISION),
+        True, True)[0]
+    assert sv_res, "expected a Single Vision match"
+    assert {r.lens_model.category for r in sv_res} == {models.LensCategory.SINGLE_VISION}
+    assert all(r.availability == "stock" for r in sv_res)
+    assert all(r.price_pair == _D("700.00") for r in sv_res)
+
+    pr_res = _matcher.match_lenses(
+        db, p, _schemas.LensFilters(category=models.LensCategory.PROGRESSIVE),
+        True, True)[0]
+    assert pr_res, "expected a Progressive match"
+    assert {r.lens_model.category for r in pr_res} == {models.LensCategory.PROGRESSIVE}
+    assert all(r.availability == "rx" for r in pr_res)
+    assert all(r.price_pair == _D("4000.00") for r in pr_res)

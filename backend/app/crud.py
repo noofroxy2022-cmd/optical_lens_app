@@ -639,12 +639,16 @@ def _prepare_extraction_row(ext) -> dict:
     except ValueError as ve:
         errors.append(f"{tag}: {ve}")
 
-    sph_min = md.get("sph_min", ext.sph_min)
-    sph_max = md.get("sph_max", ext.sph_max)
-    cyl_min = md.get("cyl_min", ext.cyl_min)
-    cyl_max = md.get("cyl_max", ext.cyl_max)
-    add_min = md.get("add_min", ext.add_min)
-    add_max = md.get("add_max", ext.add_max)
+    # A range exists ONLY when the source extraction carried a COMPLETE explicit
+    # bound pair. A lone bound, or a value that is really a persisted default
+    # (e.g. the parser's old cyl -10..0 fallback), is not catalog manufacturing
+    # evidence and must never be turned into an RX range.
+    def _pair(a, b):
+        return (a, b) if (a is not None and b is not None) else (None, None)
+
+    sph_min, sph_max = _pair(md.get("sph_min", ext.sph_min), md.get("sph_max", ext.sph_max))
+    cyl_min, cyl_max = _pair(md.get("cyl_min", ext.cyl_min), md.get("cyl_max", ext.cyl_max))
+    add_min, add_max = _pair(md.get("add_min", ext.add_min), md.get("add_max", ext.add_max))
     power_scope = build_power_scope(sph_min, sph_max, cyl_min, cyl_max, add_min, add_max)
     has_range = power_scope is not None
     if availability == models.PricingAvailability.STOCK and not has_range:
@@ -714,7 +718,8 @@ def _prepare_extraction_row(ext) -> dict:
             "cyl_min": cyl_min, "cyl_max": cyl_max,
             "add_min": add_min, "add_max": add_max,
             "identity": (
-                name.strip().lower(), material_enum.value, idx,
+                name.strip().lower(), category_enum.value,
+                material_enum.value, idx,
                 design_type_enum.value, is_asph,
                 _norm(design_variant), _norm(color_variant),
                 coating_ref or ("none",), availability.value,
@@ -833,25 +838,31 @@ def confirm_catalog_commercial(
         written: List[models.VariantPricing] = []
 
         for row in prepared:
-            # 2a. resolve / create LensModel
+            # 2a. resolve / create LensModel. Identity is (company, normalized
+            # name, category): the same family name in two lens categories
+            # (e.g. "Pixel" Single Vision vs "Pixel" Progressive) is two
+            # distinct products and must never collapse into one LensModel.
+            category_enum = row["category_enum"]
             mkey = row["name"].strip().lower()
-            model = model_cache.get(mkey)
+            ckey = (mkey, category_enum)
+            model = model_cache.get(ckey)
             if model is None:
                 model = (
                     db.query(models.LensModel)
                     .filter(
                         models.LensModel.company_id == company_id,
                         func.lower(func.trim(models.LensModel.name)) == mkey,
+                        models.LensModel.category == category_enum,
                     )
                     .first()
                 )
             if model is None:
                 model = models.LensModel(
-                    company_id=company_id, name=row["name"], category=row["category_enum"]
+                    company_id=company_id, name=row["name"], category=category_enum
                 )
                 db.add(model)
                 db.flush()
-            model_cache[mkey] = model
+            model_cache[ckey] = model
 
             # 2b. resolve / create LensVariant (full commercial identity)
             variant = _resolve_or_create_variant(db, model, row)
