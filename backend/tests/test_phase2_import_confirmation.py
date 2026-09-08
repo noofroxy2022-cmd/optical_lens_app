@@ -241,20 +241,29 @@ def test_D_rx_without_power_range_confirms(db):
 # ===========================================================================
 # E. STOCK without PowerRange blocks the whole catalog
 # ===========================================================================
-def test_E_stock_without_power_range_blocks_catalog(db):
+def test_E_stock_without_power_range_is_parked_not_catalog_blocking(db):
+    # Batch 1: a minority of unresolved rows must NOT zero out the good rows.
+    # The STOCK-without-range row is PARKED (back to needs_review with an exact
+    # reason); the good row still confirms atomically.
     company = _company(db)
     cat = _catalog(db, company)
-    _ext(db, cat, name="Good", price=100.0, availability="stock",
-         sph_min=-4.0, sph_max=0.0)
-    _ext(db, cat, name="BadStock", price=100.0, availability="stock")  # no range
+    good = _ext(db, cat, name="Good", price=100.0, availability="stock",
+                sph_min=-4.0, sph_max=0.0)
+    bad = _ext(db, cat, name="BadStock", price=100.0, availability="stock")  # no range
 
-    with pytest.raises(crud.CommercialValidationError) as exc:
-        crud.confirm_catalog_commercial(db, cat.id)
-    assert any("STOCK requires PowerRange" in e for e in exc.value.errors)
+    result = crud.confirm_catalog_commercial(db, cat.id)
 
-    assert _all_pricing(db) == []                       # nothing written at all
-    db.refresh(cat)
-    assert cat.status == models.CatalogStatus.DRAFT
+    assert result["confirmed"] == 1
+    assert result["skipped_unresolved"] == 1
+    assert any(p["extraction_id"] == bad.id and "STOCK requires PowerRange" in p["reason"]
+               for p in result["parked"])
+
+    prices = _all_pricing(db)
+    assert len(prices) == 1                             # only the good row
+    db.refresh(cat); db.refresh(bad)
+    assert cat.status == models.CatalogStatus.CONFIRMED
+    assert bad.status == "needs_review"
+    assert "STOCK requires PowerRange" in (bad.review_notes or "")
 
 
 # ===========================================================================
@@ -276,33 +285,41 @@ def test_F_explicit_none_coating_confirms(db):
 # ===========================================================================
 # G. not_found coating blocks the whole catalog
 # ===========================================================================
-def test_G_not_found_coating_blocks_catalog(db):
+def test_G_not_found_coating_row_is_parked_not_catalog_blocking(db):
     company = _company(db)
     cat = _catalog(db, company)
     _ext(db, cat, name="Ok", price=100.0, sph_min=-4.0, sph_max=0.0)
-    _ext(db, cat, name="NoCoating", price=100.0, sph_min=-4.0, sph_max=0.0,
-         coating_status=models.CoatingExtractionStatus.NOT_FOUND)
+    bad = _ext(db, cat, name="NoCoating", price=100.0, sph_min=-4.0, sph_max=0.0,
+               coating_status=models.CoatingExtractionStatus.NOT_FOUND)
 
-    with pytest.raises(crud.CommercialValidationError) as exc:
-        crud.confirm_catalog_commercial(db, cat.id)
-    assert any("not_found" in e for e in exc.value.errors)
-    assert _all_pricing(db) == []
+    result = crud.confirm_catalog_commercial(db, cat.id)
+
+    assert result["confirmed"] == 1 and result["skipped_unresolved"] == 1
+    assert any(p["extraction_id"] == bad.id for p in result["parked"])
+    assert len(_all_pricing(db)) == 1
+    db.refresh(cat); db.refresh(bad)
+    assert cat.status == models.CatalogStatus.CONFIRMED
+    assert bad.status == "needs_review"
 
 
 # ===========================================================================
 # H. needs_review / unresolved extraction blocks the whole catalog
 # ===========================================================================
-def test_H_unresolved_review_state_blocks_catalog(db):
+def test_H_unresolved_review_state_row_is_parked_not_catalog_blocking(db):
     company = _company(db)
     cat = _catalog(db, company)
     _ext(db, cat, name="Ready", price=100.0, sph_min=-4.0, sph_max=0.0)
-    _ext(db, cat, name="Pending", price=100.0, sph_min=-4.0, sph_max=0.0,
-         review_status="pending")
+    pend = _ext(db, cat, name="Pending", price=100.0, sph_min=-4.0, sph_max=0.0,
+                review_status="pending")
 
-    with pytest.raises(crud.CommercialValidationError) as exc:
-        crud.confirm_catalog_commercial(db, cat.id)
-    assert any("not review-approved" in e for e in exc.value.errors)
-    assert _all_pricing(db) == []
+    result = crud.confirm_catalog_commercial(db, cat.id)
+
+    assert result["confirmed"] == 1 and result["skipped_unresolved"] == 1
+    assert any(p["extraction_id"] == pend.id and "not review-approved" in p["reason"]
+               for p in result["parked"])
+    assert len(_all_pricing(db)) == 1
+    db.refresh(cat)
+    assert cat.status == models.CatalogStatus.CONFIRMED
 
 
 # ===========================================================================
@@ -391,18 +408,49 @@ def test_L_two_stock_power_scopes_independent(db):
 # ===========================================================================
 # M. true duplicate commercial identity blocks confirmation
 # ===========================================================================
-def test_M_true_duplicate_identity_blocks(db):
+def test_M_true_duplicate_identity_collapses_to_one_pricing(db):
+    # Batch 1: an EXACT duplicate (same identity + same price + same power_scope)
+    # collapses to one pricing; the extra row is parked, the catalog confirms.
     company = _company(db)
     cat = _catalog(db, company)
     _ext(db, cat, name="Same", price=100.0, sph_min=-4.0, sph_max=0.0,
          design_variant="Core", color_variant="Clear", market_scope="retail")
-    _ext(db, cat, name="Same", price=100.0, sph_min=-4.0, sph_max=0.0,
-         design_variant="Core", color_variant="Clear", market_scope="retail")
+    dup = _ext(db, cat, name="Same", price=100.0, sph_min=-4.0, sph_max=0.0,
+               design_variant="Core", color_variant="Clear", market_scope="retail")
 
-    with pytest.raises(crud.CommercialValidationError) as exc:
-        crud.confirm_catalog_commercial(db, cat.id)
-    assert any("duplicate commercial identity" in e for e in exc.value.errors)
-    assert _all_pricing(db) == []
+    result = crud.confirm_catalog_commercial(db, cat.id)
+
+    assert result["confirmed"] == 1
+    assert result["true_duplicates_collapsed"] == 1
+    assert result["conflicts"] == 0
+    assert any(p["extraction_id"] == dup.id and "exact duplicate" in p["reason"]
+               for p in result["parked"])
+    assert len(_all_pricing(db)) == 1
+    db.refresh(cat)
+    assert cat.status == models.CatalogStatus.CONFIRMED
+
+
+def test_M2_price_conflict_parks_both_rows(db):
+    # Same commercial identity, DIFFERENT price -> a genuine conflict. Neither
+    # row is chosen / merged / averaged; both are parked; the rest confirms.
+    company = _company(db)
+    cat = _catalog(db, company)
+    _ext(db, cat, name="Clean", price=50.0, sph_min=-2.0, sph_max=0.0)
+    a = _ext(db, cat, name="Same", price=100.0, sph_min=-4.0, sph_max=0.0,
+             design_variant="Core", color_variant="Clear", market_scope="retail")
+    b = _ext(db, cat, name="Same", price=200.0, sph_min=-4.0, sph_max=0.0,
+             design_variant="Core", color_variant="Clear", market_scope="retail")
+
+    result = crud.confirm_catalog_commercial(db, cat.id)
+
+    assert result["confirmed"] == 1                     # only "Clean"
+    assert result["conflicts"] == 2                     # both a and b parked
+    parked_ids = {p["extraction_id"] for p in result["parked"] if "price conflict" in p["reason"]}
+    assert parked_ids == {a.id, b.id}
+    prices = {float(p.price_pair) for p in _all_pricing(db)}
+    assert prices == {50.0}                             # neither 100 nor 200 written
+    db.refresh(cat)
+    assert cat.status == models.CatalogStatus.CONFIRMED
 
 
 # ===========================================================================

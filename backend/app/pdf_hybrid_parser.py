@@ -60,6 +60,7 @@ COLOR_VARIANT_ROOTS = {
     "clear": "Clear", "white": "Clear",
     "transmatic": "Transmatic", "transition": "Transition", "transitions": "Transition",
     "photochromic": "Transition", "photo": "Transition",
+    "sensity": "Sensity",
     "polz": "Polz", "polarized": "Polz", "polarised": "Polz", "polarizing": "Polz",
     "dwear": "DWEAR",
     "g15": "G15", "brown": "Brown", "grey": "Grey", "gray": "Grey", "green": "Green",
@@ -423,7 +424,10 @@ class PDFHybridParser:
         from a page's heading text. Structure-driven, no hardcoded manufacturer."""
         low = (text or "").lower()
 
-        market = self._harvest_market(text)
+        # A definite In/Out-of-<place> heading signal wins over an inherited
+        # market (HOYA's "Out Of Egypt" stock pages must not keep page-4's
+        # "Egypt"); otherwise fall back to the generic label scan.
+        market = self._market_from_heading(text) or self._harvest_market(text)
         if market:
             context.market = market
 
@@ -1333,6 +1337,14 @@ class PDFHybridParser:
                     color_ambig = True
             elif ctx.color_variant:
                 color_val = ctx.color_variant
+            # HOYA prints a photochromic technology ("Sensity 2", "Photo") inside
+            # the Type cell after the index; _family_from_type strips it off the
+            # NAME, so capture it here as the commercial colour dimension - it is
+            # a distinct priced SKU and must not collapse into the base product.
+            if color_val is None and mdl_txt:
+                tech = self._technology_from_type(mdl_txt)
+                if tech:
+                    color_val = tech
             coating, cstatus, cconf = self._classify_coating(
                 cell(i_coat), i_coat is not None, section_text + " " + " ".join(row)
             )
@@ -1492,6 +1504,22 @@ class PDFHybridParser:
                 out.append(r)
         return out
 
+    def _market_from_heading(self, text: str) -> Optional[str]:
+        """Definite In/Out-of-<place> market signal from the SECTION HEADING,
+        read from the RTL-reconstructed heading blob (HOYA prints 'Out Of Egypt'
+        as reversed one-word-per-line, which _harvest_market's line scan misses).
+        A definite signal here OVERRIDES a market inherited from an earlier page;
+        no signal -> None (never invent a market)."""
+        _GEO = r"(egypt|ksa|uae|gcc|europe|usa|africa|asia)"
+        blob = self._heading_variants(text)
+        m = re.search(rf"\b(?:out\s+of|outside)\s+{_GEO}\b", blob)
+        if m:
+            return f"Out Of {m.group(1).title()}"
+        m = re.search(rf"\bin\s+{_GEO}\b", blob)
+        if m:
+            return m.group(1).title()
+        return None
+
     def _harvest_market(self, text: str) -> Optional[str]:
         """Read a market/geography label from heading text. Generic - the parser
         does not assume a fixed set of markets."""
@@ -1619,6 +1647,26 @@ class PDFHybridParser:
                 except:
                     continue
         return None
+
+    # photochromic / colour-technology token that the catalog prints as part of
+    # the Type cell AFTER the index ("Hilux 1.5 Sensity 2", "Nulux PNX 1.53
+    # Photo"). It is a real commercial dimension (its own SKU + price), so it
+    # belongs in color_variant - _family_from_type strips it off the NAME and it
+    # would otherwise be lost, collapsing distinct priced products.
+    _TYPE_TECH_RE = re.compile(
+        r"\b(sensity(?:\s*\d)?|photochromic|photo|transitions?(?:\s*\d)?)\b", re.I
+    )
+
+    def _technology_from_type(self, text) -> Optional[str]:
+        """A photochromic / colour-technology descriptor embedded in a Type cell,
+        e.g. 'Sensity 2', 'Photo'. Returned Title-cased. None when absent."""
+        s = _clean(text)
+        if not s:
+            return None
+        m = self._TYPE_TECH_RE.search(s)
+        if not m:
+            return None
+        return re.sub(r"\s+", " ", m.group(1)).strip().title()
 
     def _family_from_type(self, text) -> Optional[str]:
         """Family/model name from an explicit 'Type'/'Model' cell:

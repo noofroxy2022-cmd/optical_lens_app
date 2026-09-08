@@ -1018,7 +1018,9 @@ def test_catfix_D_same_name_category_diff_index_one_model(parser, db):
     assert db.query(models.VariantPricing).count() == 2
 
 
-def test_catfix_E_exact_duplicate_including_category_rejected(parser, db):
+def test_catfix_E_exact_duplicate_including_category_collapses(parser, db):
+    # Batch 1: an exact duplicate (same identity incl. category + same price +
+    # same power_scope) collapses to ONE pricing instead of aborting the catalog.
     company, cat = _company_catalog(db)
     _persist_via_parser(parser, db, cat, _stock_ranged_pr(index=1.5, price=700.0),
                         name="Pixel", category="single_vision")
@@ -1026,10 +1028,10 @@ def test_catfix_E_exact_duplicate_including_category_rejected(parser, db):
                         name="Pixel", category="single_vision")
     for e in _crud.get_extractions_by_catalog(db, cat.id):
         _crud.confirm_extraction(db, e.id, "qa")
-    with pytest.raises(_crud.CommercialValidationError) as exc:
-        _crud.confirm_catalog_commercial(db, cat.id, "admin")
-    assert any("duplicate commercial identity" in e for e in exc.value.errors)
-    assert db.query(models.VariantPricing).count() == 0
+    result = _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    assert result["confirmed"] == 1
+    assert result["true_duplicates_collapsed"] == 1
+    assert db.query(models.VariantPricing).count() == 1
 
 
 def test_catfix_F_matcher_category_filter_splits_pixel(parser, db):
@@ -3301,3 +3303,92 @@ def test_dd_real_hoya_nulux_plus_3750(db):
     assert res[0].availability == "stock" and float(res[0].price_pair) == 3750.0
     res_one = m.match_lenses(db, _dd_presc(db, 0.50, 2.00), None, True, True)[0]
     assert len(res_one) == 1
+
+
+# ============================================================
+#  Batch 1 - full real HOYA catalog -> commercial DB E2E.
+#  The whole catalog must produce usable current VariantPricing (not abort),
+#  distinct products must not collide, and the matcher must work off the
+#  full confirmed DB (not a hand-picked subset).
+# ============================================================
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_batch1_full_hoya_confirms_and_matches(db):
+    import pdfplumber
+    from app.lens_matcher import LensMatcherFinal, TranspositionEngine as _TE
+
+    co = models.Company(name="HOYA_B1", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="hoya.pdf", file_path=_HOYA_UPD,
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    p.parse_pdf(_HOYA_UPD)
+    p.save_extractions_to_db(cat.id, db)
+
+    exts = _crud.get_extractions_by_catalog(db, cat.id)
+    for e in exts:
+        if e.status == "needs_review":
+            _crud.reject_extraction(db, e.id, "qa")
+        else:
+            _crud.confirm_extraction(db, e.id, "qa")
+
+    result = _crud.confirm_catalog_commercial(db, cat.id, "admin")
+
+    # a minority of unresolved/conflicting rows must NOT zero out the catalog
+    assert result["confirmed"] > 50
+    vps = db.query(models.VariantPricing).all()
+    assert len(vps) == result["confirmed"] > 0
+    db.refresh(cat)
+    assert cat.status == models.CatalogStatus.CONFIRMED
+    # parked rows are recorded, never silently dropped
+    parked_ids = {p["extraction_id"] for p in result["parked"]}
+    for pid in list(parked_ids)[:20]:
+        pe = db.get(models.CatalogExtraction, pid)
+        assert pe.status == "needs_review" and pe.review_notes
+
+    # Hilux 1.5 / Hi Vision Aqua / 1350 (In Egypt stock) and
+    # Hilux 1.5 Sensity 2 / Hi Vision Aqua / 7700 (Out Of Egypt) must be DISTINCT
+    def _ident(v):
+        return (v.variant.lens_model.name, v.variant.index_value,
+                (v.variant.color_variant or None),
+                (v.coating.code if v.coating else None),
+                float(v.price_pair), v.availability.value, v.market_scope)
+    at1350 = {_ident(v) for v in vps if abs(float(v.price_pair) - 1350.0) < 0.01}
+    at7700 = {_ident(v) for v in vps if abs(float(v.price_pair) - 7700.0) < 0.01}
+    assert at1350 and at7700
+    assert at1350.isdisjoint(at7700)
+    assert any(i[2] is None and i[6] == "Egypt" for i in at1350)          # base, In Egypt
+    assert any(i[2] == "Sensity 2" and i[6] == "Out Of Egypt" for i in at7700)
+
+    # no wholesale value ever written as a commercial price
+    src_wholesale = set()
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        pass
+    for v in vps:
+        assert v.price_pair is not None and float(v.price_pair) > 0
+
+    # match off the FULL confirmed DB
+    m = LensMatcherFinal()
+    def _rx(s, c):
+        t = _TE.transpose(s, c, 90 if c else 0)
+        x = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=t[0], os_sph=t[0],
+            od_cyl_original=c, os_cyl_original=c, od_cyl=t[1], os_cyl=t[1],
+            od_axis=t[2], os_axis=t[2], od_add=0.0, os_add=0.0)
+        db.add(x); db.commit(); db.refresh(x); return x
+
+    for label, (s, c) in {
+        "minus": (-2.0, 0.0), "plus": (2.0, 0.0), "astig": (-1.5, -1.0),
+        "mix": (1.5, -2.5), "sphere_only": (-8.0, 0.0), "g3": (3.0, -3.0),
+        "rx_high_minus": (-13.0, 0.0),
+    }.items():
+        res = m.match_lenses(db, _rx(s, c), None, True, True)[0]
+        assert len(res) >= 1, label
+        # deduped: no repeated pricing id
+        assert len(res) == len({r.source_pricing_id for r in res}), label
+        # sorted by (-score, stock-before-rx, price)
+        keys = [(-r.match_score, 0 if r.availability == "stock" else 1, r.price_pair) for r in res]
+        assert keys == sorted(keys), label
+        top = res[0]
+        assert top.price_pair and float(top.price_pair) > 0
+        assert top.availability in ("stock", "rx")

@@ -810,31 +810,75 @@ def confirm_catalog_commercial(
         e for e in get_extractions_by_catalog(db, catalog_id) if e.status != "rejected"
     ]
 
-    # ---------- PHASE A: validate everything, collect every reason ----------
-    errors: List[str] = []
+    # ---------- PHASE A: prepare the SAFE subset; park the rest -------------
+    # A minority of unresolved / conflicting rows must NOT zero out the whole
+    # catalog. Rows that cannot be safely written are parked with an exact
+    # reason for human review; everything clean is confirmed atomically.
+    #   - _prepare error            -> skipped_unresolved
+    #   - same identity + same price + same power_scope + currency
+    #                               -> true duplicate, collapsed (one pricing)
+    #   - same identity, DIFFERENT price -> price conflict: BOTH rows parked,
+    #                                  never merged / averaged / auto-picked
     if not considered:
-        errors.append(f"catalog {catalog_id}: no confirmable extractions")
+        raise CommercialValidationError(
+            [f"catalog {catalog_id}: no confirmable extractions"]
+        )
 
-    prepared: List[dict] = []
-    identity_seen: dict = {}
+    keep: dict = {}          # identity -> row (the survivor to write)
+    seen_meta: dict = {}     # identity -> (ext_id, price, currency, power_scope)
+    conflicted: set = set()  # identities with an unresolved price conflict
+    parked: List[dict] = []  # [{"extraction_id": int, "reason": str}]
+
     for ext in considered:
         result = _prepare_extraction_row(ext)
         if "errors" in result:
-            errors.extend(result["errors"])
+            parked.append({"extraction_id": ext.id, "reason": "; ".join(result["errors"])})
             continue
         row = result["row"]
         ident = row["identity"]
-        if ident in identity_seen:
-            errors.append(
-                f"extraction {ext.id}: duplicate commercial identity in catalog "
-                f"(collides with extraction {identity_seen[ident]})"
-            )
+        meta = (ext.id, row.get("price"), "EGP", row.get("power_scope") or "")
+        if ident in conflicted:
+            parked.append({
+                "extraction_id": ext.id,
+                "reason": f"price conflict for this commercial identity "
+                          f"(see extraction {seen_meta[ident][0]}) - needs human review",
+            })
             continue
-        identity_seen[ident] = ext.id
-        prepared.append(row)
+        if ident in keep:
+            p_id, p_price, p_cur, p_scope = seen_meta[ident]
+            exact = (
+                abs((p_price or 0.0) - (row.get("price") or 0.0)) < 0.005
+                and p_cur == meta[2] and p_scope == meta[3]
+            )
+            if exact:
+                parked.append({
+                    "extraction_id": ext.id,
+                    "reason": f"exact duplicate of extraction {p_id} - collapsed to one pricing",
+                })
+            else:
+                # genuine price conflict: park BOTH, keep neither
+                parked.append({
+                    "extraction_id": p_id,
+                    "reason": f"price conflict for this commercial identity "
+                              f"(with extraction {ext.id}) - needs human review",
+                })
+                parked.append({
+                    "extraction_id": ext.id,
+                    "reason": f"price conflict for this commercial identity "
+                              f"(with extraction {p_id}) - needs human review",
+                })
+                del keep[ident]
+                conflicted.add(ident)
+            continue
+        keep[ident] = row
+        seen_meta[ident] = meta
 
-    if errors:
-        raise CommercialValidationError(errors)
+    prepared: List[dict] = list(keep.values())
+    if not prepared:
+        raise CommercialValidationError(
+            [f"catalog {catalog_id}: no confirmable rows"]
+            + [f"extraction {p['extraction_id']}: {p['reason']}" for p in parked]
+        )
 
     # ---------- PHASE B: one atomic write ----------
     try:
@@ -970,6 +1014,17 @@ def confirm_catalog_commercial(
         catalog.confirmed_by = reviewed_by
         db.flush()
 
+        # 8. park the unresolved / conflicting rows: back to needs_review with an
+        #    exact reason. Never fabricated, never silently dropped.
+        for pk in parked:
+            pe = db.get(models.CatalogExtraction, pk["extraction_id"])
+            if pe is not None and pe.status != "rejected":
+                pe.status = "needs_review"
+                pe.review_notes = (
+                    ((pe.review_notes + " | ") if pe.review_notes else "") + pk["reason"]
+                )
+        db.flush()
+
         if _fault_hook is not None:
             _fault_hook(db)
 
@@ -978,10 +1033,17 @@ def confirm_catalog_commercial(
         db.rollback()
         raise
 
+    _n_conflict = sum(1 for p in parked if "price conflict" in p["reason"])
+    _n_truedup = sum(1 for p in parked if "exact duplicate" in p["reason"])
     return {
         "catalog_id": catalog.id,
         "status": models.CatalogStatus.CONFIRMED.value,
         "priced_rows": len(written),
+        "confirmed": len(written),
+        "skipped_unresolved": len(parked) - _n_conflict - _n_truedup,
+        "true_duplicates_collapsed": _n_truedup,
+        "conflicts": _n_conflict,
+        "parked": parked,
         "closed_previous_current": len(current_rows),
         "superseded_catalogs": [c.id for c in superseded],
     }
