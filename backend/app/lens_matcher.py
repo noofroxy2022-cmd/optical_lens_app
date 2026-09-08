@@ -223,20 +223,28 @@ class LensMatcherFinal:
                 and abs(sph) >= abs(power_range.sph_threshold)):
             if abs(cyl_needed) > abs(power_range.max_cyl_for_high_sph):
                 issues.append(f"CYL محدود لـ SPH ≥ {power_range.sph_threshold}")
-        # G3 authoritative constraint: total power (algebraic SPH+CYL) within
-        # [total_power_min, total_power_max] inclusive, AND abs(CYL) <=
-        # max_cyl_abs. Evaluated on the minus form (see _range_convention). The
-        # sph/cyl box checks above are only a coarse prefilter for G3 rows.
+        # G3 authoritative constraint: the two PRINCIPAL MERIDIAN powers must sit
+        # inside the total-power envelope, AND abs(CYL) <= max_cyl_abs. Evaluated
+        # on the stored minus form (see _range_convention), where
+        #   high_meridian = SPH,   low_meridian = SPH + CYL
+        # The unordered meridian pair {SPH, SPH+CYL} is invariant under
+        # plus/minus-cyl transposition, so an equivalent Rx entered in either
+        # notation normalizes to the same pair and matches identically.
+        # total_power_min bounds the LOW meridian; total_power_max bounds the
+        # HIGH meridian. The sph/cyl box checks above are only a coarse prefilter
+        # for G3 rows.
         tp_min = getattr(power_range, "total_power_min", None)
         tp_max = getattr(power_range, "total_power_max", None)
         mca = getattr(power_range, "max_cyl_abs", None)
         if tp_min is not None or tp_max is not None:
-            total = sph + cyl_needed
-            t_lo = tp_min if tp_min is not None else -1e9
-            t_hi = tp_max if tp_max is not None else 1e9
-            if not (t_lo - self.tolerance_sph <= total <= t_hi + self.tolerance_sph):
+            high_meridian = sph
+            low_meridian = sph + cyl_needed
+            if tp_min is not None and low_meridian < tp_min - self.tolerance_sph:
                 issues.append(
-                    f"total SPH+CYL {round(total, 2)} خارج [{t_lo}, {t_hi}]")
+                    f"low meridian {round(low_meridian, 2)} < total_power_min {tp_min}")
+            if tp_max is not None and high_meridian > tp_max + self.tolerance_sph:
+                issues.append(
+                    f"high meridian {round(high_meridian, 2)} > total_power_max {tp_max}")
         if mca is not None:
             if abs(cyl_needed) > mca + self.tolerance_cyl:
                 issues.append(f"CYL magnitude {abs(cyl_needed)} > {mca}")

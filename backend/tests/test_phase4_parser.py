@@ -2487,3 +2487,84 @@ def test_g3_S_no_wholesale_leak(db):
     # of them may be a parsed G3 row's commercial price
     assert not any(r.price in (2900.0, 3750.0, 3950.0, 4650.0, 6200.0) for r in g3)
     assert not any("wholesale" in (r.notes or "").lower() for r in g3)
+
+
+# ============================================================
+#  G3 principal-meridian corrective slice (matcher semantics)
+#  total_power_min bounds the LOW meridian (SPH+CYL);
+#  total_power_max bounds the HIGH meridian (SPH).
+# ============================================================
+def _g3_pr(*, total_power_min=None, total_power_max=None, max_cyl_abs=None,
+          sph_min=-40.0, sph_max=40.0, cyl_min=-10.0, cyl_max=0.0):
+    return type("PR", (), dict(
+        sph_min=sph_min, sph_max=sph_max, cyl_min=cyl_min, cyl_max=cyl_max,
+        add_min=None, add_max=None, max_cyl_for_high_sph=None, sph_threshold=None,
+        total_power_min=total_power_min, total_power_max=total_power_max,
+        max_cyl_abs=max_cyl_abs))()
+
+
+def _g3_chk(pr, sph, cyl):
+    from app.lens_matcher import LensMatcherFinal
+    return LensMatcherFinal()._check_form_against_range(pr, (sph, cyl, 0, 0.0))
+
+
+def _g3_norm(sph, cyl, axis):
+    """Normalized (stored minus-cyl) form for an entered Rx."""
+    from app.lens_matcher import TranspositionEngine as _TE
+    s, c, _a = _TE.transpose(sph, cyl, axis)
+    return round(s, 2), round(c, 2)
+
+
+# -- T. +4/+2 and its transpose +6/-2: same stored form, both pass +6 ceiling
+def test_g3_T_plus_notation_parity_passes_upper_boundary():
+    assert _g3_norm(4.0, 2.0, 90) == _g3_norm(6.0, -2.0, 180) == (6.0, -2.0)
+    pr = _g3_pr(total_power_max=6.0)
+    s, c = _g3_norm(4.0, 2.0, 90)
+    assert _g3_chk(pr, s, c) == []           # high meridian +6 == +6 -> inclusive pass
+
+
+# -- U. +7/-2 and its transpose +5/+2: both FAIL the +6 ceiling (shipped FP)
+def test_g3_U_high_meridian_ceiling_rejects_both_notations():
+    assert _g3_norm(7.0, -2.0, 180) == _g3_norm(5.0, 2.0, 90) == (7.0, -2.0)
+    pr = _g3_pr(total_power_max=6.0)
+    s, c = _g3_norm(5.0, 2.0, 90)
+    issues = _g3_chk(pr, s, c)               # old impl passed: sph+cyl = +5 <= +6
+    assert issues and any("high meridian" in i for i in issues)
+
+
+# -- V. -6/-2 and its transpose -8/+2: both PASS the -8 floor
+def test_g3_V_low_meridian_floor_accepts_both_notations():
+    assert _g3_norm(-6.0, -2.0, 90) == _g3_norm(-8.0, 2.0, 180) == (-6.0, -2.0)
+    pr = _g3_pr(total_power_min=-8.0)
+    s, c = _g3_norm(-8.0, 2.0, 180)
+    assert _g3_chk(pr, s, c) == []           # low meridian -8 == -8 -> inclusive pass
+
+
+# -- W. low meridian below total_power_min fails
+def test_g3_W_low_meridian_below_min_fails():
+    pr = _g3_pr(total_power_min=-10.0, total_power_max=11.0)
+    issues = _g3_chk(pr, -9.0, -2.0)         # low = -11
+    assert issues and any("low meridian" in i for i in issues)
+
+
+# -- X. +14/-6 now rejected: high meridian above max even though SPH+CYL passed
+def test_g3_X_plus14_minus6_now_rejected():
+    # real coarse box for Total (-10 +11) Max Cyl (6): sph[-10,17] cyl[-6,0]
+    pr = _g3_pr(total_power_min=-10.0, total_power_max=11.0, max_cyl_abs=6.0,
+                sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0)
+    issues = _g3_chk(pr, 14.0, -6.0)         # low = +8 (old impl accepted); high = +14
+    assert issues and any("high meridian" in i for i in issues)
+    assert not any(i.startswith("SPH ") for i in issues)     # coarse box did NOT exclude
+    assert not any("magnitude" in i for i in issues)         # |cyl| 6 <= cap 6
+
+
+# -- Y. meridian boundaries inclusive; max_cyl_abs behaviour unchanged
+def test_g3_Y_boundaries_inclusive_and_cap_unchanged():
+    pr = _g3_pr(total_power_min=-10.0, total_power_max=11.0, max_cyl_abs=6.0,
+                sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0)
+    assert _g3_chk(pr, 11.0, 0.0) == []          # high == +11
+    assert _g3_chk(pr, -6.0, -4.0) == []         # low  == -10
+    assert _g3_chk(pr, 11.0, -3.0) == []         # high +11, low +8
+    assert _g3_chk(pr, 0.0, -6.0) == []          # |cyl| == 6 exactly
+    over = _g3_chk(pr, 0.0, -7.0)                # |cyl| 7 > 6
+    assert over and any("magnitude" in i for i in over)
