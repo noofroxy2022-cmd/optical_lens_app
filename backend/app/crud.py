@@ -531,7 +531,8 @@ def _fmt_scope_num(value) -> str:
 
 
 def build_power_scope(
-    sph_min=None, sph_max=None, cyl_min=None, cyl_max=None, add_min=None, add_max=None
+    sph_min=None, sph_max=None, cyl_min=None, cyl_max=None, add_min=None, add_max=None,
+    total_power_min=None, total_power_max=None, max_cyl_abs=None,
 ) -> Optional[str]:
     """Canonical, deterministic power-scope key (single source of truth).
 
@@ -555,6 +556,13 @@ def build_power_scope(
     if real(add_min, add_max):
         lo, hi = sorted((float(add_min or 0.0), float(add_max or 0.0)))
         parts.append(f"add:{_fmt_scope_num(lo)}/{_fmt_scope_num(hi)}")
+    # G3 "Total Sph+Cyl" clause - keeps distinct G3 clauses from colliding in
+    # commercial identity even when their coarse sph/cyl boxes coincide.
+    if total_power_min is not None or total_power_max is not None:
+        lo, hi = sorted((float(total_power_min or 0.0), float(total_power_max or 0.0)))
+        parts.append(f"total:{_fmt_scope_num(lo)}/{_fmt_scope_num(hi)}")
+    if max_cyl_abs is not None:
+        parts.append(f"maxcyl:{_fmt_scope_num(float(max_cyl_abs))}")
     return "|".join(parts) if parts else None
 
 
@@ -649,7 +657,15 @@ def _prepare_extraction_row(ext) -> dict:
     sph_min, sph_max = _pair(md.get("sph_min", ext.sph_min), md.get("sph_max", ext.sph_max))
     cyl_min, cyl_max = _pair(md.get("cyl_min", ext.cyl_min), md.get("cyl_max", ext.cyl_max))
     add_min, add_max = _pair(md.get("add_min", ext.add_min), md.get("add_max", ext.add_max))
-    power_scope = build_power_scope(sph_min, sph_max, cyl_min, cyl_max, add_min, add_max)
+    # G3 "Total Sph+Cyl" clause (nullable; human review overlay wins). These are
+    # the AUTHORITATIVE G3 constraint; sph_*/cyl_* above are only a coarse box.
+    total_power_min = md.get("total_power_min", ext.extracted_total_power_min)
+    total_power_max = md.get("total_power_max", ext.extracted_total_power_max)
+    max_cyl_abs = md.get("max_cyl_abs", ext.extracted_max_cyl_abs)
+    power_scope = build_power_scope(
+        sph_min, sph_max, cyl_min, cyl_max, add_min, add_max,
+        total_power_min, total_power_max, max_cyl_abs,
+    )
     has_range = power_scope is not None
     if availability == models.PricingAvailability.STOCK and not has_range:
         errors.append(f"{tag}: STOCK requires PowerRange data (no numeric sph/cyl/add range)")
@@ -717,6 +733,9 @@ def _prepare_extraction_row(ext) -> dict:
             "sph_min": sph_min, "sph_max": sph_max,
             "cyl_min": cyl_min, "cyl_max": cyl_max,
             "add_min": add_min, "add_max": add_max,
+            "total_power_min": total_power_min,
+            "total_power_max": total_power_max,
+            "max_cyl_abs": max_cyl_abs,
             "identity": (
                 name.strip().lower(), category_enum.value,
                 material_enum.value, idx,
@@ -919,6 +938,9 @@ def confirm_catalog_commercial(
                         cyl_max=float(row["cyl_max"]) if row["cyl_max"] is not None else 0.0,
                         add_min=row["add_min"],
                         add_max=row["add_max"],
+                        total_power_min=row.get("total_power_min"),
+                        total_power_max=row.get("total_power_max"),
+                        max_cyl_abs=row.get("max_cyl_abs"),
                     )
                 )
                 db.flush()

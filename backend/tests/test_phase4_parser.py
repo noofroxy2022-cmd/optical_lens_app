@@ -1750,10 +1750,12 @@ def test_g1_H_g2_now_parses_g1_boundary_intact(parser):
         assert "unparsed stock range grammar" not in r.review_reasons
 
 
-def test_g1_I_g3_still_unparsed(parser):
-    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
-                "Total Sph+Cyl (+11.00 -10.00)",
-                "Total Sph+Cyl (+6.00 -6.00) Cyl (3)"):
+def test_g1_I_g3_deferred_forms_still_unparsed(parser):
+    # G3 slice 1 (two-number total + unsigned cap) parses; the DEFERRED G3
+    # forms - single-number total, signed Cyl(c) single total, capless total -
+    # stay unparsed. G1 parser never matches any "Total Sph+Cyl" line.
+    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",   # single signed total
+                "Total Sph+Cyl (+11.00 -10.00)"):          # capless two-number total
         assert parser._parse_g1_stock_range(txt) is None
         r = _g1_row(parser, txt)
         assert r.has_range is False
@@ -2009,10 +2011,11 @@ def test_g2_H_g1_unchanged(parser):
     assert parser._parse_g2_stock_range("Sph (0.00 To -3.00) Cyl (-3.00) 70") is None
 
 
-def test_g2_I_g3_still_blocked(parser):
+def test_g2_I_g3_deferred_forms_still_blocked(parser):
+    # G2 parser never matches "Total Sph+Cyl"; the DEFERRED G3 forms stay
+    # unparsed (G3 slice 1 two-number+cap forms are covered by test_g3_*).
     for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
-                "Total Sph+Cyl (+11.00 -10.00)",
-                "Total Sph+Cyl (+6.00 -6.00) Cyl (3)"):
+                "Total Sph+Cyl (+11.00 -10.00)"):
         assert parser._parse_g2_stock_range(txt) is None
         r = _g2_row(parser, txt)
         assert r.has_range is False
@@ -2111,3 +2114,376 @@ def test_g2_M_N_O_bulk_confirm_and_matcher(db):
 def g2_price_decimal(v):
     from decimal import Decimal
     return Decimal(str(v)).quantize(Decimal("0.01"))
+
+
+# ===========================================================================
+# G3 Stock Range slice 1:  "Total Sph+Cyl (a b) [Max ]Cyl (n)"  (two-number
+# total envelope + UNSIGNED cyl cap). Authoritative:
+#   total_power_min <= SPH+CYL <= total_power_max   (minus-cyl convention)
+#   AND abs(CYL) <= max_cyl_abs
+# sph_*/cyl_* hold only a false-negative-safe coarse prefilter box.
+# ===========================================================================
+def _g3_rows(parser, *range_lines, type_="Hilux 1.5", coating="Hi Vision Aqua",
+            price="6100"):
+    matrix = [list(_H4)] + [[type_, coating, price, rl] for rl in range_lines]
+    return parser._rows_from_section(matrix[:1], matrix,
+                                     ParserContext(availability="stock"))
+
+
+def _g3_wrapped(parser, total_line, maxcyl_line, *, price="6100",
+                type_="Hilux 1.5", coating="Hi Vision Aqua"):
+    # two consecutive matrix rows, cap line has blank identity cells (inherited)
+    matrix = [list(_H4),
+              [type_, coating, price, total_line],
+              ["", "", "", maxcyl_line]]
+    return parser._rows_from_section(matrix[:1], matrix,
+                                    ParserContext(availability="stock"))
+
+
+# -- A. wrapped parse -> total/max_cyl_abs + coarse box -----------------
+def test_g3_A_wrapped_total_and_cap(parser):
+    rows = _g3_wrapped(parser, "Total Sph+Cyl (+11.00 -10.00)", "Max Cyl (6)")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.has_range is True
+    assert (r.total_power_min, r.total_power_max) == (-10.0, 11.0)
+    assert r.max_cyl_abs == 6.0
+    assert (r.sph_min, r.sph_max) == (-10.0, 17.0)      # coarse box: [tmin, tmax+n]
+    assert (r.cyl_min, r.cyl_max) == (-6.0, 0.0)        # coarse box: [-n, 0]
+    assert "unparsed stock range grammar" not in r.review_reasons
+
+
+# -- B. inline unsigned cap -------------------------------------------
+def test_g3_B_inline_cap(parser):
+    r = _g3_rows(parser, "Total Sph+Cyl (+6.00 -8.00) Cyl (2)")[0]
+    assert (r.total_power_min, r.total_power_max) == (-8.0, 6.0)
+    assert r.max_cyl_abs == 2.0
+    assert (r.sph_min, r.sph_max) == (-8.0, 8.0)
+    assert (r.cyl_min, r.cyl_max) == (-2.0, 0.0)
+
+
+# -- C. positive-only interval --------------------------------------
+def test_g3_C_positive_only_interval(parser):
+    g = parser._parse_g3_stock_range("Total Sph+Cyl (+0.25 +6.00) Cyl (2)")
+    assert g["total"] == (0.25, 6.0) and g["max_cyl_abs"] == 2.0
+
+
+# -- D. wrapped Total + Max Cyl become ONE clause -----------------
+def test_g3_D_wrapped_is_one_clause(parser):
+    rows = _g3_wrapped(parser, "Total Sph+Cyl (+8.00 -8.00)", "Max Cyl (6)")
+    assert len(rows) == 1 and rows[0].total_power_min == -8.0
+
+
+# -- E. pairing never crosses a price / Type-Coating boundary -----
+def test_g3_E_pairing_respects_boundaries(parser):
+    # different price on the Max Cyl row -> NOT paired
+    m = [list(_H4),
+         ["Hilux 1.5", "Hi Vision Aqua", "6100", "Total Sph+Cyl (+11.00 -10.00)"],
+         ["Hilux 1.5", "Hi Vision Aqua", "7900", "Max Cyl (6)"]]
+    rows = parser._rows_from_section(m[:1], m, ParserContext(availability="stock"))
+    assert len(rows) == 2
+    assert all(r.has_range is False for r in rows)
+    assert all("unparsed stock range grammar" in r.review_reasons for r in rows)
+    # different Coating -> NOT paired
+    m2 = [list(_H4),
+          ["Hilux 1.5", "Hi Vision Aqua", "6100", "Total Sph+Cyl (+11.00 -10.00)"],
+          ["Hilux 1.5", "Super Hi Vision", "6100", "Max Cyl (6)"]]
+    rows2 = parser._rows_from_section(m2[:1], m2, ParserContext(availability="stock"))
+    assert len(rows2) == 2 and all(r.has_range is False for r in rows2)
+
+
+# -- F. capless Total stays needs_review --------------------------
+def test_g3_F_capless_total_blocked(parser):
+    r = _g3_rows(parser, "Total Sph+Cyl (+11.00 -10.00)")[0]
+    assert r.has_range is False
+    assert r.total_power_min is None and r.max_cyl_abs is None
+    assert "unparsed stock range grammar" in r.review_reasons
+
+
+# -- G/H/I. unsupported G3 forms stay needs_review ---------------
+def test_g3_G_single_number_total_blocked(parser):
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (2.00)", "Total Sph+Cyl (-5.00) Cyl (-2.00) 70"):
+        assert parser._parse_g3_stock_range(txt) is None
+        r = _g3_rows(parser, txt)[0]
+        assert r.has_range is False
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g3_H_empty_total_blocked(parser):
+    assert parser._parse_g3_stock_range("Total Sph+Cyl ()") is None
+    r = _g3_rows(parser, "Total Sph+Cyl ()")[0]
+    assert r.has_range is False
+    assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g3_I_signed_single_total_blocked(parser):
+    r = _g3_rows(parser, "Total Sph+Cyl (-8.00) Cyl (-3.00) 70")[0]
+    assert r.has_range is False and r.total_power_min is None
+    assert "unparsed stock range grammar" in r.review_reasons
+
+
+# -- J. total constraint rejects an Rx that passes the loose box ---
+def test_g3_J_total_envelope_rejects_box_pass(db):
+    from datetime import datetime as _dt
+    from decimal import Decimal
+    co = models.Company(name="G3J", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    lm = models.LensModel(company_id=co.id, name="Hilux",
+                          category=models.LensCategory.SINGLE_VISION)
+    db.add(lm); db.commit(); db.refresh(lm)
+    v = models.LensVariant(lens_model_id=lm.id, material=models.MaterialType.CR39,
+                           index_value=1.5, price=0.0,
+                           design_type=models.DesignType.SPHERICAL, is_aspherical=False)
+    db.add(v); db.commit(); db.refresh(v)
+    cat = models.Catalog(company_id=co.id, filename="c.pdf", file_path="/x",
+                         status=models.CatalogStatus.CONFIRMED)
+    db.add(cat); db.commit(); db.refresh(cat)
+    vp = models.VariantPricing(variant_id=v.id, availability=models.PricingAvailability.STOCK,
+        price_pair=Decimal("6100.00"), currency="EGP", source_catalog_id=cat.id,
+        effective_from=_dt.utcnow(), effective_to=None, market_scope="Egypt")
+    db.add(vp); db.commit(); db.refresh(vp)
+    # total in [-10, +11], |cyl| <= 6 ; coarse box sph[-10,17] cyl[-6,0]
+    db.add(models.PowerRange(lens_model_id=lm.id, variant_id=v.id, pricing_id=vp.id,
+        sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0,
+        total_power_min=-10.0, total_power_max=11.0, max_cyl_abs=6.0))
+    db.commit()
+
+    def presc(s, c):
+        p = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=s, os_sph=s,
+            od_cyl_original=c, os_cyl_original=c, od_cyl=c, os_cyl=c,
+            od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(p); db.commit(); db.refresh(p); return p
+
+    # inside envelope -> match
+    inside = _matcher.match_lenses(db, presc(-8.0, 0.0), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in inside)
+    # SPH -14 / CYL 0 : passes coarse sph box [-10-.., 17]? -14 < -10-0.25 -> box already excludes; use -10/-... pick a box-pass, envelope-fail:
+    # SPH -10 / CYL -5 : box sph -10 ok (>= -10-0.25), cyl -5 in [-6,0] -> box PASS ; total = -15 < -10 -> envelope FAIL
+    fp = _matcher.match_lenses(db, presc(-10.0, -5.0), None, True, True)[0]
+    assert not any(r.source_pricing_id == vp.id for r in fp)
+
+
+# -- K. max_cyl_abs rejects abs(CYL) above cap --------------------
+def test_g3_K_cap_rejects_high_cyl(db):
+    from datetime import datetime as _dt
+    from decimal import Decimal
+    co = models.Company(name="G3K", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    lm = models.LensModel(company_id=co.id, name="Hilux",
+                          category=models.LensCategory.SINGLE_VISION)
+    db.add(lm); db.commit(); db.refresh(lm)
+    v = models.LensVariant(lens_model_id=lm.id, material=models.MaterialType.CR39,
+                           index_value=1.5, price=0.0,
+                           design_type=models.DesignType.SPHERICAL, is_aspherical=False)
+    db.add(v); db.commit(); db.refresh(v)
+    cat = models.Catalog(company_id=co.id, filename="c.pdf", file_path="/x",
+                         status=models.CatalogStatus.CONFIRMED)
+    db.add(cat); db.commit(); db.refresh(cat)
+    vp = models.VariantPricing(variant_id=v.id, availability=models.PricingAvailability.STOCK,
+        price_pair=Decimal("6100.00"), currency="EGP", source_catalog_id=cat.id,
+        effective_from=_dt.utcnow(), effective_to=None, market_scope="Egypt")
+    db.add(vp); db.commit(); db.refresh(vp)
+    db.add(models.PowerRange(lens_model_id=lm.id, variant_id=v.id, pricing_id=vp.id,
+        sph_min=-8.0, sph_max=8.0, cyl_min=-2.0, cyl_max=0.0,
+        total_power_min=-8.0, total_power_max=6.0, max_cyl_abs=2.0))
+    db.commit()
+
+    def presc(s, c):
+        p = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=s, os_sph=s,
+            od_cyl_original=c, os_cyl_original=c, od_cyl=c, os_cyl=c,
+            od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(p); db.commit(); db.refresh(p); return p
+
+    ok = _matcher.match_lenses(db, presc(-2.0, -1.5), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in ok)
+    # |cyl| = 3 > cap 2 (and box cyl_min -2 also excludes, but cap is the point)
+    bad = _matcher.match_lenses(db, presc(-1.0, -3.0), None, True, True)[0]
+    assert not any(r.source_pricing_id == vp.id for r in bad)
+
+
+# -- L. boundary values are inclusive ---------------------------
+def test_g3_L_inclusive_boundaries():
+    from app.lens_matcher import LensMatcherFinal
+    m = LensMatcherFinal()
+    pr = type("PR", (), dict(sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0,
+                             add_min=None, add_max=None, max_cyl_for_high_sph=None,
+                             sph_threshold=None, total_power_min=-10.0,
+                             total_power_max=11.0, max_cyl_abs=6.0))()
+    assert m._check_form_against_range(pr, (-6.0, -4.0, 0, 0.0)) == []      # total exactly -10
+    assert m._check_form_against_range(pr, (11.0, 0.0, 0, 0.0)) == []       # total exactly +11
+    assert m._check_form_against_range(pr, (0.0, -6.0, 0, 0.0)) == []       # |cyl| exactly 6
+
+
+# -- M. G3 uses minus form only --------------------------------
+def test_g3_M_minus_convention():
+    from app.lens_matcher import LensMatcherFinal
+    m = LensMatcherFinal()
+    pr = type("PR", (), dict(cyl_min=-6.0, cyl_max=0.0, total_power_min=-10.0,
+                             total_power_max=11.0, max_cyl_abs=6.0))()
+    assert m._range_convention(pr) == "minus"           # never "both", never "plus"
+
+
+# -- N. same Rx entered plus vs minus -> identical G3 result --
+def test_g3_N_entry_notation_independent(db):
+    from datetime import datetime as _dt
+    from decimal import Decimal
+    from app.lens_matcher import TranspositionEngine as _TE
+    co = models.Company(name="G3N", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    lm = models.LensModel(company_id=co.id, name="Hilux",
+                          category=models.LensCategory.SINGLE_VISION)
+    db.add(lm); db.commit(); db.refresh(lm)
+    v = models.LensVariant(lens_model_id=lm.id, material=models.MaterialType.CR39,
+                           index_value=1.5, price=0.0,
+                           design_type=models.DesignType.SPHERICAL, is_aspherical=False)
+    db.add(v); db.commit(); db.refresh(v)
+    cat = models.Catalog(company_id=co.id, filename="c.pdf", file_path="/x",
+                         status=models.CatalogStatus.CONFIRMED)
+    db.add(cat); db.commit(); db.refresh(cat)
+    vp = models.VariantPricing(variant_id=v.id, availability=models.PricingAvailability.STOCK,
+        price_pair=Decimal("6100.00"), currency="EGP", source_catalog_id=cat.id,
+        effective_from=_dt.utcnow(), effective_to=None, market_scope="Egypt")
+    db.add(vp); db.commit(); db.refresh(vp)
+    db.add(models.PowerRange(lens_model_id=lm.id, variant_id=v.id, pricing_id=vp.id,
+        sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0,
+        total_power_min=-10.0, total_power_max=11.0, max_cyl_abs=6.0))
+    db.commit()
+
+    def stored(entered):
+        s, c, a = entered
+        t = _TE.transpose(s, c, a)
+        p = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=t[0], os_sph=t[0],
+            od_cyl_original=c, os_cyl_original=c, od_cyl=t[1], os_cyl=t[1],
+            od_axis=t[2], os_axis=t[2], od_add=0.0, os_add=0.0)
+        db.add(p); db.commit(); db.refresh(p); return p
+
+    minus_entry = stored((-6.0, -2.0, 90))          # total -8
+    plus_entry = stored((-8.0, 2.0, 180))           # transposes to (-6, -2, 90) -> same
+    assert (minus_entry.od_sph, minus_entry.od_cyl) == (plus_entry.od_sph, plus_entry.od_cyl)
+    a = {r.source_pricing_id for r in _matcher.match_lenses(db, minus_entry, None, True, True)[0]}
+    b = {r.source_pricing_id for r in _matcher.match_lenses(db, plus_entry, None, True, True)[0]}
+    assert vp.id in a and a == b
+
+
+# -- O. two G3 clauses under one price stay OR alternatives ---
+def test_g3_O_two_clauses_or(parser):
+    rows = _g3_rows(parser,
+                    "Total Sph+Cyl (+6.00 -6.00) Cyl (2)",
+                    "Total Sph+Cyl (+6.00 -8.00) Cyl (3)")
+    assert len(rows) == 2
+    assert {(r.total_power_min, r.total_power_max, r.max_cyl_abs) for r in rows} == {
+        (-6.0, 6.0, 2.0), (-8.0, 6.0, 3.0)}
+    assert all(r.price == 6100.0 for r in rows)
+
+
+# -- P. distinct G3 power_scope prevents identity collision ---
+def test_g3_P_distinct_power_scope():
+    from app.crud import build_power_scope
+    s1 = build_power_scope(-6.0, 8.0, -2.0, 0.0, None, None, -6.0, 6.0, 2.0)
+    s2 = build_power_scope(-6.0, 8.0, -2.0, 0.0, None, None, -8.0, 6.0, 3.0)
+    assert s1 != s2
+    assert "total:" in s1 and "maxcyl:" in s1
+    # a non-G3 call is unchanged (no total/maxcyl segment)
+    s0 = build_power_scope(-4.0, 0.0, -2.0, 0.0)
+    assert "total:" not in s0 and "maxcyl:" not in s0
+
+
+# -- Q. parse -> CatalogExtraction -> bulk-confirm -> PowerRange preserves fields
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_Q_e2e_preserves_fields(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    g3 = None
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        for pi in (8, 9, 11):                       # pages 9, 10, 12
+            page = pdf.pages[pi]
+            for ov, hdr, mat in p._extract_page_tables(page):
+                for r in p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov)):
+                    if r.has_range and r.total_power_min is not None:
+                        g3 = r
+            if g3:
+                break
+    assert g3 is not None
+    co = models.Company(name="G3Q", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name=g3.model_hint or "Hilux",
+                                             category="single_vision", power_ranges=[g3])]
+    p.save_extractions_to_db(cat.id, db)
+    exts = _crud.get_extractions_by_catalog(db, cat.id)
+    assert any(e.extracted_total_power_min is not None for e in exts)
+    for e in exts:
+        _crud.confirm_extraction(db, e.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    pr = db.query(models.PowerRange).one()
+    assert pr.total_power_min == g3.total_power_min
+    assert pr.total_power_max == g3.total_power_max
+    assert pr.max_cyl_abs == g3.max_cyl_abs
+    vp = db.query(models.VariantPricing).one()
+    assert "total:" in (vp.power_scope or "")
+
+
+# -- R. real updated-HOYA G3 E2E reaches matcher ---------------
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_R_real_e2e_matcher(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    g3 = None
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[8]                          # page 9, Special Order XR
+        for ov, hdr, mat in p._extract_page_tables(page):
+            for r in p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov)):
+                if r.has_range and r.total_power_min is not None and g3 is None:
+                    g3 = r
+    assert g3 is not None
+    co = models.Company(name="G3R", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name=g3.model_hint or "Hilux",
+                                             category="single_vision", power_ranges=[g3])]
+    p.save_extractions_to_db(cat.id, db)
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    vp = db.query(models.VariantPricing).one()
+    tmid = round((g3.total_power_min + g3.total_power_max) / 2.0, 2)
+
+    def presc(s, c):
+        x = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=s, os_sph=s,
+            od_cyl_original=c, os_cyl_original=c, od_cyl=c, os_cyl=c,
+            od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(x); db.commit(); db.refresh(x); return x
+
+    hit = _matcher.match_lenses(db, presc(tmid, 0.0), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in hit)
+    # far outside the envelope -> excluded
+    miss = _matcher.match_lenses(db, presc(g3.total_power_min - 15.0, 0.0), None, True, True)[0]
+    assert not any(r.source_pricing_id == vp.id for r in miss)
+    # S: retail only, no wholesale value as a price
+    assert vp.price_pair == g3_price_dec(g3.price)
+
+
+def g3_price_dec(v):
+    from decimal import Decimal
+    return Decimal(str(v)).quantize(Decimal("0.01"))
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_S_no_wholesale_leak(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[8]
+        rows = []
+        for ov, hdr, mat in p._extract_page_tables(page):
+            rows += p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov))
+    g3 = [r for r in rows if r.has_range and r.total_power_min is not None]
+    assert g3
+    # left-column wholesale values on page 9 are 2900/3750/3950/4650/... - none
+    # of them may be a parsed G3 row's commercial price
+    assert not any(r.price in (2900.0, 3750.0, 3950.0, 4650.0, 6200.0) for r in g3)
+    assert not any("wholesale" in (r.notes or "").lower() for r in g3)

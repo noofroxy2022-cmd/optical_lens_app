@@ -141,6 +141,10 @@ class CatalogExtractionBase(BaseModel):
     cyl_max: Optional[float] = None
     add_min: Optional[float] = None
     add_max: Optional[float] = None
+    # G3 "Total Sph+Cyl" clause (nullable; only set for G3 stock ranges)
+    extracted_total_power_min: Optional[float] = None
+    extracted_total_power_max: Optional[float] = None
+    extracted_max_cyl_abs: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
     # commercial identity (parser-populated in Phase 4)
@@ -167,6 +171,9 @@ class CatalogExtractionUpdate(BaseModel):
     cyl_max: Optional[float] = None
     add_min: Optional[float] = None
     add_max: Optional[float] = None
+    extracted_total_power_min: Optional[float] = None
+    extracted_total_power_max: Optional[float] = None
+    extracted_max_cyl_abs: Optional[float] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
     # commercial identity + coating human correction / review (mirrors CatalogExtraction)
@@ -209,6 +216,11 @@ class PowerRangeBase(BaseModel):
     axis_max: Optional[int] = Field(180, ge=0, le=180)
     max_cyl_for_high_sph: Optional[float] = None
     sph_threshold: Optional[float] = None
+    # G3 "Total Sph+Cyl" clause: SPH+CYL in [total_power_min, total_power_max]
+    # AND abs(CYL) <= max_cyl_abs. NULL for non-G3 ranges.
+    total_power_min: Optional[float] = Field(None, ge=-40.0, le=40.0)
+    total_power_max: Optional[float] = Field(None, ge=-40.0, le=40.0)
+    max_cyl_abs: Optional[float] = Field(None, ge=0.0, le=10.0)
     notes: Optional[str] = None
 
 class PowerRangeCreate(PowerRangeBase):

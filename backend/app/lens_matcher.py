@@ -177,6 +177,13 @@ class LensMatcherFinal:
     def _range_convention(power_range: models.PowerRange) -> str:
         """Which Rx form a PowerRange must be tested against, from its sign only
         (no cyl_convention field). 'minus' | 'plus' | 'both'."""
+        # G3 "Total Sph+Cyl" clause is defined ONLY in the catalog's normalized
+        # minus-cyl convention - it is always evaluated against the stored minus
+        # form, never the plus form. This branch runs BEFORE the sign detection.
+        if (getattr(power_range, "total_power_min", None) is not None
+                or getattr(power_range, "total_power_max", None) is not None
+                or getattr(power_range, "max_cyl_abs", None) is not None):
+            return "minus"
         lo, hi = power_range.cyl_min, power_range.cyl_max
         if lo == 0 and hi == 0:
             return "minus"                      # plano - minus form (cyl 0) is fine
@@ -216,6 +223,23 @@ class LensMatcherFinal:
                 and abs(sph) >= abs(power_range.sph_threshold)):
             if abs(cyl_needed) > abs(power_range.max_cyl_for_high_sph):
                 issues.append(f"CYL محدود لـ SPH ≥ {power_range.sph_threshold}")
+        # G3 authoritative constraint: total power (algebraic SPH+CYL) within
+        # [total_power_min, total_power_max] inclusive, AND abs(CYL) <=
+        # max_cyl_abs. Evaluated on the minus form (see _range_convention). The
+        # sph/cyl box checks above are only a coarse prefilter for G3 rows.
+        tp_min = getattr(power_range, "total_power_min", None)
+        tp_max = getattr(power_range, "total_power_max", None)
+        mca = getattr(power_range, "max_cyl_abs", None)
+        if tp_min is not None or tp_max is not None:
+            total = sph + cyl_needed
+            t_lo = tp_min if tp_min is not None else -1e9
+            t_hi = tp_max if tp_max is not None else 1e9
+            if not (t_lo - self.tolerance_sph <= total <= t_hi + self.tolerance_sph):
+                issues.append(
+                    f"total SPH+CYL {round(total, 2)} خارج [{t_lo}, {t_hi}]")
+        if mca is not None:
+            if abs(cyl_needed) > mca + self.tolerance_cyl:
+                issues.append(f"CYL magnitude {abs(cyl_needed)} > {mca}")
         return issues
 
     def check_power_range(

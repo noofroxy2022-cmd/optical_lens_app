@@ -193,6 +193,10 @@ class CatalogExtraction(Base):
     cyl_max = Column(Float, nullable=True)
     add_min = Column(Float, nullable=True)
     add_max = Column(Float, nullable=True)
+    # G3 "Total Sph+Cyl" clause carried from the parser to bulk-confirm.
+    extracted_total_power_min = Column(Float, nullable=True)
+    extracted_total_power_max = Column(Float, nullable=True)
+    extracted_max_cyl_abs = Column(Float, nullable=True)
 
     extracted_price = Column(Float, nullable=True)
     extracted_features = Column(JSON, nullable=True)
@@ -442,6 +446,15 @@ class PowerRange(Base):
     max_cyl_for_high_sph = Column(Float, nullable=True)
     sph_threshold = Column(Float, nullable=True)
 
+    # ----- G3 "Total Sph+Cyl" clause (HOYA) -----
+    # When set, the AUTHORITATIVE constraint is: total_power_min <= SPH+CYL <=
+    # total_power_max (evaluated in the normalized MINUS-cyl convention) AND
+    # abs(CYL) <= max_cyl_abs. The sph_*/cyl_* columns above then hold only a
+    # false-negative-safe COARSE prefilter box. NULL on every non-G3 row.
+    total_power_min = Column(Float, nullable=True)
+    total_power_max = Column(Float, nullable=True)
+    max_cyl_abs = Column(Float, nullable=True)
+
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -472,6 +485,22 @@ class PowerRange(Base):
         # enforced here.)
         if value < -10.0 or value > 10.0:
             raise ValueError(f"CYL must be between -10 and +10")
+        return round(value, 2)
+
+    @validates('total_power_min', 'total_power_max')
+    def validate_total_power(self, key, value):
+        if value is None:
+            return value
+        if value < -40.0 or value > 40.0:
+            raise ValueError("total power (SPH+CYL) must be between -40 and +40")
+        return round(value, 2)
+
+    @validates('max_cyl_abs')
+    def validate_max_cyl_abs(self, key, value):
+        if value is None:
+            return value
+        if value < 0.0 or value > 10.0:
+            raise ValueError("max_cyl_abs must be between 0 and +10")
         return round(value, 2)
 
 

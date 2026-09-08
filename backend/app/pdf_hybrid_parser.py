@@ -171,6 +171,13 @@ class ExtractedPowerRange:
     # (e.g. "Hilux 1.5" -> "Hilux"); used only when relationship evidence cannot
     # resolve the family. Never a pricing-section heading.
     model_hint: Optional[str] = None
+    # ----- G3 "Total Sph+Cyl" clause (nullable; only set for G3 stock ranges) -
+    # authoritative constraint: total_power_min <= SPH+CYL <= total_power_max
+    # (minus-cyl convention) AND abs(CYL) <= max_cyl_abs. sph_*/cyl_* then hold
+    # only a coarse prefilter box.
+    total_power_min: Optional[float] = None
+    total_power_max: Optional[float] = None
+    max_cyl_abs: Optional[float] = None
 
     def to_dict(self):
         return asdict(self)
@@ -1163,6 +1170,41 @@ class PDFHybridParser:
         merged_mode = i_model is not None and i_range is not None
         carry = {"model": "", "coat": "", "price": ""}
 
+        # ---- G3 wrapped-line pairing (safe, post-partition) ----------------
+        # A wrapped "Total Sph+Cyl (a b)" line + the following "Max Cyl (n)"
+        # line are joined into ONE range cell ONLY when the two consecutive
+        # matrix rows resolve to the SAME commercial (Type, Coating, Price)
+        # after continuation-cell inheritance. Never joins across a price /
+        # Type-Coating boundary. If identity cannot be proved equal, both
+        # lines are left as-is (each stays unparsed -> needs_review).
+        if merged_mode and i_range is not None:
+            _cap_txt = re.compile(r"^total\s*sph\s*\+\s*cyl\s*\(\s*[+\-]?\d+(?:\.\d+)?"
+                                  r"\s+[+\-]?\d+(?:\.\d+)?\s*\)\s*$", re.I)
+            _bare_mc = re.compile(r"^(?:max\s*)?cyl\s*\(\s*\d+(?:\.\d+)?\s*\)\s*$", re.I)
+            data = [list(r) + [""] * (ncol - len(r)) for r in matrix[1:]]
+            m_c = c_c = p_c = ""
+            resolved = []
+            for r in data:
+                def _g(i):
+                    return _clean(r[i]) if i is not None and i < len(r) else ""
+                m_c = _g(i_model) or m_c
+                c_c = _g(i_coat) or c_c
+                p_c = _g(i_price_col) or p_c
+                resolved.append((m_c, c_c, p_c))
+            merged_rows, skip = [], set()
+            for k, r in enumerate(data):
+                if k in skip:
+                    continue
+                rt = _clean(r[i_range]) if i_range < len(r) else ""
+                if (_cap_txt.match(rt) and k + 1 < len(data)
+                        and _bare_mc.match(_clean(data[k + 1][i_range]))
+                        and resolved[k] == resolved[k + 1]):
+                    r = list(r)
+                    r[i_range] = rt + " || " + _clean(data[k + 1][i_range])
+                    skip.add(k + 1)
+                merged_rows.append(r)
+            matrix = [matrix[0]] + merged_rows
+
         section_text = " ".join(_clean(c).lower() for c in merged)
         out = []
         last_index = ctx.index
@@ -1306,18 +1348,21 @@ class PDFHybridParser:
             # Stock-Range column. These become a real range:
             #  * a bare "a to b" / "+-a" cell (existing _parse_range),
             #  * grammar G1: "Sph (a To b) Cyl (c) [D]"       (_parse_g1_stock_range),
-            #  * grammar G2: "Sph Only From (a To b) [D]"     (_parse_g2_stock_range,
-            #    a spherical-only blank -> CYL exactly [0, 0]).
-            # Every OTHER catalog grammar - "Total Sph+Cyl ...", "Max Cyl ..." -
-            # is kept verbatim in notes and left review-blocked. No sph/cyl
-            # values are ever fabricated here.
+            #  * grammar G2: "Sph Only From (a To b) [D]"     (_parse_g2_stock_range),
+            #  * grammar G3 slice 1: "Total Sph+Cyl (a b) [Max ]Cyl (n)"
+            #    (_parse_g3_stock_range - two-number total + unsigned cap only).
+            # Every OTHER grammar (single-number Total, signed Cyl(c) single
+            # total, empty "Total Sph+Cyl ()", capless Total, "Max Cyl (n)"
+            # with no matched Total) is kept verbatim in notes and left
+            # review-blocked. No sph/cyl values are ever fabricated here.
             if i_range is not None:
                 rng_txt = cell(i_range)
                 if rng_txt:
-                    # G1 is tried first so its output is byte-for-byte unchanged;
-                    # G2 only fires when G1 does not match.
+                    # Dispatch order G1 -> G2 -> G3: G1/G2 output byte-for-byte
+                    # unchanged; G3 only fires when neither matches.
                     g = (self._parse_g1_stock_range(rng_txt)
-                         or self._parse_g2_stock_range(rng_txt))
+                         or self._parse_g2_stock_range(rng_txt)
+                         or self._parse_g3_stock_range(rng_txt))
                     bare = re.fullmatch(
                         r"[+\-]?\d+(?:\.\d+)?(?:\s*(?:to|~|/|-)\s*[+\-]?\d+(?:\.\d+)?)?",
                         rng_txt.strip(), re.I,
@@ -1330,6 +1375,11 @@ class PDFHybridParser:
                             r.sph_min, r.sph_max = g["sph"]
                             r.cyl_min, r.cyl_max = g["cyl"]
                             r.has_range = True
+                            if g.get("total") is not None:
+                                # G3: the authoritative constraint lives here;
+                                # sph_*/cyl_* above are only a coarse prefilter.
+                                r.total_power_min, r.total_power_max = g["total"]
+                                r.max_cyl_abs = g["max_cyl_abs"]
                             if g["diameter"] is not None:
                                 # Diameter kept as clearly-labelled source
                                 # evidence only - separate from SPH/CYL, not a
@@ -1840,6 +1890,47 @@ class PDFHybridParser:
         d = int(m.group(3)) if m.group(3) else None
         return {"sph": (min(a, b), max(a, b)), "cyl": (0.0, 0.0), "diameter": d}
 
+    # Grammar G3 slice 1 ONLY: a TWO-number "Total Sph+Cyl (a b)" envelope with
+    # an UNSIGNED cylinder cap, either inline ("... Cyl (n)") or joined from a
+    # wrapped "Max Cyl (n)" line ("<total> || Max Cyl (n)"). Single-number
+    # totals, signed Cyl(c) forms, empty "Total Sph+Cyl ()" and capless totals
+    # never match here - they stay unparsed / needs_review.
+    _G3_RE = re.compile(
+        r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
+        r"([+\-]?\d+(?:\.\d+)?)\s+([+\-]?\d+(?:\.\d+)?)\s*\)\s*"
+        r"(?:\|\|\s*)?(?:max\s*)?cyl\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*$",
+        re.I,
+    )
+
+    def _parse_g3_stock_range(self, text):
+        """Parse ONLY G3 slice 1 - "Total Sph+Cyl (a b) [Max ]Cyl (n)".
+
+        total_power in [min(a,b), max(a,b)] (algebraic SPH+CYL, minus-cyl
+        convention) AND abs(CYL) <= n (n UNSIGNED). Returns a dict with the
+        same 'sph'/'cyl'/'diameter' keys as G1/G2 (holding the COARSE
+        prefilter box) plus 'total' and 'max_cyl_abs' (the authority), or None
+        for every other grammar."""
+        m = self._G3_RE.match(_clean(text))
+        if not m:
+            return None
+        try:
+            a, b, n = (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+        except ValueError:
+            return None
+        if any(abs(v) > self._RANGE_LIMIT for v in (a, b)) or not (0.0 <= n <= 10.0):
+            return None
+        tmin, tmax = min(a, b), max(a, b)
+        # coarse box, false-negative safe in MINUS-cyl convention (CYL in [-n,0]):
+        #   T = SPH + CYL,  T in [tmin, tmax],  CYL in [-n, 0]
+        #   -> SPH in [tmin, tmax + n]
+        return {
+            "sph": (tmin, tmax + n),
+            "cyl": (-n, 0.0),
+            "total": (tmin, tmax),
+            "max_cyl_abs": n,
+            "diameter": None,
+        }
+
     def _parse_range(self, value):
         value = _clean(value).replace("±", "+-")
         m = re.search(
@@ -1988,6 +2079,9 @@ class PDFHybridParser:
                     cyl_max=(pr.cyl_max if _has_range else None),
                     add_min=(pr.add_min if _has_range else None),
                     add_max=(pr.add_max if _has_range else None),
+                    extracted_total_power_min=(pr.total_power_min if _has_range else None),
+                    extracted_total_power_max=(pr.total_power_max if _has_range else None),
+                    extracted_max_cyl_abs=(pr.max_cyl_abs if _has_range else None),
                     extracted_price=pr.price,
                     extracted_features=model.features,
                     review_notes=("; ".join(pr.review_reasons) or None),
