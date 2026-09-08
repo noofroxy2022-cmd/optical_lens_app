@@ -87,11 +87,11 @@ COATING_NONE_MARKERS = {
 
 AVAILABILITY_STOCK_TERMS = {
     "stock", "in stock", "ready", "ready made", "ready-made", "finished", "finish",
-    "off the shelf", "off-the-shelf", "available",
+    "off the shelf", "off-the-shelf",
 }
 AVAILABILITY_RX_TERMS = {
     "rx", "prescription", "made to order", "made-to-order", "custom", "customised",
-    "customized", "surfacing", "lab", "semi finished", "semi-finished", "sf",
+    "customized", "surfacing", "semi finished", "semi-finished",
 }
 
 
@@ -358,6 +358,65 @@ class PDFHybridParser:
 
         return self.extracted_models
 
+    # ---- section-heading availability classifier -----------------------------
+    # Explicit RX / made-to-order section markers. Deliberately NARROW and
+    # word-boundary anchored so page-body / footer text ("Available Colors",
+    # "Available Additions", "Laboratory", ...) can NEVER imply RX.
+    _RX_SECTION_RE = re.compile(
+        r"\(\s*(?:rx|xr)\s*\)"                 # "( RX )" / "( XR )"
+        r"|(?<![a-z])(?:rx|xr)(?![a-z])"       # standalone RX / XR token
+        r"|\bspecial\s+order\b"
+        r"|\bmade[\s-]*to[\s-]*order\b"
+        r"|\bprescription\b"
+        r"|\bsemi[\s-]*finished\b",
+        re.I,
+    )
+    # Explicit STOCK section markers: "Stock" as part of a section title, i.e.
+    # next to "Lenses" / a market phrase / "MEIRYO" - NEVER the "Stock Range"
+    # power-range column label.
+    _STOCK_SECTION_RE = re.compile(
+        r"\bstock\s+lenses\b"
+        r"|\bstock\b(?!\s+range)(?=.*\b(?:in\s+egypt|out\s+of\s+egypt|meiryo|lenses)\b)"
+        r"|\b(?:in\s+egypt|out\s+of\s+egypt|meiryo)\b(?=.*\bstock\b(?!\s+range))",
+        re.I | re.S,
+    )
+
+    @staticmethod
+    def _heading_variants(text: str) -> str:
+        """One lowercased blob of a section's title text in every reading order
+        HOYA prints it in: as extracted, with word order reversed, and with each
+        token character-reversed (some section titles are laid out right-to-left,
+        one word per line). Pure-number / footer-note lines are dropped."""
+        toks_fwd, toks_rev = [], []
+        for raw in (text or "").splitlines():
+            s = raw.strip()
+            if (not s or s.startswith("(cid:") or re.fullmatch(r"[\d\s.]+", s)
+                    or s.lower().startswith(("note :", "note:"))):
+                continue
+            words = s.split()
+            toks_fwd += words
+            toks_rev += [w[::-1] for w in words]
+        parts = [
+            " ".join(toks_fwd),
+            " ".join(reversed(toks_fwd)),
+            " ".join(toks_rev),
+            " ".join(reversed(toks_rev)),
+        ]
+        return "  ||  ".join(parts).lower()
+
+    def _classify_section_availability(self, text: str):
+        """(availability, explicit) from an explicit section HEADING only.
+        RX/XR/Special-Order/Prescription wins; else an explicit 'Stock ...
+        Lenses / <market>' heading -> stock. 'Stock Range' (a column label)
+        and 'Available ...' body text never count. No marker -> (None, False)
+        so availability is never fabricated for an ambiguous section."""
+        blob = self._heading_variants(text)
+        if self._RX_SECTION_RE.search(blob):
+            return "rx", True
+        if self._STOCK_SECTION_RE.search(blob):
+            return "stock", True
+        return None, False
+
     # ------------------------------------------------------------------ context
     def _update_context_from_text(self, context: "ParserContext", text: str):
         """Harvest market / availability / category / design / family relations
@@ -368,17 +427,19 @@ class PDFHybridParser:
         if market:
             context.market = market
 
-        # explicit availability heading (e.g. "RX", "Stock", "Made to Order")
-        if any(t in low for t in AVAILABILITY_RX_TERMS):
-            context.availability, context.availability_explicit = "rx", True
-        elif any(t in low for t in AVAILABILITY_STOCK_TERMS):
-            context.availability, context.availability_explicit = "stock", True
+        # explicit availability from the SECTION HEADING only - never arbitrary
+        # page-body / footer words. No marker -> context is left untouched
+        # (availability is never fabricated for an ambiguous section).
+        avail, explicit = self._classify_section_availability(text)
+        if explicit:
+            context.availability, context.availability_explicit = avail, True
 
         # relational rule: a "Finished / Ready" + "Single Vision" heading means
         # STOCK even if the word "Stock" never appears
         if "single vision" in low or re.search(r"\bsv\b", low):
             context.category = "single_vision"
-            if any(w in low for w in ("finished", "finish", "ready", "off the shelf")):
+            if any(re.search(rf"\b{re.escape(w)}\b", low)
+                   for w in ("finished", "finish", "ready", "off the shelf")):
                 context.availability, context.availability_explicit = "stock", True
         elif "progressive" in low:
             context.category = "progressive"

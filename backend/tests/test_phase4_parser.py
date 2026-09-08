@@ -2957,3 +2957,133 @@ def test_g3_s3_no_wholesale_leak(db):
     assert not any("wholesale" in (r.notes or "").lower() for r in signed)
     # left-column wholesale values on page 4 (1700/1300/...) must not be a price
     assert not any(r.price in (1700.0, 1300.0, 1250.0) for r in signed)
+
+
+# ============================================================
+#  Availability classifier corrective slice
+#  Section HEADING drives availability - never a "Stock Range" column
+#  label and never "Available ..." body text.
+# ============================================================
+def _avail(parser, heading):
+    return parser._classify_section_availability(heading)
+
+
+# -- 1/2. "Available ..." never implies RX -----------------------
+def test_avail_available_text_is_not_rx(parser):
+    for h in ("Hilux 1.5 Polarized Available Colors ( Plano )",
+              "Available Additions BLC MEIRYO",
+              "Sensity 2 Available Colors ( Gray - Brown - Green )",
+              "Laboratory finishing notes"):
+        assert _avail(parser, h) == (None, False)
+    # via the real context updater on a fresh context
+    ctx = _ctx()
+    parser._update_context_from_text(ctx, "Stock Lenses In Egypt\nAvailable Colors ( Plano )")
+    assert ctx.availability == "stock" and ctx.availability_explicit is True
+
+
+# -- 3. explicit Stock heading -> STOCK -------------------------
+def test_avail_explicit_stock_heading(parser):
+    for h in ("Stock Lenses In Egypt",
+              "Stock Lenses Out Of Egypt",
+              "MEIRYO Stock Out Of Egypt",
+              "Out Of Egypt\nMEIRYO\nStock"):
+        assert _avail(parser, h) == ("stock", True)
+
+
+# -- 4/5/6. explicit RX / XR / Special Order -> RX --------------
+def test_avail_explicit_rx_headings(parser):
+    for h in ("Mineral ( RX ) Lenses",
+              "Bi-Focal ( XR ) Lenses",
+              "Polarized RX ( Lenses )",
+              "Special Order XR",
+              "NULUX iDENTITY V+ ( RX )",
+              "Progressive Lenses ( XR )",
+              "iD MyStyle V+ RX Progressive",
+              "Made To Order Progressive"):
+        assert _avail(parser, h) == ("rx", True)
+
+
+# -- 7. "Stock Range" column label alone -> no classification ---
+def test_avail_stock_range_column_is_not_availability(parser):
+    assert _avail(parser, "Type Coating Price Stock Range") == (None, False)
+    assert _avail(parser, "Sync III 1.5\nType Coating Price Stock Range\n6100 12850") == (None, False)
+
+
+# -- 8. genuinely markerless heading -> explicit stays False ---
+def test_avail_ambiguous_heading_not_forced(parser):
+    ctx = _ctx()                                     # explicit False by default
+    parser._update_context_from_text(ctx, "Amplitude Plus 1.5\nDrive Coat\n6100 12850")
+    assert ctx.availability_explicit is False
+
+
+# -- 9. real HOYA sections classify correctly ------------------
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_avail_real_hoya_sections(parser):
+    import pdfplumber
+    expect = {3: "stock", 5: "stock", 6: "stock",          # In Egypt / MEIRYO / Out Of Egypt
+              8: "rx", 9: "rx", 11: "rx", 13: "rx", 14: "rx",  # Special Order / iDENTITY / Photo / HBC / Polarized
+              20: "rx", 21: "rx", 26: "rx", 27: "rx"}       # Balansis / Progressive XR / Bi-Focal / Mineral
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        for idx, exp in expect.items():
+            t = pdf.pages[idx].extract_text() or ""
+            assert parser._classify_section_availability(t) == (exp, True), f"page idx {idx}"
+
+
+# -- 10. real HOYA Stock-In-Egypt page: "Available Colors" present, still STOCK
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_avail_real_stock_in_egypt_not_flipped_by_available(parser):
+    import pdfplumber
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        t = pdf.pages[3].extract_text() or ""
+    assert "available" in t.lower()                  # the trap text is really there
+    ctx = _ctx()
+    parser._update_context_from_text(ctx, t)
+    assert ctx.availability == "stock" and ctx.availability_explicit is True
+
+
+# -- 11. real HOYA Mineral RX page -> RX in the context updater
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_avail_real_mineral_rx_context(parser):
+    import pdfplumber
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        t = pdf.pages[27].extract_text() or ""
+    ctx = _ctx()
+    parser._update_context_from_text(ctx, t)
+    assert ctx.availability == "rx" and ctx.availability_explicit is True
+
+
+# -- 12/13. RX + PowerRange persists as RX ; STOCK + PowerRange persists as STOCK
+def test_avail_rx_and_stock_powerrange_persist(db):
+    from decimal import Decimal
+    from datetime import datetime as _dt
+    for avail_str, enum in (("rx", models.PricingAvailability.RX),
+                            ("stock", models.PricingAvailability.STOCK)):
+        co = models.Company(name=f"AV_{avail_str}", is_active=True, is_deleted=False)
+        db.add(co); db.commit(); db.refresh(co)
+        cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                             status=models.CatalogStatus.DRAFT)
+        db.add(cat); db.commit(); db.refresh(cat)
+        p = PDFHybridParser(use_vision=False)
+        row = ExtractedPowerRange(sph_min=-8.0, sph_max=8.0, cyl_min=-2.0, cyl_max=0.0,
+                                  has_range=True, availability=avail_str, price=1000.0,
+                                  index_value=1.5, material="CR39",
+                                  coating="HMC", coating_status="resolved",
+                                  coating_confidence=0.9, review_status="pending")
+        p.extracted_models = [ExtractedLensModel(name="Hilux", category="single_vision",
+                                                 power_ranges=[row])]
+        p.save_extractions_to_db(cat.id, db)
+        for e in _crud.get_extractions_by_catalog(db, cat.id):
+            assert e.extracted_availability == avail_str
+            _crud.confirm_extraction(db, e.id, "qa")
+        _crud.confirm_catalog_commercial(db, cat.id, "admin")
+        vp = db.query(models.VariantPricing).filter(
+            models.VariantPricing.source_catalog_id == cat.id).one()
+        assert vp.availability == enum
+        assert len(vp.power_ranges) == 1
+
+
+# -- 14. classifier never fabricates on empty / noise text -----
+def test_avail_empty_and_noise(parser):
+    for h in ("", "   ", "\n\n", "(cid:531)(cid:650)", "8", "6100 12850",
+              "Note : The Arrival Time is 10 Working Days."):
+        assert _avail(parser, h) == (None, False)
