@@ -1303,16 +1303,21 @@ class PDFHybridParser:
             else:
                 emitted = list(self._parse_table([merged, row], ctx))
 
-            # Stock-Range column. Two things are turned into a real range:
-            #  * a bare "a to b" / "+-a" cell (existing _parse_range), and
-            #  * grammar G1 only: "Sph (a To b) Cyl (c) [D]"  (_parse_g1_stock_range).
-            # Every OTHER catalog grammar - "Sph Only From ...", "Total Sph+Cyl
-            # ...", "Max Cyl ..." - is kept verbatim in notes and left
-            # review-blocked. No sph/cyl values are ever fabricated here.
+            # Stock-Range column. These become a real range:
+            #  * a bare "a to b" / "+-a" cell (existing _parse_range),
+            #  * grammar G1: "Sph (a To b) Cyl (c) [D]"       (_parse_g1_stock_range),
+            #  * grammar G2: "Sph Only From (a To b) [D]"     (_parse_g2_stock_range,
+            #    a spherical-only blank -> CYL exactly [0, 0]).
+            # Every OTHER catalog grammar - "Total Sph+Cyl ...", "Max Cyl ..." -
+            # is kept verbatim in notes and left review-blocked. No sph/cyl
+            # values are ever fabricated here.
             if i_range is not None:
                 rng_txt = cell(i_range)
                 if rng_txt:
-                    g1 = self._parse_g1_stock_range(rng_txt)
+                    # G1 is tried first so its output is byte-for-byte unchanged;
+                    # G2 only fires when G1 does not match.
+                    g = (self._parse_g1_stock_range(rng_txt)
+                         or self._parse_g2_stock_range(rng_txt))
                     bare = re.fullmatch(
                         r"[+\-]?\d+(?:\.\d+)?(?:\s*(?:to|~|/|-)\s*[+\-]?\d+(?:\.\d+)?)?",
                         rng_txt.strip(), re.I,
@@ -1321,16 +1326,16 @@ class PDFHybridParser:
                     for r in emitted:
                         if r.has_range:
                             continue
-                        if g1 is not None:
-                            r.sph_min, r.sph_max = g1["sph"]
-                            r.cyl_min, r.cyl_max = g1["cyl"]
+                        if g is not None:
+                            r.sph_min, r.sph_max = g["sph"]
+                            r.cyl_min, r.cyl_max = g["cyl"]
                             r.has_range = True
-                            if g1["diameter"] is not None:
+                            if g["diameter"] is not None:
                                 # Diameter kept as clearly-labelled source
                                 # evidence only - separate from SPH/CYL, not a
                                 # schema field, not used by the matcher.
                                 r.notes = ((r.notes + " | ") if r.notes else "") + \
-                                    f"diameter_mm={g1['diameter']}"
+                                    f"diameter_mm={g['diameter']}"
                         elif parsed:
                             r.sph_min, r.sph_max = parsed
                             r.has_range = True
@@ -1805,6 +1810,35 @@ class PDFHybridParser:
             cyl = (0.0, 0.0)
         d = int(m.group(4)) if m.group(4) else None
         return {"sph": (min(a, b), max(a, b)), "cyl": cyl, "diameter": d}
+
+    # Grammar G2 ONLY: "Sph Only From (a To b) [D]" - a spherical-only blank.
+    # Anchored: requires the literal "Sph Only From", a parenthesised "a To b"
+    # and an optional trailing integer diameter. "Sph Only (...)", "Sph From
+    # (...)", "Sph Only From (a)" and an unparenthesised range never match.
+    _G2_RE = re.compile(
+        r"^sph\s+only\s+from\s*\(\s*([+\-]?\d+(?:\.\d+)?)\s*to\s*"
+        r"([+\-]?\d+(?:\.\d+)?)\s*\)\s*(\d+)?\s*$",
+        re.I,
+    )
+
+    def _parse_g2_stock_range(self, text):
+        """Parse ONLY grammar G2 - "Sph Only From (a To b) [D]".
+
+        A spherical-only blank: SPH -> [min(a,b), max(a,b)] ; CYL -> [0.00, 0.00]
+        (no cylinder) ; D -> diameter in mm (source evidence only). Returns the
+        same dict shape as _parse_g1_stock_range, or None for every other
+        grammar (G1/G3/G4 and any malformed text stay handled elsewhere)."""
+        m = self._G2_RE.match(_clean(text))
+        if not m:
+            return None
+        try:
+            a, b = float(m.group(1)), float(m.group(2))
+        except ValueError:
+            return None
+        if abs(a) > self._RANGE_LIMIT or abs(b) > self._RANGE_LIMIT:
+            return None
+        d = int(m.group(3)) if m.group(3) else None
+        return {"sph": (min(a, b), max(a, b)), "cyl": (0.0, 0.0), "diameter": d}
 
     def _parse_range(self, value):
         value = _clean(value).replace("±", "+-")

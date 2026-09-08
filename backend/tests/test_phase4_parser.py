@@ -1738,16 +1738,16 @@ def test_g1_G_matcher_or_semantics_unchanged(db):
     assert not any(r.source_pricing_id == vp.id for r in out)
 
 
-def test_g1_H_g2_still_unparsed(parser):
+def test_g1_H_g2_now_parses_g1_boundary_intact(parser):
+    # G2 is now a supported grammar - but it is NOT G1: _parse_g1_stock_range
+    # must still return None for "Sph Only From ..." (G1 output unchanged).
     for txt in ("Sph Only From (0.00 To -4.00) 70",
                 "Sph Only From (-3.00 To -10.00) 75"):
         assert parser._parse_g1_stock_range(txt) is None
         r = _g1_row(parser, txt)
-        assert r.has_range is False
-        assert r.sph_min == 0.0 and r.sph_max == 0.0
-        assert r.cyl_min == -10.0 and r.cyl_max == 0.0        # dataclass default, untouched
-        assert "unparsed stock range grammar" in r.review_reasons
-        assert txt in (r.notes or "")
+        assert r.has_range is True
+        assert (r.cyl_min, r.cyl_max) == (0.0, 0.0)
+        assert "unparsed stock range grammar" not in r.review_reasons
 
 
 def test_g1_I_g3_still_unparsed(parser):
@@ -1793,8 +1793,12 @@ def test_g1_real_updated_page4(parser_lwrr):
                     r.flag_review(ov["review_reason"])
             rows += rr
 
-    g1 = [r for r in rows if r.has_range]
+    # G1 = has_range with a real signed cylinder interval; G2 = has_range with
+    # plano cyl [0,0] (now also parsed).
+    g1 = [r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) != (0.0, 0.0)]
+    g2 = [r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) == (0.0, 0.0)]
     assert len(g1) == 16                              # G1 lines on page 4
+    assert len(g2) == 5                               # G2 "Sph Only From" lines on page 4
 
     r1350 = [r for r in rows if r.price == 1350.0]
     r1450 = [r for r in rows if r.price == 1450.0]
@@ -1817,14 +1821,15 @@ def test_g1_real_updated_page4(parser_lwrr):
     # diameter kept as evidence on the parsed rows
     assert any("diameter_mm=70" in (r.notes or "") for r in r1450)
 
-    # G2/G3/G4 lines on the page stay unparsed / needs_review, nothing fabricated
+    # G3/G4 lines on the page stay unparsed / needs_review, nothing fabricated
     blocked = [r for r in rows if not r.has_range]
     assert blocked and all(r.review_status == "needs_review" for r in blocked)
     assert not any(
         r.has_range and any(k in (r.notes or "")
-                            for k in ("Total Sph+Cyl", "Sph Only From", "Max Cyl"))
+                            for k in ("Total Sph+Cyl", "Max Cyl"))
         for r in rows
     )
+    assert any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
 
 
 # ===========================================================================
@@ -1906,15 +1911,203 @@ def test_g1sc_R_plus_and_S_minus_bulk_confirm_and_match(db):
 
 
 @pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
-def test_g1sc_U_g2_g3_g4_still_blocked():
+def test_g1sc_U_g3_g4_still_blocked():
     rows = _hoya_page4_g1_rows()
     blocked = [r for r in rows if not r.has_range]
     assert blocked
     assert all(r.review_status == "needs_review" for r in blocked)
     assert all("unparsed stock range grammar" in r.review_reasons for r in blocked)
-    # none of the unsupported grammars produced sph/cyl
+    # G3 / G4 unsupported grammars never produced sph/cyl
     assert not any(
         r.has_range and any(k in (r.notes or "")
-                            for k in ("Total Sph+Cyl", "Sph Only From", "Max Cyl"))
+                            for k in ("Total Sph+Cyl", "Max Cyl"))
         for r in rows
     )
+    # a real "Total Sph+Cyl ..." line is still among the blocked rows
+    assert any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
+
+
+# ===========================================================================
+# HOYA Stock Range grammar G2 only:  "Sph Only From (a To b) [D]"
+#   SPH -> [min(a,b), max(a,b)]     CYL -> [0.00, 0.00]  (spherical-only blank)
+#   D   -> diameter mm, source evidence only
+# G1 unchanged; G3 / G4 remain unparsed / needs_review; nothing fabricated.
+# ===========================================================================
+def _g2_row(parser, rng_text, *, coating="Hi Vision Aqua", price="3300"):
+    matrix = [list(_H4), ["Hilux 1.5", coating, price, rng_text]]
+    return parser._rows_from_section(
+        matrix[:1], matrix, ParserContext(availability="stock"))[0]
+
+
+def test_g2_A_pos_neg_interval_with_diameter(parser):
+    r = _g2_row(parser, "Sph Only From (-4.00 To +4.00) 65")
+    assert r.has_range is True
+    assert (r.sph_min, r.sph_max) == (-4.0, 4.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 0.0)
+    assert "diameter_mm=65" in (r.notes or "")
+    assert "unparsed stock range grammar" not in r.review_reasons
+
+
+def test_g2_B_negative_interval(parser):
+    r = _g2_row(parser, "Sph Only From (0.00 To -6.00) 70")
+    assert (r.sph_min, r.sph_max) == (-6.0, 0.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 0.0)
+    assert r.has_range is True
+
+
+def test_g2_C_endpoint_order_normalised(parser):
+    for txt in ("Sph Only From (-4.00 To +4.00)", "Sph Only From (+4.00 To -4.00)"):
+        g = parser._parse_g2_stock_range(txt)
+        assert g["sph"] == (-4.0, 4.0)
+    assert parser._parse_g2_stock_range("Sph Only From (-3.00 To -10.00) 75")["sph"] == (-10.0, -3.0)
+
+
+def test_g2_D_positive_only_interval(parser):
+    r = _g2_row(parser, "Sph Only From (+6.25 To +8.00) 65")
+    assert (r.sph_min, r.sph_max) == (6.25, 8.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 0.0)
+
+
+def test_g2_E_negative_only_interval(parser):
+    r = _g2_row(parser, "Sph Only From (-3.00 To -10.00) 75")
+    assert (r.sph_min, r.sph_max) == (-10.0, -3.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 0.0)
+
+
+def test_g2_F_cyl_is_exactly_plano(parser):
+    for txt in ("Sph Only From (-4.00 To +4.00) 65",
+                "Sph Only From (0.00 To -6.00) 70",
+                "Sph Only From (0.00 To -4.00)"):
+        g = parser._parse_g2_stock_range(txt)
+        assert g["cyl"] == (0.0, 0.0)
+
+
+def test_g2_G_multiple_lines_stay_separate_or_ranges(parser):
+    matrix = [list(_H4),
+              ["Hilux 1.5", "Hi Vision Aqua", "3300", "Sph Only From (0.00 To -4.00) 70"],
+              ["Hilux 1.5", "Hi Vision Aqua", "3300", "Sph Only From (0.00 To +4.00) 65"],
+              ["Hilux 1.5", "Hi Vision Aqua", "3300", "Sph Only From (+6.25 To +8.00) 65"]]
+    rows = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))
+    assert len(rows) == 3
+    assert all(r.has_range for r in rows)
+    assert all((r.cyl_min, r.cyl_max) == (0.0, 0.0) for r in rows)
+    assert all(r.price == 3300.0 for r in rows)
+    boxes = {(r.sph_min, r.sph_max) for r in rows}
+    assert boxes == {(-4.0, 0.0), (0.0, 4.0), (6.25, 8.0)}
+    # not merged into one bounding box
+    assert (min(r.sph_min for r in rows), max(r.sph_max for r in rows)) == (-4.0, 8.0)
+    assert len(boxes) == 3
+
+
+def test_g2_H_g1_unchanged(parser):
+    r = _g1_row(parser, "Sph (0.00 To -3.00) Cyl (-3.00) 70")
+    assert r.has_range is True
+    assert (r.sph_min, r.sph_max) == (-3.0, 0.0)
+    assert (r.cyl_min, r.cyl_max) == (-3.0, 0.0)          # signed minus-cyl, not plano
+    assert "diameter_mm=70" in (r.notes or "")
+    # G2 parser must reject a G1 line
+    assert parser._parse_g2_stock_range("Sph (0.00 To -3.00) Cyl (-3.00) 70") is None
+
+
+def test_g2_I_g3_still_blocked(parser):
+    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
+                "Total Sph+Cyl (+11.00 -10.00)",
+                "Total Sph+Cyl (+6.00 -6.00) Cyl (3)"):
+        assert parser._parse_g2_stock_range(txt) is None
+        r = _g2_row(parser, txt)
+        assert r.has_range is False
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g2_J_g4_still_blocked(parser):
+    for txt in ("Max Cyl (6)", "Max Cyl (5)"):
+        assert parser._parse_g2_stock_range(txt) is None
+        r = _g2_row(parser, txt)
+        assert r.has_range is False
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g2_K_malformed_does_not_fabricate(parser):
+    for txt in ("Sph Only (-4.00 To +4.00)",           # no "From"
+                "Sph Only From (-4.00)",               # single bound, no "To b"
+                "Sph From (-4.00 To +4.00)",           # not "Sph Only From"
+                "Sph Only From -4.00 To +4.00",        # no parentheses
+                "Sph Only From (-4.00 To)",            # missing second bound
+                "Sph Only From ()"):                   # empty
+        assert parser._parse_g2_stock_range(txt) is None
+        r = _g2_row(parser, txt)
+        assert r.has_range is False
+        assert r.sph_min == 0.0 and r.sph_max == 0.0
+        assert r.cyl_min == -10.0 and r.cyl_max == 0.0     # dataclass default, untouched
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+# -- real updated HOYA G2 rows --------------------------------------------
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g2_L_real_updated_hoya_g2_rows():
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    g2 = []
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        for pi in range(3, 12):
+            page = pdf.pages[pi]
+            for ov, hdr, mat in p._extract_page_tables(page):
+                for r in p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov)):
+                    if r.has_range and (r.cyl_min, r.cyl_max) == (0.0, 0.0):
+                        g2.append(r)
+    assert len(g2) >= 5
+    assert all((r.cyl_min, r.cyl_max) == (0.0, 0.0) for r in g2)
+    assert all(r.sph_min <= r.sph_max for r in g2)
+    # every parsed G2 row is spherical-only (no fabricated cyl), retail price only
+    assert all(r.price is not None and r.price > 0 for r in g2)
+    assert not any("wholesale" in (r.notes or "").lower() for r in g2)
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g2_M_N_O_bulk_confirm_and_matcher(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        rows = []
+        for pi in (3,):
+            page = pdf.pages[pi]
+            for ov, hdr, mat in p._extract_page_tables(page):
+                rows += p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov))
+    g2 = next(r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) == (0.0, 0.0))
+
+    co = models.Company(name="G2 E2E", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name="Hilux", category="single_vision",
+                                             power_ranges=[g2])]
+    p.save_extractions_to_db(cat.id, db)
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, "qa")
+    # M: G2 row survives parse -> extraction -> bulk-confirm -> PowerRange
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    pr = db.query(models.PowerRange).one()
+    assert (pr.cyl_min, pr.cyl_max) == (0.0, 0.0)
+    vp = db.query(models.VariantPricing).one()
+    assert vp.price_pair == g2_price_decimal(g2.price)
+
+    mid = round((pr.sph_min + pr.sph_max) / 2.0, 2)
+
+    def presc(sph, cyl):
+        x = models.Prescription(od_sph_original=sph, os_sph_original=sph, od_sph=sph,
+            os_sph=sph, od_cyl_original=cyl, os_cyl_original=cyl, od_cyl=cyl, os_cyl=cyl,
+            od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(x); db.commit(); db.refresh(x); return x
+
+    # N: plano-cyl Rx matches the G2 PowerRange
+    hit = _matcher.match_lenses(db, presc(mid, 0.0), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in hit)
+    # O: same SPH with non-zero CYL must NOT match a spherical-only G2 range
+    miss = _matcher.match_lenses(db, presc(mid, -1.5), None, True, True)[0]
+    assert not any(r.source_pricing_id == vp.id for r in miss)
+
+
+def g2_price_decimal(v):
+    from decimal import Decimal
+    return Decimal(str(v)).quantize(Decimal("0.01"))
