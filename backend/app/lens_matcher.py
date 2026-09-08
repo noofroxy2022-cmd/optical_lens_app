@@ -519,13 +519,43 @@ class LensMatcherFinal:
             if c[4] or (c[0].variant_id, c[0].coating_id, _norm_scope(c[0].market_scope)) not in stock_groups
         ]
 
+        # 2b) commercial deduplication. One customer-visible lens option may be
+        # persisted as several CURRENT VariantPricing rows - one per power_scope
+        # - because the catalog states it with multiple OR PowerRange clauses.
+        # A prescription covered by more than one clause must yield ONE result,
+        # not several identical rows. Runs AFTER STOCK-over-RX suppression and
+        # BEFORE result construction/sort, so no availability semantics change.
+        # Merge ONLY when every commercial dimension is identical; power_scope,
+        # pricing.id and the matched PowerRange are matching routes, not
+        # customer-distinct products. Survivor per group: highest match_score,
+        # then a range-bearing candidate over a no-range one, then lowest
+        # pricing.id (deterministic tie-break only).
+        scored = [
+            (c, self.calculate_match_score(
+                c[2], c[1], c[0], c[3],
+                prescription, filters, prefer_stock, prefer_aspherical))
+            for c in kept
+        ]
+        _groups: dict = {}
+        for c, sc in scored:
+            pr = c[0]
+            key = (
+                c[2].id, c[1].id, pr.coating_id, pr.availability,
+                _norm_scope(pr.market_scope), pr.price_pair, pr.currency,
+            )
+            _groups.setdefault(key, []).append((c, sc))
+        deduped = [
+            max(members, key=lambda cs: (
+                cs[1],                                   # highest match_score
+                1 if cs[0][3] is not None else 0,        # range-bearing wins a tie
+                -cs[0][0].id,                            # then lowest pricing.id
+            ))
+            for members in _groups.values()
+        ]
+
         # 3) build results
         results: List[schemas.LensMatchResult] = []
-        for pricing, variant, lens_model, matched_range, is_stock in kept:
-            score = self.calculate_match_score(
-                lens_model, variant, pricing, matched_range,
-                prescription, filters, prefer_stock, prefer_aspherical
-            )
+        for (pricing, variant, lens_model, matched_range, is_stock), score in deduped:
             reason = self._build_reason(
                 lens_model, variant, pricing, matched_range, prescription, score,
                 recommended_index, need_aspherical

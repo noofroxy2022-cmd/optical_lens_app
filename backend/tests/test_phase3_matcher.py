@@ -583,3 +583,166 @@ def test_sc_O_existing_minus_behaviour_unchanged(db):
     # form would coincidentally fit must still be judged on its minus form
     rx2 = _stored_rx(db, (-3.0, -5.0, 90))                 # minus cyl -5 -> outside
     assert not any(r.source_pricing_id == vp.id for r in _match(db, rx2)[0])
+
+
+# ===========================================================================
+# Commercial candidate deduplication (matcher-time, structure B).
+# One customer option persisted as several CURRENT VariantPricing rows (one per
+# power_scope) because the catalog states it with multiple OR PowerRange
+# clauses. A prescription covered by >1 clause must yield ONE result.
+# Dedupe key: (LensModel.id, LensVariant.id, coating_id, availability,
+# norm(market_scope), price_pair, currency). Runs AFTER STOCK-over-RX
+# suppression, BEFORE result construction / sort.
+# ===========================================================================
+def _usd_pricing(db, variant, catalog, *, price="100.00", coating=None,
+                 market_scope=None, power_scope=None, availability="stock"):
+    vp = models.VariantPricing(
+        variant_id=variant.id, coating_id=(coating.id if coating else None),
+        availability=models.PricingAvailability(availability), price_pair=Decimal(price),
+        currency="USD", source_catalog_id=catalog.id, source_extraction_id=None,
+        effective_from=datetime.utcnow() - timedelta(days=1), effective_to=None,
+        power_scope=power_scope, market_scope=market_scope,
+    )
+    db.add(vp); db.commit(); db.refresh(vp)
+    return vp
+
+
+_DD_SEQ = [0]
+
+
+def _dd_base(db):
+    _DD_SEQ[0] += 1
+    n = _DD_SEQ[0]
+    co = _company(db, f"ACME{n}"); m = _model(db, co, f"M{n}")
+    cat = _catalog(db, co); v = _variant(db, m)
+    ct = _coating(db, code=f"CT{n}", name=f"Coat {n}")
+    return co, m, cat, v, ct
+
+
+def test_dd_overlapping_clauses_one_result(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    vp1 = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="s1")
+    _range(db, vp1, v, sph_min=-1.0, sph_max=1.0, cyl_min=-6.0, cyl_max=0.0)
+    vp2 = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="s2")
+    _range(db, vp2, v, sph_min=-10.0, sph_max=10.0, cyl_min=-6.0, cyl_max=0.0)
+    res = _match(db, _rx(db, 0.0))[0]
+    assert len(res) == 1
+    assert res[0].source_pricing_id == vp1.id            # tighter fit -> higher match_score
+    assert res[0].power_range is not None
+
+
+def test_dd_non_overlap_no_candidate_lost(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    vp1 = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="lo")
+    _range(db, vp1, v, sph_min=-8.0, sph_max=-4.0)
+    vp2 = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="hi")
+    _range(db, vp2, v, sph_min=2.0, sph_max=6.0)
+    r_lo = _match(db, _rx(db, -6.0))[0]
+    r_hi = _match(db, _rx(db, 4.0))[0]
+    assert len(r_lo) == 1 and r_lo[0].source_pricing_id == vp1.id
+    assert len(r_hi) == 1 and r_hi[0].source_pricing_id == vp2.id
+
+
+def test_dd_different_price_two_results(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    a = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="a")
+    _range(db, a, v, sph_min=-6.0, sph_max=6.0)
+    b = _pricing(db, v, cat, price="800.00", coating=ct, power_scope="b")
+    _range(db, b, v, sph_min=-6.0, sph_max=6.0)
+    assert {r.source_pricing_id for r in _match(db, _rx(db, 0.0))[0]} == {a.id, b.id}
+
+
+def test_dd_different_coating_two_results(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    ct2 = _coating(db, code="SHV", name="Super Hi Vision")
+    a = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="a")
+    _range(db, a, v, sph_min=-6.0, sph_max=6.0)
+    b = _pricing(db, v, cat, price="700.00", coating=ct2, power_scope="b")
+    _range(db, b, v, sph_min=-6.0, sph_max=6.0)
+    assert {r.source_pricing_id for r in _match(db, _rx(db, 0.0))[0]} == {a.id, b.id}
+
+
+def test_dd_different_market_two_results(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    a = _pricing(db, v, cat, price="700.00", coating=ct, market_scope="Egypt", power_scope="a")
+    _range(db, a, v, sph_min=-6.0, sph_max=6.0)
+    b = _pricing(db, v, cat, price="700.00", coating=ct, market_scope="Out Of Egypt", power_scope="b")
+    _range(db, b, v, sph_min=-6.0, sph_max=6.0)
+    assert {r.source_pricing_id for r in _match(db, _rx(db, 0.0))[0]} == {a.id, b.id}
+
+
+def test_dd_different_variant_two_results(db):
+    _co, m, cat, v, ct = _dd_base(db)
+    v2 = _variant(db, m, index=1.6)
+    a = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="a")
+    _range(db, a, v, sph_min=-6.0, sph_max=6.0)
+    b = _pricing(db, v2, cat, price="700.00", coating=ct, power_scope="b")
+    _range(db, b, v2, sph_min=-6.0, sph_max=6.0)
+    assert {r.source_pricing_id for r in _match(db, _rx(db, 0.0))[0]} == {a.id, b.id}
+
+
+def test_dd_different_currency_two_results(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    a = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="a")       # EGP
+    _range(db, a, v, sph_min=-6.0, sph_max=6.0)
+    b = _usd_pricing(db, v, cat, price="700.00", coating=ct, power_scope="b")   # USD
+    _range(db, b, v, sph_min=-6.0, sph_max=6.0)
+    assert {r.source_pricing_id for r in _match(db, _rx(db, 0.0))[0]} == {a.id, b.id}
+
+
+def test_dd_stock_rx_suppression_unchanged(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    st = _pricing(db, v, cat, availability="stock", price="700.00", coating=ct, power_scope="st")
+    _range(db, st, v, sph_min=-6.0, sph_max=6.0)
+    rxp = _pricing(db, v, cat, availability="rx", price="700.00", coating=ct, power_scope="rx")
+    _range(db, rxp, v, sph_min=-6.0, sph_max=6.0)
+    res = _match(db, _rx(db, 0.0))[0]
+    assert len(res) == 1 and res[0].source_pricing_id == st.id     # RX suppressed by STOCK, unchanged
+    _co2, _m2, cat2, v2, ct2 = _dd_base(db)
+    only_rx = _pricing(db, v2, cat2, availability="rx", price="900.00", coating=ct2, power_scope="rx")
+    _range(db, only_rx, v2, sph_min=-6.0, sph_max=6.0)
+    assert any(r.source_pricing_id == only_rx.id and r.availability == "rx"
+               for r in _match(db, _rx(db, 0.0))[0])
+
+
+def test_dd_highest_score_survives(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    tight = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="tight")
+    _range(db, tight, v, sph_min=2.0, sph_max=4.0)            # centre 3 == Rx
+    wide = _pricing(db, v, cat, price="700.00", coating=ct, power_scope="wide")
+    _range(db, wide, v, sph_min=-10.0, sph_max=10.0)
+    res = _match(db, _rx(db, 3.0))[0]
+    assert len(res) == 1 and res[0].source_pricing_id == tight.id
+
+
+def test_dd_tie_prefers_range_bearing(db):
+    # RX no-range power_score == 18.0 ; a range with avg_dist == 0.4*(span/2)
+    # also scores 18.0 -> exact tie -> range-bearing wins despite HIGHER id.
+    _co, _m, cat, v, ct = _dd_base(db)
+    _no_range = _pricing(db, v, cat, availability="rx", price="700.00", coating=ct, power_scope="nr")
+    with_range = _pricing(db, v, cat, availability="rx", price="700.00", coating=ct, power_scope="wr")
+    _range(db, with_range, v, sph_min=-5.0, sph_max=5.0)     # centre 0, span 10
+    res = _match(db, _rx(db, 2.0))[0]                        # avg_dist 2 == 0.4*5
+    assert len(res) == 1
+    assert res[0].source_pricing_id == with_range.id
+    assert res[0].power_range is not None
+
+
+def test_dd_pricing_id_final_tiebreak_deterministic(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    a = _pricing(db, v, cat, availability="rx", price="700.00", coating=ct, power_scope="a")
+    b = _pricing(db, v, cat, availability="rx", price="700.00", coating=ct, power_scope="b")
+    r1 = _match(db, _rx(db, 0.0))[0]
+    r2 = _match(db, _rx(db, 0.0))[0]
+    assert len(r1) == 1 and r1[0].source_pricing_id == min(a.id, b.id)
+    assert [x.source_pricing_id for x in r1] == [x.source_pricing_id for x in r2]
+
+
+def test_dd_sorting_unchanged(db):
+    _co, _m, cat, v, ct = _dd_base(db)
+    cheap = _pricing(db, v, cat, price="500.00", coating=ct, power_scope="c")
+    _range(db, cheap, v, sph_min=-6.0, sph_max=6.0)
+    pricey = _pricing(db, v, cat, price="900.00", coating=ct, power_scope="p")
+    _range(db, pricey, v, sph_min=-6.0, sph_max=6.0)
+    res = _match(db, _rx(db, 0.0))[0]
+    assert [r.source_pricing_id for r in res] == [cheap.id, pricey.id]   # equal score -> cheaper first

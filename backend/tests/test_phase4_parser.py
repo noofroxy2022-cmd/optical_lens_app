@@ -3232,3 +3232,72 @@ def test_g3_from_single_total_grammars_reject_from(parser):
                 "Total Sph+Cyl (From -6.00) Cyl (-2.00)",    # signed single
                 "Total Sph+Cyl (From +6.00) Cyl (+2.00)"):
         assert parser._parse_g3_stock_range(txt) is None
+
+
+# ============================================================
+#  Real-HOYA E2E: matcher-time commercial candidate dedupe.
+#  These need the parser + confirm_catalog_commercial + real overlapping OR
+#  clauses, so they live here (phase3 has no parser import).
+# ============================================================
+def _dd_import_group(db, page_idx, model_hint, coating, price, model_name):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[page_idx]
+        ctx = ParserContext()
+        p._update_context_from_text(ctx, page.extract_text() or "")
+        rows = []
+        for ov, hdr, mat in p._extract_page_tables(page):
+            rows += p._rows_from_section(hdr, mat, p._section_context(ctx, ov))
+    grp = [r for r in rows if r.model_hint == model_hint and r.coating == coating
+           and r.price == price and r.has_range]
+    co = models.Company(name=f"HOYA_{model_name}", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name=model_name, category="single_vision",
+                                             power_ranges=grp)]
+    p.save_extractions_to_db(cat.id, db)
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    return len(grp)
+
+
+def _dd_presc(db, s, c):
+    from app.lens_matcher import TranspositionEngine as _TE
+    t = _TE.transpose(s, c, 0)
+    x = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=t[0], os_sph=t[0],
+        od_cyl_original=c, os_cyl_original=c, od_cyl=t[1], os_cyl=t[1],
+        od_axis=t[2], os_axis=t[2], od_add=0.0, os_add=0.0)
+    db.add(x); db.commit(); db.refresh(x); return x
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_dd_real_hoya_hilux_meiryo_3650(db):
+    from app.lens_matcher import LensMatcherFinal
+    n = _dd_import_group(db, 5, "Hilux", "Hi Vision Meiryo", 3650.0, "Hilux 1.5 UV")
+    assert n == 2                                            # G3 envelope + G1 clause
+    assert db.query(models.VariantPricing).count() == 2      # persisted separately (structure B)
+    m = LensMatcherFinal()
+    for (s, c) in [(2.00, -2.00), (1.00, -1.00)]:            # covered by BOTH clauses
+        res = m.match_lenses(db, _dd_presc(db, s, c), None, True, True)[0]
+        assert len(res) == 1                                 # deduped to one commercial option
+        assert res[0].availability == "stock" and float(res[0].price_pair) == 3650.0
+    res_one = m.match_lenses(db, _dd_presc(db, -1.00, -2.00), None, True, True)[0]
+    assert len(res_one) == 1                                 # only one clause covers -> still one
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_dd_real_hoya_nulux_plus_3750(db):
+    from app.lens_matcher import LensMatcherFinal
+    n = _dd_import_group(db, 3, "Nulux", "Hi Vision Aqua", 3750.0, "Nulux 1.6 (+)")
+    assert n == 3                                            # G1 + signed single-total + G2
+    assert db.query(models.VariantPricing).count() == 3
+    m = LensMatcherFinal()
+    res = m.match_lenses(db, _dd_presc(db, 3.00, 2.00), None, True, True)[0]   # 2 covering routes
+    assert len(res) == 1
+    assert res[0].availability == "stock" and float(res[0].price_pair) == 3750.0
+    res_one = m.match_lenses(db, _dd_presc(db, 0.50, 2.00), None, True, True)[0]
+    assert len(res_one) == 1
