@@ -354,3 +354,232 @@ def test_reason_text_has_no_legacy_commercial_reads(db):
     res = _match(db, _rx(db, -2.0))[0][0]
     assert "RX" in res.reason
     assert "777" in res.reason and "EGP" in res.reason
+
+
+# ===========================================================================
+# Signed-cylinder PowerRange + convention-aware matching
+#   catalog range keeps its sign:  Cyl(-3) -> [-3,0] ,  Cyl(+3) -> [0,+3]
+#   an Rx is compared in the representation matching the range's cyl sign,
+#   SPH+CYL+AXIS moving together; the catalog range is never transposed.
+# ===========================================================================
+from app.lens_matcher import TranspositionEngine as _TE, LensMatcherFinal as _LMF
+
+_M = _LMF()
+
+
+def _stored_rx(db, od, os_=None):
+    """Persist a prescription the way crud.create_prescription does: the ENTERED
+    (sph,cyl,axis) is transposed to the minus form for storage. od/os_ are
+    (sph, cyl, axis) as originally entered (either notation)."""
+    os_ = os_ or od
+    ot = _TE.transpose(od[0], od[1], od[2])
+    st = _TE.transpose(os_[0], os_[1], os_[2])
+    p = models.Prescription(
+        od_sph_original=od[0], od_cyl_original=od[1], od_axis_original=od[2],
+        os_sph_original=os_[0], os_cyl_original=os_[1], os_axis_original=os_[2],
+        od_sph=ot[0], od_cyl=ot[1], od_axis=ot[2],
+        os_sph=st[0], os_cyl=st[1], os_axis=st[2],
+        od_add=0.0, os_add=0.0,
+        transposition_applied=(od[1] > 0 or os_[1] > 0),
+    )
+    db.add(p); db.commit(); db.refresh(p)
+    return p
+
+
+# -- A/B. ORM signed-CYL bounds -------------------------------------------
+def test_sc_A_orm_accepts_plus_and_minus_cyl(db):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="100.00")
+    for cn, cx in ((-3.0, 0.0), (0.0, 3.0), (0.0, 0.0)):
+        pr = models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                               sph_min=-2.0, sph_max=2.0, cyl_min=cn, cyl_max=cx)
+        db.add(pr); db.commit()
+    assert db.query(models.PowerRange).count() == 3
+
+
+def test_sc_B_orm_rejects_out_of_range_cyl(db):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="100.00")
+    for bad in (-10.5, 10.5):
+        with pytest.raises(ValueError):
+            models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                              sph_min=0.0, sph_max=1.0, cyl_min=bad, cyl_max=0.0)
+
+
+# -- C/D. Pydantic bounds + minus serialization unchanged ---------------
+def test_sc_C_pydantic_accepts_positive_cyl():
+    ok = schemas.PowerRangeCreate(lens_model_id=1, sph_min=0.0, sph_max=3.0,
+                                  cyl_min=0.0, cyl_max=3.0)
+    assert ok.cyl_max == 3.0
+    with pytest.raises(Exception):
+        schemas.PowerRangeCreate(lens_model_id=1, sph_min=0.0, sph_max=1.0,
+                                 cyl_min=0.0, cyl_max=11.0)
+
+
+def test_sc_D_minus_cyl_serialization_unchanged(db):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="100.00")
+    pr = _range(db, vp, v, sph_min=-6.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0)
+    out = schemas.PowerRangeResponse.model_validate(pr)
+    assert (out.cyl_min, out.cyl_max, out.sph_min, out.sph_max) == (-2.0, 0.0, -6.0, 0.0)
+
+
+# -- E/F. plus-form derivation; SPH moves with CYL ---------------------
+def test_sc_E_plus_form_derivation_axis_convention():
+    # minus (+1, -2, x170)  ->  plus (-1, +2, x80)
+    assert _M._plus_form(1.0, -2.0, 170) == (-1.0, 2.0, 80)
+    # axis wrap to 180
+    assert _M._plus_form(-1.0, -2.0, 90) == (-3.0, 2.0, 180)
+    # cyl 0 -> unchanged (no axis shift)
+    assert _M._plus_form(-3.0, 0.0, 45) == (-3.0, 0.0, 45)
+
+
+def test_sc_F_sph_changes_together_with_cyl():
+    s, c, a = -4.0, -1.5, 10
+    ps, pc, pa = _M._plus_form(s, c, a)
+    assert pc == -c and ps == round(s + c, 2)      # SPH shifted by C, not just sign flip
+    assert ps != s
+
+
+# -- convention selection ---------------------------------------------
+def test_sc_convention_selection():
+    def pr(cn, cx):
+        return type("PRStub", (), {"cyl_min": cn, "cyl_max": cx})()
+    assert _M._range_convention(pr(-3.0, 0.0)) == "minus"
+    assert _M._range_convention(pr(0.0, 3.0)) == "plus"
+    assert _M._range_convention(pr(0.0, 0.0)) == "minus"      # plano
+    assert _M._range_convention(pr(-1.0, 1.0)) == "both"      # zero-spanning
+
+
+def _setup(db, *, cyl_min, cyl_max, sph_min=-1.0, sph_max=3.0,
+           max_cyl_for_high_sph=None, sph_threshold=None):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="1350.00", market_scope="Egypt")
+    pr = models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                           sph_min=sph_min, sph_max=sph_max,
+                           cyl_min=cyl_min, cyl_max=cyl_max,
+                           max_cyl_for_high_sph=max_cyl_for_high_sph,
+                           sph_threshold=sph_threshold)
+    db.add(pr); db.commit(); db.refresh(pr)
+    return vp, pr
+
+
+# -- G. plus PowerRange uses the plus Rx form ------------------------
+def test_sc_G_plus_range_uses_plus_form(db):
+    vp, _pr = _setup(db, cyl_min=0.0, cyl_max=3.0)          # plus-cyl range [0,+3]
+    # entered-minus Rx (+3, -2, x180) whose plus form is (+1, +2, x90)
+    rx = _stored_rx(db, (3.0, -2.0, 180))
+    res = _match(db, rx)[0]
+    assert any(r.source_pricing_id == vp.id for r in res)
+    # a Rx whose plus form falls outside must NOT match
+    rx2 = _stored_rx(db, (8.0, -2.0, 180))                  # plus form sph +6 -> outside
+    assert not any(r.source_pricing_id == vp.id for r in _match(db, rx2)[0])
+
+
+# -- H. minus PowerRange uses the minus Rx form --------------------
+def test_sc_H_minus_range_uses_minus_form(db):
+    vp, _pr = _setup(db, cyl_min=-3.0, cyl_max=0.0, sph_min=0.0, sph_max=4.0)
+    rx = _stored_rx(db, (3.0, -2.0, 180))                   # minus form in range
+    assert any(r.source_pricing_id == vp.id for r in _match(db, rx)[0])
+    rx2 = _stored_rx(db, (3.0, -5.0, 180))                  # minus cyl -5 -> outside
+    assert not any(r.source_pricing_id == vp.id for r in _match(db, rx2)[0])
+
+
+# -- I. plano behaviour unchanged --------------------------------
+def test_sc_I_plano_range_unchanged(db):
+    vp, _pr = _setup(db, cyl_min=0.0, cyl_max=0.0, sph_min=-4.0, sph_max=0.0)
+    rx = _stored_rx(db, (-2.0, 0.0, 0))
+    assert any(r.source_pricing_id == vp.id for r in _match(db, rx)[0])
+    rx2 = _stored_rx(db, (-2.0, -1.0, 90))                  # has cyl -> outside plano
+    assert not any(r.source_pricing_id == vp.id for r in _match(db, rx2)[0])
+
+
+# -- J. defensive zero-spanning range tests both forms ----------
+def test_sc_J_zero_spanning_range_tries_both(db):
+    vp, pr = _setup(db, cyl_min=-1.0, cyl_max=1.0, sph_min=-4.0, sph_max=4.0)
+    assert _M._range_convention(pr) == "both"
+    # covered via the minus form (small minus cyl in [-1,+1])
+    assert _M.check_power_range(pr, _stored_rx(db, (-2.0, -0.5, 90)), "od")[0] is True
+    # a large minus cyl fails the minus form; the plus form (large +cyl) also
+    # fails -> genuinely outside both, so overall False (both branches exercised)
+    assert _M.check_power_range(pr, _stored_rx(db, (2.0, -3.0, 90)), "od")[0] is False
+    # SPH out of window fails regardless of form
+    assert _M.check_power_range(pr, _stored_rx(db, (9.0, -0.5, 90)), "od")[0] is False
+
+
+# -- K. mixed plus/minus OR ranges under one pricing -----------
+def test_sc_K_mixed_or_ranges(db):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="1350.00", market_scope="Egypt")
+    db.add(models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                             sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0))
+    db.add(models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                             sph_min=-1.0, sph_max=3.0, cyl_min=0.0, cyl_max=3.0))
+    db.commit()
+    # covered by the minus range only
+    assert any(r.source_pricing_id == vp.id
+               for r in _match(db, _stored_rx(db, (-2.0, -1.0, 90)))[0])
+    # covered by the plus range only (minus (+3,-2) -> plus (+1,+2))
+    assert any(r.source_pricing_id == vp.id
+               for r in _match(db, _stored_rx(db, (3.0, -2.0, 180)))[0])
+    # covered by neither
+    assert not any(r.source_pricing_id == vp.id
+                   for r in _match(db, _stored_rx(db, (9.0, -1.0, 90)))[0])
+
+
+# -- L. _best_matching_range picks per-range SPH representation ---
+def test_sc_L_best_range_uses_correct_form_sph(db):
+    co = _company(db); m = _model(db, co); cat = _catalog(db, co)
+    v = _variant(db, m); vp = _pricing(db, v, cat, price="1350.00", market_scope="Egypt")
+    near = models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                             sph_min=0.0, sph_max=2.0, cyl_min=0.0, cyl_max=3.0)   # centre +1
+    far = models.PowerRange(lens_model_id=m.id, variant_id=v.id, pricing_id=vp.id,
+                            sph_min=-3.0, sph_max=3.0, cyl_min=0.0, cyl_max=3.0)   # centre 0
+    db.add(near); db.add(far); db.commit(); db.refresh(near)
+    rx = _stored_rx(db, (3.0, -2.0, 180))               # plus form sph +1 -> closest to 'near'
+    best = _M._best_matching_range([far, near], rx)
+    assert best is not None and best.id == near.id
+
+
+# -- M. high-SPH cylinder cap evaluated with the chosen form -----
+def test_sc_M_high_sph_cap_uses_chosen_form(db):
+    # plus range; cap: if |sph| >= 1.0 then |cyl| must be <= 1.0
+    vp, pr = _setup(db, cyl_min=0.0, cyl_max=3.0, sph_min=-3.0, sph_max=3.0,
+                    max_cyl_for_high_sph=1.0, sph_threshold=1.0)
+    # plus form (+1, +2): |sph|=1 triggers cap, |cyl|=2 > 1 -> blocked
+    assert _M.check_power_range(pr, _stored_rx(db, (3.0, -2.0, 180)), "od")[0] is False
+    # plus form (+0.5, +2): |sph|=0.5 < threshold -> cap not triggered -> ok
+    assert _M.check_power_range(pr, _stored_rx(db, (2.5, -2.0, 180)), "od")[0] is True
+
+
+# -- N. result independent of entered notation -------------------
+def test_sc_N_entry_notation_independent(db):
+    vp_plus, _ = _setup(db, cyl_min=0.0, cyl_max=3.0, sph_min=-1.0, sph_max=3.0)
+    # SAME optical Rx, entered two ways:
+    rx_minus_entry = _stored_rx(db, (3.0, -2.0, 180))          # minus notation
+    rx_plus_entry = _stored_rx(db, (1.0, 2.0, 90))             # plus notation (equivalent)
+    # stored normalized forms are identical
+    assert (rx_minus_entry.od_sph, rx_minus_entry.od_cyl) == (rx_plus_entry.od_sph, rx_plus_entry.od_cyl)
+    a = {r.source_pricing_id for r in _match(db, rx_minus_entry)[0]}
+    b = {r.source_pricing_id for r in _match(db, rx_plus_entry)[0]}
+    assert vp_plus.id in a and a == b
+    # also against an equivalent MINUS-cyl catalog range
+    co = _company(db, "ACME2"); m2 = _model(db, co, "M2"); cat2 = _catalog(db, co)
+    v2 = _variant(db, m2); vpm = _pricing(db, v2, cat2, price="1400.00", market_scope="Egypt")
+    db.add(models.PowerRange(lens_model_id=m2.id, variant_id=v2.id, pricing_id=vpm.id,
+                             sph_min=0.0, sph_max=4.0, cyl_min=-3.0, cyl_max=0.0)); db.commit()
+    a2 = {r.source_pricing_id for r in _match(db, rx_minus_entry)[0]}
+    b2 = {r.source_pricing_id for r in _match(db, rx_plus_entry)[0]}
+    assert vpm.id in a2 and a2 == b2
+
+
+# -- O. existing minus-cylinder matcher path unchanged ----------
+def test_sc_O_existing_minus_behaviour_unchanged(db):
+    vp, _pr = _setup(db, cyl_min=-2.0, cyl_max=0.0, sph_min=-6.0, sph_max=0.0)
+    rx = _stored_rx(db, (-3.0, -1.0, 90))
+    res = _match(db, rx)[0]
+    assert any(r.source_pricing_id == vp.id for r in res)
+    # plus-form derivation never consulted for a minus range: an Rx whose plus
+    # form would coincidentally fit must still be judged on its minus form
+    rx2 = _stored_rx(db, (-3.0, -5.0, 90))                 # minus cyl -5 -> outside
+    assert not any(r.source_pricing_id == vp.id for r in _match(db, rx2)[0])

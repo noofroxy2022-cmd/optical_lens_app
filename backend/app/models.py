@@ -466,8 +466,12 @@ class PowerRange(Base):
 
     @validates('cyl_min', 'cyl_max')
     def validate_cyl(self, key, value):
-        if value < -10.0 or value > 0.0:
-            raise ValueError(f"CYL must be between -10 and 0")
+        # Signed: a catalog range keeps its source notation - "Cyl (-3.00)" ->
+        # [-3, 0] (minus-cyl blank), "Cyl (+3.00)" -> [0, +3] (plus-cyl blank).
+        # (Deferred hardening: a cyl_min <= cyl_max cross-field invariant is not
+        # enforced here.)
+        if value < -10.0 or value > 10.0:
+            raise ValueError(f"CYL must be between -10 and +10")
         return round(value, 2)
 
 

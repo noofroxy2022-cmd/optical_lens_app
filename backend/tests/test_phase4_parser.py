@@ -1230,14 +1230,16 @@ def test_mg_N_explicit_price_exact(parser):
 
 # -- O. unsupported Stock Range grammar -> no fabricated PowerRange ------
 def test_mg_O_compound_range_not_fabricated(parser):
-    matrix = [list(_H4),
-              ["Nulux 1.74", "Hi Vision Meiryo", "16300", "Sph (0.00 To -10.00) Cyl (-2.00) 70"]]
+    # a genuinely unsupported grammar (Total Sph+Cyl = G3) - NOT G1 - must never
+    # be turned into sph/cyl values.
+    txt = "Total Sph+Cyl (-8.00) Cyl (-3.00) 70"
+    matrix = [list(_H4), ["Nulux 1.74", "Hi Vision Meiryo", "16300", txt]]
     r = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))[0]
     assert r.has_range is False
     assert r.sph_min == 0.0 and r.sph_max == 0.0
     assert r.cyl_min == -10.0 and r.cyl_max == 0.0          # dataclass default, untouched
     assert "unparsed stock range grammar" in r.review_reasons
-    assert "Sph (0.00 To -10.00) Cyl (-2.00) 70" in (r.notes or "")
+    assert txt in (r.notes or "")
 
 
 # -- P. add-on recognition unchanged in merged mode --------------------
@@ -1302,8 +1304,15 @@ def test_mg_real_hoya_page4_merged_price_groups(parser):
     hil = [r for r in rows if r.model_hint == "Hilux" and r.price == 1350.0]
     assert hil
     assert all(r.index_value == 1.5 for r in hil)
-    assert all(r.has_range is False for r in hil)
-    assert all("unparsed stock range grammar" in r.review_reasons for r in hil)
+    # G1 lines parse into real ranges now (OLD-catalog page: same G1 grammar).
+    assert all(r.has_range is True for r in hil)
+    assert {(r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) for r in hil} == {
+        (-4.0, 0.0, -2.0, 0.0),
+        (0.0, 3.0, 0.0, 2.0),
+        (0.0, 4.0, 0.0, 2.0),
+        (0.25, 1.75, -2.0, 0.0),
+    }
+    assert all("unparsed stock range grammar" not in r.review_reasons for r in hil)
 
 
 # ===========================================================================
@@ -1609,3 +1618,303 @@ def test_mgu_old_hoya_single_price_still_works(parser):
     prices = [ov.get("retail_source") for ov, _, _ in subs]
     assert prices.count("1350") == 1 and prices.count("1450") == 1     # single value -> retail
     assert all("review_reason" not in ov for ov, _, _ in subs)
+
+
+# ===========================================================================
+# HOYA Stock Range grammar G1 only:  "Sph (a To b) Cyl (c) [D]"
+#   SPH -> [min(a,b), max(a,b)]
+#   CYL -> [c,0] if c<0 ; [0,c] if c>0 ; [0,0] if c==0
+#   D   -> diameter mm, kept as source evidence only
+# G2 / G3 / G4 remain unparsed and needs_review; nothing is fabricated.
+# ===========================================================================
+def _g1_row(parser, rng_text, *, coating="Hi Vision Aqua"):
+    matrix = [list(_H4), ["Hilux 1.5", coating, "1450", rng_text]]
+    return parser._rows_from_section(
+        matrix[:1], matrix, ParserContext(availability="stock"))[0]
+
+
+def test_g1_A_minus_line(parser):
+    r = _g1_row(parser, "Sph (0.00 To -3.00) Cyl (-3.00) 70")
+    assert r.has_range is True
+    assert (r.sph_min, r.sph_max) == (-3.0, 0.0)
+    assert (r.cyl_min, r.cyl_max) == (-3.0, 0.0)
+    assert "unparsed stock range grammar" not in r.review_reasons
+    assert "STOCK without PowerRange" not in r.review_reasons
+
+
+def test_g1_B_plus_line(parser):
+    r = _g1_row(parser, "Sph (0.00 To +3.00) Cyl (+2.00) 65")
+    assert (r.sph_min, r.sph_max) == (0.0, 3.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 2.0)
+    assert r.has_range is True
+
+
+def test_g1_C_mixed_endpoints_minus_cyl(parser):
+    r = _g1_row(parser, "Sph (+0.25 To +1.75) Cyl (-2.00) 65")
+    assert (r.sph_min, r.sph_max) == (0.25, 1.75)
+    assert (r.cyl_min, r.cyl_max) == (-2.0, 0.0)
+
+
+def test_g1_D_endpoint_order_normalised(parser):
+    # descending SPH endpoints must still yield min..max
+    r1 = parser._parse_g1_stock_range("Sph (0.00 To -4.00) Cyl (-2.00) 70")
+    r2 = parser._parse_g1_stock_range("Sph (-4.00 To 0.00) Cyl (-2.00) 70")
+    assert r1["sph"] == (-4.0, 0.0) == r2["sph"]
+    assert parser._parse_g1_stock_range("Sph (0.00 To 0.00) Cyl (0.00) 70")["cyl"] == (0.0, 0.0)
+
+
+def test_g1_E_diameter_kept_as_evidence_only(parser):
+    r = _g1_row(parser, "Sph (0.00 To -3.00) Cyl (-3.00) 70")
+    assert "diameter_mm=70" in (r.notes or "")
+    # diameter is not a SPH/CYL field and there is no schema attr for it
+    assert not hasattr(r, "diameter")
+    # a line with no trailing D still parses, no diameter note
+    r2 = _g1_row(parser, "Sph (0.00 To -10.00) Cyl (-2.00)")
+    assert r2.has_range and "diameter_mm" not in (r2.notes or "")
+
+
+def test_g1_F_multiple_lines_stay_separate_or_ranges(parser):
+    matrix = [list(_H4),
+              ["Hilux 1.5", "Hi Vision Aqua", "1350", "Sph (0.00 To -4.00) Cyl (-2.00) 70"],
+              ["Hilux 1.5", "Hi Vision Aqua", "1350", "Sph (0.00 To +3.00) Cyl (+2.00) 65"],
+              ["Hilux 1.5", "Hi Vision Aqua", "1350", "Sph (+0.25 To +1.75) Cyl (-2.00) 65"]]
+    rows = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))
+    assert len(rows) == 3                       # three independent PowerRange rows
+    assert all(r.has_range for r in rows)
+    assert all(r.price == 1350.0 for r in rows)   # all attached to the same price
+    boxes = {(r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) for r in rows}
+    assert boxes == {
+        (-4.0, 0.0, -2.0, 0.0),
+        (0.0, 3.0, 0.0, 2.0),
+        (0.25, 1.75, -2.0, 0.0),
+    }
+    # not merged into one bounding box
+    assert (min(r.sph_min for r in rows), max(r.sph_max for r in rows)) == (-4.0, 3.0)
+    assert len(boxes) == 3
+
+
+def test_g1_G_matcher_or_semantics_unchanged(db):
+    # Two G1 (minus-cyl) alternatives = two PowerRange rows on ONE current
+    # VariantPricing. The matcher's pre-existing OR behaviour (any covering
+    # range qualifies) is unchanged by G1 parsing. (Plus-cyl G1 cannot enter
+    # PowerRange under the current cyl_max in [-10,0] schema - the next blocker.)
+    from decimal import Decimal
+    from datetime import datetime as _dt
+    from app.lens_matcher import lens_matcher as _m
+    co = models.Company(name="G1 Co", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    lm = models.LensModel(company_id=co.id, name="Hilux",
+                          category=models.LensCategory.SINGLE_VISION)
+    db.add(lm); db.commit(); db.refresh(lm)
+    var = models.LensVariant(lens_model_id=lm.id, material=models.MaterialType.CR39,
+                             index_value=1.5, price=0.0, design_type=models.DesignType.SPHERICAL,
+                             is_aspherical=False)
+    db.add(var); db.commit(); db.refresh(var)
+    cat = models.Catalog(company_id=co.id, filename="c.pdf", file_path="/x",
+                         status=models.CatalogStatus.CONFIRMED)
+    db.add(cat); db.commit(); db.refresh(cat)
+    vp = models.VariantPricing(
+        variant_id=var.id, availability=models.PricingAvailability.STOCK,
+        price_pair=Decimal("1350.00"), currency="EGP", source_catalog_id=cat.id,
+        effective_from=_dt.utcnow(), effective_to=None, market_scope="Egypt")
+    db.add(vp); db.commit(); db.refresh(vp)
+    for sph in ((-4.0, 0.0), (-9.0, -3.0)):
+        db.add(models.PowerRange(lens_model_id=lm.id, variant_id=var.id, pricing_id=vp.id,
+                                 sph_min=sph[0], sph_max=sph[1], cyl_min=-2.0, cyl_max=0.0))
+    db.commit()
+    assert db.query(models.PowerRange).filter_by(pricing_id=vp.id).count() == 2
+
+    def presc(s, c):
+        p = models.Prescription(od_sph_original=s, os_sph_original=s, od_sph=s, os_sph=s,
+            od_cyl_original=c, os_cyl_original=c, od_cyl=c, os_cyl=c,
+            od_axis=0, os_axis=0, od_add=0.0, os_add=0.0)
+        db.add(p); db.commit(); db.refresh(p); return p
+
+    a = _m.match_lenses(db, presc(-2.0, -1.0), None, True, True)[0]
+    b = _m.match_lenses(db, presc(-6.0, -1.0), None, True, True)[0]
+    out = _m.match_lenses(db, presc(6.0, 0.0), None, True, True)[0]
+    assert any(r.source_pricing_id == vp.id for r in a)     # covered by range 1
+    assert any(r.source_pricing_id == vp.id for r in b)     # covered by range 2 (OR)
+    assert not any(r.source_pricing_id == vp.id for r in out)
+
+
+def test_g1_H_g2_still_unparsed(parser):
+    for txt in ("Sph Only From (0.00 To -4.00) 70",
+                "Sph Only From (-3.00 To -10.00) 75"):
+        assert parser._parse_g1_stock_range(txt) is None
+        r = _g1_row(parser, txt)
+        assert r.has_range is False
+        assert r.sph_min == 0.0 and r.sph_max == 0.0
+        assert r.cyl_min == -10.0 and r.cyl_max == 0.0        # dataclass default, untouched
+        assert "unparsed stock range grammar" in r.review_reasons
+        assert txt in (r.notes or "")
+
+
+def test_g1_I_g3_still_unparsed(parser):
+    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
+                "Total Sph+Cyl (+11.00 -10.00)",
+                "Total Sph+Cyl (+6.00 -6.00) Cyl (3)"):
+        assert parser._parse_g1_stock_range(txt) is None
+        r = _g1_row(parser, txt)
+        assert r.has_range is False
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g1_J_g4_still_unparsed(parser):
+    for txt in ("Max Cyl (6)", "Max Cyl (5)"):
+        assert parser._parse_g1_stock_range(txt) is None
+        r = _g1_row(parser, txt)
+        assert r.has_range is False
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+def test_g1_no_fabrication_from_partial_grammar(parser):
+    # a G1-looking prefix that is actually incomplete must NOT parse
+    for txt in ("Sph (0.00 To -3.00) 70",                 # no Cyl (...)
+                "Sph (0.00 To -3.00) Cyl -3.00 70",       # Cyl not parenthesised
+                "Sph (0.00) Cyl (-2.00) 70"):             # no "To" range
+        assert parser._parse_g1_stock_range(txt) is None
+
+
+# ---- real UPDATED HOYA page 4, explicit confirmed dual-price policy -------
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD),
+                    reason="real UPDATED HOYA catalog not present")
+def test_g1_real_updated_page4(parser_lwrr):
+    import pdfplumber
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[3]
+        cands = parser_lwrr._extract_page_tables(page)
+        rows = []
+        for ov, hdr, mat in cands:
+            rr = parser_lwrr._rows_from_section(
+                hdr, mat, parser_lwrr._section_context(ParserContext(), ov))
+            for r in rr:
+                if ov.get("review_reason"):
+                    r.flag_review(ov["review_reason"])
+            rows += rr
+
+    g1 = [r for r in rows if r.has_range]
+    assert len(g1) == 16                              # G1 lines on page 4
+
+    r1350 = [r for r in rows if r.price == 1350.0]
+    r1450 = [r for r in rows if r.price == 1450.0]
+    assert len(r1350) == 4 and all(r.has_range for r in r1350)
+    assert len(r1450) == 2 and all(r.has_range for r in r1450)
+
+    boxes_1350 = {(r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) for r in r1350}
+    assert boxes_1350 == {
+        (-4.0, 0.0, -2.0, 0.0),
+        (0.0, 3.0, 0.0, 2.0),
+        (0.0, 4.0, 0.0, 2.0),
+        (0.25, 1.75, -2.0, 0.0),
+    }
+    boxes_1450 = {(r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) for r in r1450}
+    # K + L: the UPDATED corrected value Cyl (-3.00); old -2.00 must NOT appear
+    assert (-3.0, 0.0, -3.0, 0.0) in boxes_1450
+    assert (0.0, 1.0, 0.0, 3.0) in boxes_1450
+    assert not any(box[2:] == (-2.0, 0.0) and box[:2] == (-3.0, 0.0) for box in boxes_1450)
+
+    # diameter kept as evidence on the parsed rows
+    assert any("diameter_mm=70" in (r.notes or "") for r in r1450)
+
+    # G2/G3/G4 lines on the page stay unparsed / needs_review, nothing fabricated
+    blocked = [r for r in rows if not r.has_range]
+    assert blocked and all(r.review_status == "needs_review" for r in blocked)
+    assert not any(
+        r.has_range and any(k in (r.notes or "")
+                            for k in ("Total Sph+Cyl", "Sph Only From", "Max Cyl"))
+        for r in rows
+    )
+
+
+# ===========================================================================
+# G1 signed-cylinder END-TO-END on the authoritative UPDATED HOYA catalog:
+# parse -> CatalogExtraction -> bulk-confirm -> PowerRange -> matcher, for both
+# a minus-CYL and a plus-CYL G1 row. Retail only; wholesale never in output.
+# ===========================================================================
+from app.lens_matcher import lens_matcher as _sc_matcher, TranspositionEngine as _SCTE
+
+
+def _hoya_page4_g1_rows():
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[3]
+        rows = []
+        for ov, hdr, mat in p._extract_page_tables(page):
+            rows += p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov))
+    return rows
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g1sc_R_plus_and_S_minus_bulk_confirm_and_match(db):
+    rows = _hoya_page4_g1_rows()
+    minus = next(r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) == (-3.0, 0.0)
+                 and r.price == 1450.0)                       # the corrected 1450 row
+    plus = next(r for r in rows if r.has_range and r.cyl_min == 0.0 and r.cyl_max > 0.0)
+
+    co = models.Company(name="HOYA E2E", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    p.extracted_models = [ExtractedLensModel(name="Hilux", category="single_vision",
+                                             power_ranges=[minus, plus])]
+    p.save_extractions_to_db(cat.id, db)
+    from app import crud as _c
+    for e in _c.get_extractions_by_catalog(db, cat.id):
+        _c.confirm_extraction(db, e.id, "qa")
+    # S: corrected minus range survived persistence as cyl [-3, 0]
+    exts = _c.get_extractions_by_catalog(db, cat.id)
+    assert any((e.cyl_min, e.cyl_max) == (-3.0, 0.0) for e in exts)
+    assert not any((e.cyl_min, e.cyl_max) == (-2.0, 0.0) and (e.sph_min, e.sph_max) == (-3.0, 0.0)
+                   for e in exts)
+
+    # R: bulk-confirm raises NO ValueError, incl. the plus-CYL row
+    _c.confirm_catalog_commercial(db, cat.id, "admin")
+    prs = db.query(models.PowerRange).all()
+    assert any(pr.cyl_min == 0.0 and pr.cyl_max > 0.0 for pr in prs)      # plus range persisted
+    assert any((pr.cyl_min, pr.cyl_max) == (-3.0, 0.0) for pr in prs)     # minus range persisted
+
+    # 8: plus-CYL PowerRange matches an optically equivalent prescription
+    plus_pr = next(pr for pr in prs if pr.cyl_min == 0.0 and pr.cyl_max > 0.0)
+    # choose a minus-form Rx whose plus form lands inside plus_pr
+    lo, hi = plus_pr.sph_min, plus_pr.sph_max
+    p_sph = (lo + hi) / 2.0
+    p_cyl = min(plus_pr.cyl_max, 1.0)
+    m_sph, m_cyl, _m_ax = p_sph + p_cyl, -p_cyl, 0          # minus form (S+C, -C)
+    rx = models.Prescription(
+        od_sph_original=m_sph, os_sph_original=m_sph, od_sph=m_sph, os_sph=m_sph,
+        od_cyl_original=m_cyl, os_cyl_original=m_cyl, od_cyl=m_cyl, os_cyl=m_cyl,
+        od_axis=90, os_axis=90, od_add=0.0, os_add=0.0)
+    db.add(rx); db.commit(); db.refresh(rx)
+    res = _sc_matcher.match_lenses(db, rx, None, True, True)[0]
+    plus_vp_id = plus_pr.pricing_id
+    hit = [r for r in res if r.source_pricing_id == plus_vp_id]
+    assert hit, "plus-CYL catalog range did not match its optically equivalent Rx"
+
+    # T: no wholesale leakage anywhere in the commercial output
+    vps = db.query(models.VariantPricing).all()
+    assert {str(vp.price_pair) for vp in vps} == {"1450.00", "1350.00"}   # retail only
+    for wsale in ("600.00", "650.00", "1500.00", "1550.00"):
+        assert not any(str(vp.price_pair) == wsale for vp in vps)
+    assert not any("wholesale" in (pr.notes or "").lower() for pr in prs)
+    for r in res:
+        assert "wholesale" not in (r.reason or "").lower()
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g1sc_U_g2_g3_g4_still_blocked():
+    rows = _hoya_page4_g1_rows()
+    blocked = [r for r in rows if not r.has_range]
+    assert blocked
+    assert all(r.review_status == "needs_review" for r in blocked)
+    assert all("unparsed stock range grammar" in r.review_reasons for r in blocked)
+    # none of the unsupported grammars produced sph/cyl
+    assert not any(
+        r.has_range and any(k in (r.notes or "")
+                            for k in ("Total Sph+Cyl", "Sph Only From", "Max Cyl"))
+        for r in rows
+    )

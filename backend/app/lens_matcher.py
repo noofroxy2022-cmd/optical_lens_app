@@ -145,44 +145,101 @@ class LensMatcherFinal:
         self.transposition = TranspositionEngine()
         self.recommender = OpticsRecommender()
 
+    # ----- signed-cylinder convention handling --------------------------------
+    @staticmethod
+    def _plus_form(sph, cyl, axis):
+        """Derive the PLUS-cylinder equivalent of a stored (minus) form using
+        the project's existing transposition algebra: S' = S + C, C' = -C,
+        Axis' = (Axis + 90) mod 180 (0 -> 180). CYL == 0 -> unchanged. Rounded
+        exactly as TranspositionEngine.transpose does. No second optical formula."""
+        c = cyl or 0.0
+        if c == 0:
+            return round(sph, 2), 0.0, (axis or 0)
+        new_axis = ((axis or 0) + 90) % 180
+        if new_axis == 0:
+            new_axis = 180
+        return round(sph + c, 2), round(-c, 2), new_axis
+
+    def _eye_forms(self, prescription: models.Prescription, eye: str):
+        """Both optically equivalent representations for one eye, derived from
+        the stored NORMALISED (minus-cyl) prescription. ADD is form-invariant."""
+        if eye == "od":
+            sph, cyl, axis, add = (prescription.od_sph, prescription.od_cyl,
+                                   prescription.od_axis, prescription.od_add)
+        else:
+            sph, cyl, axis, add = (prescription.os_sph, prescription.os_cyl,
+                                   prescription.os_axis, prescription.os_add)
+        minus = (sph, cyl or 0.0, axis or 0, add)
+        p_sph, p_cyl, p_axis = self._plus_form(sph, cyl, axis)
+        return {"minus": minus, "plus": (p_sph, p_cyl, p_axis, add)}
+
+    @staticmethod
+    def _range_convention(power_range: models.PowerRange) -> str:
+        """Which Rx form a PowerRange must be tested against, from its sign only
+        (no cyl_convention field). 'minus' | 'plus' | 'both'."""
+        lo, hi = power_range.cyl_min, power_range.cyl_max
+        if lo == 0 and hi == 0:
+            return "minus"                      # plano - minus form (cyl 0) is fine
+        if hi <= 0:
+            return "minus"                      # minus-cyl blank  [-c, 0]
+        if lo >= 0:
+            return "plus"                       # plus-cyl blank   [0, +c]
+        return "both"                           # defensive zero-spanning range
+
+    def _range_eye_sph(self, power_range: models.PowerRange,
+                       prescription: models.Prescription, eye: str) -> float:
+        """The eye's SPH in the representation this PowerRange is tested against
+        (used for distance / score so SPH stays paired with its CYL form)."""
+        forms = self._eye_forms(prescription, eye)
+        conv = self._range_convention(power_range)
+        return forms["plus"][0] if conv == "plus" else forms["minus"][0]
+
+    def _check_form_against_range(self, power_range, form) -> list:
+        sph, cyl, axis, add = form
+        cyl_needed = cyl or 0.0
+        issues = []
+        if not (power_range.sph_min - self.tolerance_sph <= sph
+                <= power_range.sph_max + self.tolerance_sph):
+            issues.append(f"SPH {sph} خارج [{power_range.sph_min}, {power_range.sph_max}]")
+        if not (power_range.cyl_min - self.tolerance_cyl <= cyl_needed
+                <= power_range.cyl_max + self.tolerance_cyl):
+            issues.append(f"CYL {cyl_needed} خارج [{power_range.cyl_min}, {power_range.cyl_max}]")
+        if add and add > 0:
+            if power_range.add_min is None or power_range.add_max is None:
+                issues.append("لا يدعم ADD")
+            elif not (power_range.add_min - self.tolerance_add <= add
+                      <= power_range.add_max + self.tolerance_add):
+                issues.append(f"ADD {add} خارج [{power_range.add_min}, {power_range.add_max}]")
+        # high-SPH cylinder cap - evaluated with THIS form's sph/cyl together
+        if (power_range.max_cyl_for_high_sph is not None
+                and power_range.sph_threshold is not None
+                and abs(sph) >= abs(power_range.sph_threshold)):
+            if abs(cyl_needed) > abs(power_range.max_cyl_for_high_sph):
+                issues.append(f"CYL محدود لـ SPH ≥ {power_range.sph_threshold}")
+        return issues
+
     def check_power_range(
         self,
         power_range: models.PowerRange,
         prescription: models.Prescription,
         eye: str = "od"
     ) -> Tuple[bool, str]:
-        """التحقق من نطاق القوة لعين واحدة"""
-        sph = prescription.od_sph if eye == "od" else prescription.os_sph
-        cyl = prescription.od_cyl if eye == "od" else prescription.os_cyl
-        add = prescription.od_add if eye == "od" else prescription.os_add
+        """التحقق من نطاق القوة لعين واحدة.
 
-        issues = []
-
-        # SPH
-        if not (power_range.sph_min - self.tolerance_sph <= sph <= power_range.sph_max + self.tolerance_sph):
-            issues.append(f"SPH {sph} خارج [{power_range.sph_min}, {power_range.sph_max}]")
-
-        # CYL
-        cyl_needed = cyl or 0.0
-        if not (power_range.cyl_min - self.tolerance_cyl <= cyl_needed <= power_range.cyl_max + self.tolerance_cyl):
-            issues.append(f"CYL {cyl_needed} خارج [{power_range.cyl_min}, {power_range.cyl_max}]")
-
-        # ADD
-        if add and add > 0:
-            if power_range.add_min is None or power_range.add_max is None:
-                issues.append("لا يدعم ADD")
-            elif not (power_range.add_min - self.tolerance_add <= add <= power_range.add_max + self.tolerance_add):
-                issues.append(f"ADD {add} خارج [{power_range.add_min}, {power_range.add_max}]")
-
-        # قيد SPH المرتفع
-        if (power_range.max_cyl_for_high_sph is not None and 
-            power_range.sph_threshold is not None and
-            abs(sph) >= abs(power_range.sph_threshold)):
-            if abs(cyl_needed) > abs(power_range.max_cyl_for_high_sph):
-                issues.append(f"CYL محدود لـ SPH ≥ {power_range.sph_threshold}")
-
-        is_valid = len(issues) == 0
-        return is_valid, "✓ مناسبة" if is_valid else "; ".join(issues)
+        The prescription is compared in the representation that matches the
+        PowerRange's cylinder sign - a plus-cyl range against the plus-cyl Rx
+        form, a minus-cyl range against the stored minus form - so SPH, CYL and
+        AXIS always move together. The catalog range is never transposed."""
+        forms = self._eye_forms(prescription, eye)
+        conv = self._range_convention(power_range)
+        if conv == "both":
+            m_issues = self._check_form_against_range(power_range, forms["minus"])
+            if not m_issues:
+                return True, "✓ مناسبة"
+            p_issues = self._check_form_against_range(power_range, forms["plus"])
+            return (not p_issues), ("✓ مناسبة" if not p_issues else "; ".join(p_issues))
+        issues = self._check_form_against_range(power_range, forms[conv])
+        return (len(issues) == 0), ("✓ مناسبة" if not issues else "; ".join(issues))
 
     def calculate_match_score(
         self,
@@ -209,8 +266,9 @@ class LensMatcherFinal:
         if power_range is not None:
             sph_center = (power_range.sph_min + power_range.sph_max) / 2
             sph_range = power_range.sph_max - power_range.sph_min
-            od_dist = abs(prescription.od_sph - sph_center)
-            os_dist = abs(prescription.os_sph - sph_center)
+            # SPH in the representation matching this range's cylinder sign
+            od_dist = abs(self._range_eye_sph(power_range, prescription, "od") - sph_center)
+            os_dist = abs(self._range_eye_sph(power_range, prescription, "os") - sph_center)
             avg_dist = (od_dist + os_dist) / 2
             power_score = max(0, 30 * (1 - avg_dist / (sph_range / 2))) if sph_range > 0 else (30 if avg_dist < 0.5 else 0)
         else:
@@ -274,7 +332,10 @@ class LensMatcherFinal:
             if not (od_valid and os_valid):
                 continue
             center = (pr.sph_min + pr.sph_max) / 2
-            dist = abs(prescription.od_sph - center) + abs(prescription.os_sph - center)
+            # distance uses the eye's SPH in the SAME representation the range
+            # was tested against (plus-form SPH for a plus-cyl range).
+            dist = (abs(self._range_eye_sph(pr, prescription, "od") - center)
+                    + abs(self._range_eye_sph(pr, prescription, "os") - center))
             if best_dist is None or dist < best_dist:
                 best, best_dist = pr, dist
         return best

@@ -1303,14 +1303,16 @@ class PDFHybridParser:
             else:
                 emitted = list(self._parse_table([merged, row], ctx))
 
-            # Stock-Range column: preserve the exact source text. Only a bare
-            # "a to b" / "+-a" cell is turned into a range by the existing
-            # _parse_range; a compound catalog grammar (e.g. "Sph (a To b) Cyl
-            # (c) <dia>") is kept verbatim in notes and left review-blocked -
-            # no sph/cyl values are fabricated here.
+            # Stock-Range column. Two things are turned into a real range:
+            #  * a bare "a to b" / "+-a" cell (existing _parse_range), and
+            #  * grammar G1 only: "Sph (a To b) Cyl (c) [D]"  (_parse_g1_stock_range).
+            # Every OTHER catalog grammar - "Sph Only From ...", "Total Sph+Cyl
+            # ...", "Max Cyl ..." - is kept verbatim in notes and left
+            # review-blocked. No sph/cyl values are ever fabricated here.
             if i_range is not None:
                 rng_txt = cell(i_range)
                 if rng_txt:
+                    g1 = self._parse_g1_stock_range(rng_txt)
                     bare = re.fullmatch(
                         r"[+\-]?\d+(?:\.\d+)?(?:\s*(?:to|~|/|-)\s*[+\-]?\d+(?:\.\d+)?)?",
                         rng_txt.strip(), re.I,
@@ -1319,7 +1321,17 @@ class PDFHybridParser:
                     for r in emitted:
                         if r.has_range:
                             continue
-                        if parsed:
+                        if g1 is not None:
+                            r.sph_min, r.sph_max = g1["sph"]
+                            r.cyl_min, r.cyl_max = g1["cyl"]
+                            r.has_range = True
+                            if g1["diameter"] is not None:
+                                # Diameter kept as clearly-labelled source
+                                # evidence only - separate from SPH/CYL, not a
+                                # schema field, not used by the matcher.
+                                r.notes = ((r.notes + " | ") if r.notes else "") + \
+                                    f"diameter_mm={g1['diameter']}"
+                        elif parsed:
                             r.sph_min, r.sph_max = parsed
                             r.has_range = True
                         else:
@@ -1759,6 +1771,40 @@ class PDFHybridParser:
         return None
 
     _RANGE_LIMIT = 40.0   # no optical SPH/CYL/ADD bound is beyond this
+
+    # Grammar G1 ONLY: "Sph (a To b) Cyl (c) [D]". Anchored so that
+    # "Sph Only From (...)", "Total Sph+Cyl (...)" and "Max Cyl (...)" never
+    # match - those grammars stay unparsed / needs_review.
+    _G1_RE = re.compile(
+        r"^sph\s*\(\s*([+\-]?\d+(?:\.\d+)?)\s*to\s*([+\-]?\d+(?:\.\d+)?)\s*\)\s*"
+        r"cyl\s*\(\s*([+\-]?\d+(?:\.\d+)?)\s*\)\s*(\d+)?\s*$",
+        re.I,
+    )
+
+    def _parse_g1_stock_range(self, text):
+        """Parse ONLY grammar G1 - "Sph (a To b) Cyl (c) [D]".
+
+        SPH -> [min(a,b), max(a,b)] ; CYL -> [c,0] if c<0, [0,c] if c>0,
+        [0,0] if c==0 ; D -> diameter in mm (source evidence only).
+        Returns {"sph": (lo,hi), "cyl": (lo,hi), "diameter": int|None} or
+        None for every other grammar (G2/G3/G4 stay review-blocked)."""
+        m = self._G1_RE.match(_clean(text))
+        if not m:
+            return None
+        try:
+            a, b, c = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        except ValueError:
+            return None
+        if any(abs(v) > self._RANGE_LIMIT for v in (a, b, c)):
+            return None
+        if c < 0:
+            cyl = (c, 0.0)
+        elif c > 0:
+            cyl = (0.0, c)
+        else:
+            cyl = (0.0, 0.0)
+        d = int(m.group(4)) if m.group(4) else None
+        return {"sph": (min(a, b), max(a, b)), "cyl": cyl, "diameter": d}
 
     def _parse_range(self, value):
         value = _clean(value).replace("±", "+-")

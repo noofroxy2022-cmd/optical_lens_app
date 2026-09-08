@@ -199,8 +199,10 @@ class CatalogExtractionResponse(CatalogExtractionBase):
 class PowerRangeBase(BaseModel):
     sph_min: float = Field(..., ge=-30.0, le=30.0)
     sph_max: float = Field(..., ge=-30.0, le=30.0)
-    cyl_min: float = Field(-10.0, ge=-10.0, le=0.0)
-    cyl_max: float = Field(0.0, ge=-10.0, le=0.0)
+    # Signed CYL: minus-cyl range [-c, 0] or plus-cyl range [0, +c] - the
+    # catalog's source notation is preserved, never transposed.
+    cyl_min: float = Field(-10.0, ge=-10.0, le=10.0)
+    cyl_max: float = Field(0.0, ge=-10.0, le=10.0)
     add_min: Optional[float] = Field(None, ge=0.0, le=5.0)
     add_max: Optional[float] = Field(None, ge=0.0, le=5.0)
     axis_min: Optional[int] = Field(0, ge=0, le=180)
