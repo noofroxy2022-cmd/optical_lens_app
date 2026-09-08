@@ -1230,9 +1230,9 @@ def test_mg_N_explicit_price_exact(parser):
 
 # -- O. unsupported Stock Range grammar -> no fabricated PowerRange ------
 def test_mg_O_compound_range_not_fabricated(parser):
-    # a genuinely unsupported grammar (Total Sph+Cyl = G3) - NOT G1 - must never
-    # be turned into sph/cyl values.
-    txt = "Total Sph+Cyl (-8.00) Cyl (-3.00) 70"
+    # a genuinely unsupported grammar (sign-mismatched G3 single total) - NOT G1
+    # - must never be turned into sph/cyl values.
+    txt = "Total Sph+Cyl (-8.00) Cyl (+3.00) 70"
     matrix = [list(_H4), ["Nulux 1.74", "Hi Vision Meiryo", "16300", txt]]
     r = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="stock"))[0]
     assert r.has_range is False
@@ -1751,10 +1751,10 @@ def test_g1_H_g2_now_parses_g1_boundary_intact(parser):
 
 
 def test_g1_I_g3_deferred_forms_still_unparsed(parser):
-    # G3 slice 1 (two-number total + unsigned cap) parses; the DEFERRED G3
-    # forms - single-number total, signed Cyl(c) single total, capless total -
-    # stay unparsed. G1 parser never matches any "Total Sph+Cyl" line.
-    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",   # single signed total
+    # G3 two-number, unsigned single, and SIGN-AGREEING signed single totals all
+    # parse; the still-DEFERRED G3 forms - SIGN-MISMATCHED signed single total
+    # and capless total - stay unparsed. G1 never matches any "Total Sph+Cyl".
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (-2.00) 70",   # sign-mismatched single
                 "Total Sph+Cyl (+11.00 -10.00)"):          # capless two-number total
         assert parser._parse_g1_stock_range(txt) is None
         r = _g1_row(parser, txt)
@@ -1795,12 +1795,15 @@ def test_g1_real_updated_page4(parser_lwrr):
                     r.flag_review(ov["review_reason"])
             rows += rr
 
-    # G1 = has_range with a real signed cylinder interval; G2 = has_range with
-    # plano cyl [0,0] (now also parsed).
-    g1 = [r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) != (0.0, 0.0)]
+    # G1 = has_range, signed cyl interval, NO total-power constraint ; G2 =
+    # has_range plano cyl [0,0] ; G3-signed = has_range with total_power set.
+    g1 = [r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) != (0.0, 0.0)
+          and r.total_power_min is None]
     g2 = [r for r in rows if r.has_range and (r.cyl_min, r.cyl_max) == (0.0, 0.0)]
+    g3s = [r for r in rows if r.has_range and r.total_power_min is not None]
     assert len(g1) == 16                              # G1 lines on page 4
     assert len(g2) == 5                               # G2 "Sph Only From" lines on page 4
+    assert len(g3s) == 3                              # 3 signed single-totals on page 4
 
     r1350 = [r for r in rows if r.price == 1350.0]
     r1450 = [r for r in rows if r.price == 1450.0]
@@ -1823,7 +1826,8 @@ def test_g1_real_updated_page4(parser_lwrr):
     # diameter kept as evidence on the parsed rows
     assert any("diameter_mm=70" in (r.notes or "") for r in r1450)
 
-    # G3/G4 lines on the page stay unparsed / needs_review, nothing fabricated
+    # non-grammar junk on the page stays needs_review; nothing is fabricated,
+    # and every "Total Sph+Cyl" line on page 4 now parses (none left blocked).
     blocked = [r for r in rows if not r.has_range]
     assert blocked and all(r.review_status == "needs_review" for r in blocked)
     assert not any(
@@ -1831,7 +1835,7 @@ def test_g1_real_updated_page4(parser_lwrr):
                             for k in ("Total Sph+Cyl", "Max Cyl"))
         for r in rows
     )
-    assert any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
+    assert not any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
 
 
 # ===========================================================================
@@ -1925,8 +1929,10 @@ def test_g1sc_U_g3_g4_still_blocked():
                             for k in ("Total Sph+Cyl", "Max Cyl"))
         for r in rows
     )
-    # a real "Total Sph+Cyl ..." line is still among the blocked rows
-    assert any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
+    # the 3 page-4 signed single-totals now parse (total_power set); no real
+    # "Total Sph+Cyl" line is left blocked
+    assert len([r for r in rows if r.has_range and r.total_power_min is not None]) == 3
+    assert not any("Total Sph+Cyl" in (r.notes or "") for r in blocked)
 
 
 # ===========================================================================
@@ -2014,7 +2020,7 @@ def test_g2_H_g1_unchanged(parser):
 def test_g2_I_g3_deferred_forms_still_blocked(parser):
     # G2 parser never matches "Total Sph+Cyl"; the DEFERRED G3 forms stay
     # unparsed (G3 slice 1 two-number+cap forms are covered by test_g3_*).
-    for txt in ("Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (-2.00) 70",   # sign-mismatched single
                 "Total Sph+Cyl (+11.00 -10.00)"):
         assert parser._parse_g2_stock_range(txt) is None
         r = _g2_row(parser, txt)
@@ -2201,15 +2207,16 @@ def test_g3_F_capless_total_blocked(parser):
 
 
 # -- G/H/I. unsupported G3 forms stay needs_review ---------------
-def test_g3_G_signed_inner_cyl_single_total_blocked(parser):
-    # single total with a SIGNED inner cylinder is the deferred page-4 form -
-    # it must NOT be picked up by the slice-2 unsigned single-total grammar
-    for txt in ("Total Sph+Cyl (+6.00) Cyl (+2.00) 65",
-                "Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
-                "Total Sph+Cyl (-8.00) Cyl (-3.00) 70"):
+def test_g3_G_sign_mismatch_single_total_blocked(parser):
+    # sign-AGREEING signed single totals now parse (slice 3); a SIGN-MISMATCHED
+    # single total is never silently normalised - it stays needs_review
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (-2.00) 65",
+                "Total Sph+Cyl (-8.00) Cyl (+3.00) 70",
+                "Total Sph+Cyl (-5.00) Cyl (+2.00)"):
         assert parser._parse_g3_stock_range(txt) is None
         r = _g3_rows(parser, txt)[0]
         assert r.has_range is False
+        assert r.total_power_min is None
         assert "unparsed stock range grammar" in r.review_reasons
 
 
@@ -2220,8 +2227,9 @@ def test_g3_H_empty_total_blocked(parser):
     assert "unparsed stock range grammar" in r.review_reasons
 
 
-def test_g3_I_signed_single_total_blocked(parser):
-    r = _g3_rows(parser, "Total Sph+Cyl (-8.00) Cyl (-3.00) 70")[0]
+def test_g3_I_sign_mismatch_negative_total_blocked(parser):
+    # negative total with a POSITIVE inner cyl - signs disagree, stays blocked
+    r = _g3_rows(parser, "Total Sph+Cyl (-8.00) Cyl (+3.00) 70")[0]
     assert r.has_range is False and r.total_power_min is None
     assert "unparsed stock range grammar" in r.review_reasons
 
@@ -2617,14 +2625,12 @@ def test_g3_s2_negative_parse(parser):
     assert (r.total_power_min, r.total_power_max, r.max_cyl_abs) == (-6.0, 0.0, 3.0)
 
 
-# -- 3. signed inner Cyl in a single total is NOT matched by slice 2
-def test_g3_s2_signed_inner_cyl_still_blocked(parser):
-    for txt in ("Total Sph+Cyl (+6.00) Cyl (+2.00)",
-                "Total Sph+Cyl (-6.00) Cyl (-3.00)",
-                "Total Sph+Cyl (-8.00) Cyl (-3.00) 70",
-                "Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
-                "Total Sph+Cyl (+6.00)",            # capless
-                "Total Sph+Cyl ()"):                # empty
+# -- 3. slice-2 (unsigned cap) never picks up capless / empty / mismatched forms
+def test_g3_s2_non_matching_single_total_forms_blocked(parser):
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (-2.00)",   # sign mismatch (slice 3 rejects)
+                "Total Sph+Cyl (-8.00) Cyl (+3.00)",   # sign mismatch
+                "Total Sph+Cyl (+6.00)",               # capless
+                "Total Sph+Cyl ()"):                   # empty
         assert parser._parse_g3_stock_range(txt) is None
         r = _g3_rows(parser, txt)[0]
         assert r.has_range is False
@@ -2753,3 +2759,201 @@ def test_g3_s2_no_wholesale_leak(db):
     assert singles                                   # page 7 really has them
     assert not any("wholesale" in (r.notes or "").lower() for r in singles)
     assert not any(r.price in (3600.0,) for r in singles)   # 3600 = wholesale col
+
+
+# ============================================================
+#  G3 slice 3 - SIGNED single-total with a DIRECTIONAL cyl interval
+#    (+P) Cyl (+c) [D] -> total [0,+P]  CYL [0,+c]  PLUS-cyl convention
+#    (-N) Cyl (-c) [D] -> total [-N,0]  CYL [-c,0]  MINUS-cyl convention
+#    signs MUST agree; max_cyl_abs stays None (interval is the authority)
+# ============================================================
+_G3S3_POS = "Total Sph+Cyl (+6.00) Cyl (+2.00) 65"
+_G3S3_NEG = "Total Sph+Cyl (-8.00) Cyl (-3.00) 70"
+_G3S3_NEG2 = "Total Sph+Cyl (-5.00) Cyl (-2.00) 70"
+
+
+def _pos_signed_pr():   # exactly what the parser emits for _G3S3_POS
+    return _g3_pr(total_power_min=0.0, total_power_max=6.0, max_cyl_abs=None,
+                  sph_min=0.0, sph_max=6.0, cyl_min=0.0, cyl_max=2.0)
+
+
+def _neg_signed_pr():   # exactly what the parser emits for _G3S3_NEG
+    return _g3_pr(total_power_min=-8.0, total_power_max=0.0, max_cyl_abs=None,
+                  sph_min=-8.0, sph_max=0.0, cyl_min=-3.0, cyl_max=0.0)
+
+
+def _g3_plusform(s, c, ax=0):
+    """The PLUS-cyl form the matcher's 'plus' convention would test."""
+    ms, mc = _g3_norm(s, c, ax)                     # stored minus form first
+    if mc == 0:
+        return (ms, 0.0)
+    return (round(ms + mc, 2), round(-mc, 2))
+
+
+# -- 1. positive signed parser --------------------------------------
+def test_g3_s3_positive_parse(parser):
+    g = parser._parse_g3_stock_range(_G3S3_POS)
+    assert g["total"] == (0.0, 6.0)
+    assert g["sph"] == (0.0, 6.0) and g["cyl"] == (0.0, 2.0)
+    assert g["max_cyl_abs"] is None
+    assert g["diameter"] == 65
+    r = _g3_rows(parser, _G3S3_POS)[0]
+    assert r.has_range is True
+    assert (r.total_power_min, r.total_power_max) == (0.0, 6.0)
+    assert (r.cyl_min, r.cyl_max) == (0.0, 2.0)
+    assert (r.sph_min, r.sph_max) == (0.0, 6.0)
+    assert r.max_cyl_abs is None
+    assert "diameter_mm=65" in (r.notes or "")
+
+
+# -- 2. negative signed parser ------------------------------------
+def test_g3_s3_negative_parse(parser):
+    for txt, tot, cyl, dia in ((_G3S3_NEG, (-8.0, 0.0), (-3.0, 0.0), 70),
+                               (_G3S3_NEG2, (-5.0, 0.0), (-2.0, 0.0), 70)):
+        g = parser._parse_g3_stock_range(txt)
+        assert g["total"] == tot and g["cyl"] == cyl and g["sph"] == tot
+        assert g["max_cyl_abs"] is None and g["diameter"] == dia
+        r = _g3_rows(parser, txt)[0]
+        assert (r.total_power_min, r.total_power_max) == tot
+        assert (r.cyl_min, r.cyl_max) == cyl
+        assert r.max_cyl_abs is None
+        assert f"diameter_mm={dia}" in (r.notes or "")
+
+
+# -- 3. sign mismatch stays needs_review ------------------------
+def test_g3_s3_sign_mismatch_blocked(parser):
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (-2.00)",
+                "Total Sph+Cyl (-8.00) Cyl (+3.00)",
+                "Total Sph+Cyl (+6.00) Cyl (-2.00) 65"):
+        assert parser._parse_g3_stock_range(txt) is None
+        r = _g3_rows(parser, txt)[0]
+        assert r.has_range is False
+        assert r.total_power_min is None
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+# -- 4/5. range convention per sign ----------------------------
+def test_g3_s3_range_convention():
+    from app.lens_matcher import LensMatcherFinal
+    m = LensMatcherFinal()
+    assert m._range_convention(_pos_signed_pr()) == "plus"    # +c interval -> plus form
+    assert m._range_convention(_neg_signed_pr()) == "minus"   # -c interval -> stored minus
+
+
+# -- 6/8. unsigned single-total + G1 signed conventions unchanged
+def test_g3_s3_other_conventions_unchanged():
+    from app.lens_matcher import LensMatcherFinal
+    m = LensMatcherFinal()
+    # unsigned single-total (max_cyl_abs set) -> still minus
+    uns = _g3_pr(total_power_min=0.0, total_power_max=6.0, max_cyl_abs=2.0,
+                 sph_min=0.0, sph_max=6.0, cyl_min=-2.0, cyl_max=0.0)
+    assert m._range_convention(uns) == "minus"
+    # two-number G3 -> still minus
+    two = _g3_pr(total_power_min=-6.0, total_power_max=6.0, max_cyl_abs=3.0,
+                 sph_min=-6.0, sph_max=9.0, cyl_min=-3.0, cyl_max=0.0)
+    assert m._range_convention(two) == "minus"
+    # G1 plus signed cyl (no total fields) -> plus, exactly as before
+    g1p = type("PR", (), dict(cyl_min=0.0, cyl_max=2.0))()
+    assert m._range_convention(g1p) == "plus"
+    g1m = type("PR", (), dict(cyl_min=-2.0, cyl_max=0.0))()
+    assert m._range_convention(g1m) == "minus"
+
+
+# -- 9. principal-meridian min/max is a no-op for minus forms ----
+def test_g3_s3_meridian_minmax_noop_for_minus():
+    # a two-number G3 minus row: same verdicts as before the min/max change
+    pr = _g3_pr(total_power_min=-10.0, total_power_max=11.0, max_cyl_abs=6.0,
+                sph_min=-10.0, sph_max=17.0, cyl_min=-6.0, cyl_max=0.0)
+    assert _g3_chk(pr, -6.0, -4.0) == []          # low == -10
+    assert _g3_chk(pr, 11.0, 0.0) == []           # high == +11
+    assert any("high meridian" in i for i in _g3_chk(pr, 14.0, -6.0))   # +14/-6 still FAIL
+
+
+# -- 10. +4/+2 vs +6/-2 parity against the +6 signed clause -----
+def test_g3_s3_transposition_parity():
+    assert _g3_plusform(4.0, 2.0, 90) == _g3_plusform(6.0, -2.0, 0) == (4.0, 2.0)
+    pr = _pos_signed_pr()
+    assert _g3_chk(pr, *_g3_plusform(4.0, 2.0, 90)) == \
+           _g3_chk(pr, *_g3_plusform(6.0, -2.0, 0)) == []
+
+
+# -- 11/12/13. positive signed clause real matcher boundaries ---
+def test_g3_s3_positive_boundaries():
+    pr = _pos_signed_pr()
+    assert _g3_chk(pr, *_g3_plusform(2.0, 2.0, 90)) == []       # +2/+2 PASS
+    assert _g3_chk(pr, *_g3_plusform(0.25, 2.0, 90)) == []      # +0.25/+2 PASS
+    hi = _g3_chk(pr, *_g3_plusform(5.0, 2.0, 90))               # +5/+2 -> high +7
+    assert any("high meridian" in i for i in hi)
+    cy = _g3_chk(pr, *_g3_plusform(3.0, 3.0, 90))               # +3/+3 -> plus CYL 3 > 2
+    assert cy and not any("meridian" in i for i in cy)          # CYL box, not meridian
+    lo = _g3_chk(pr, *_g3_plusform(0.0, -1.0, 0))               # 0/-1 -> low -1 < 0
+    assert any("low meridian" in i for i in lo)
+
+
+# -- 14/15/16. negative signed clause real matcher boundaries ---
+def test_g3_s3_negative_boundaries():
+    pr = _neg_signed_pr()
+    assert _g3_chk(pr, -6.0, -2.0) == []          # PASS
+    assert _g3_chk(pr, -5.0, -3.0) == []          # CYL == -3 boundary PASS
+    assert _g3_chk(pr, -8.0, 0.0) == []           # low == -8 boundary PASS
+    assert _g3_chk(pr, -3.0, -3.0) == []          # PASS
+    assert any("CYL" in i for i in _g3_chk(pr, -4.0, -4.0))          # CYL < -3 FAIL
+    assert any("low meridian" in i for i in _g3_chk(pr, -9.0, 0.0))  # low -9 FAIL
+    assert any("high meridian" in i for i in _g3_chk(pr, 1.0, -2.0)) # high +1 > 0 FAIL
+
+
+# -- 17/18. persistence keeps the signed directional interval ---
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_s3_persistence_preserves_signed_interval(db):
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    row = p._rows_from_section([list(_H4)],
+                               [list(_H4), ["Nulux 1.6 (+)", "Hi Vision Aqua",
+                                            "3750", _G3S3_POS]],
+                               ParserContext(availability="stock"))[0]
+    assert (row.cyl_min, row.cyl_max) == (0.0, 2.0)
+    assert "diameter_mm=65" in (row.notes or "")
+    co = models.Company(name="G3s3", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name="Nulux 1.6 (+)",
+                                             category="single_vision", power_ranges=[row])]
+    p.save_extractions_to_db(cat.id, db)
+    for e in _crud.get_extractions_by_catalog(db, cat.id):
+        _crud.confirm_extraction(db, e.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    pr = db.query(models.PowerRange).one()
+    assert (pr.total_power_min, pr.total_power_max) == (0.0, 6.0)
+    assert (pr.cyl_min, pr.cyl_max) == (0.0, 2.0)
+    assert pr.max_cyl_abs is None
+    vp = db.query(models.VariantPricing).one()
+    assert "total:+0.00/+6.00" in (vp.power_scope or "")
+
+
+# -- 19. build_power_scope distinguishes signed interval from unsigned cap
+def test_g3_s3_scope_distinguishes_signed_from_unsigned():
+    from app.crud import build_power_scope
+    signed = build_power_scope(0.0, 6.0, 0.0, 2.0, None, None, 0.0, 6.0, None)
+    unsigned = build_power_scope(0.0, 6.0, -2.0, 0.0, None, None, 0.0, 6.0, 2.0)
+    assert signed != unsigned
+    assert "maxcyl:" not in signed and "maxcyl:" in unsigned
+    assert "cyl:+0.00/+2.00" in signed
+
+
+# -- 20. wholesale privacy - real page-4 signed single-totals ---
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_s3_no_wholesale_leak(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    rows = []
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[3]                          # page 4
+        for ov, hdr, mat in p._extract_page_tables(page):
+            rows += p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov))
+    signed = [r for r in rows if r.has_range and r.total_power_min is not None
+              and r.max_cyl_abs is None and 0.0 in (r.total_power_min, r.total_power_max)]
+    assert signed                                    # page 4 really has them
+    assert not any("wholesale" in (r.notes or "").lower() for r in signed)
+    # left-column wholesale values on page 4 (1700/1300/...) must not be a price
+    assert not any(r.price in (1700.0, 1300.0, 1250.0) for r in signed)

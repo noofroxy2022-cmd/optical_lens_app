@@ -1349,13 +1349,15 @@ class PDFHybridParser:
             #  * a bare "a to b" / "+-a" cell (existing _parse_range),
             #  * grammar G1: "Sph (a To b) Cyl (c) [D]"       (_parse_g1_stock_range),
             #  * grammar G2: "Sph Only From (a To b) [D]"     (_parse_g2_stock_range),
-            #  * grammar G3: "Total Sph+Cyl (a b) [Max ]Cyl (n)" (two-number
-            #    envelope) OR "Total Sph+Cyl (+P|-N) Cyl (n)" (single SIGNED
-            #    total, UNSIGNED cap) - both via _parse_g3_stock_range.
-            # Every OTHER grammar (single total with a SIGNED inner Cyl(c),
-            # empty "Total Sph+Cyl ()", capless Total, "Max Cyl (n)" with no
-            # matched Total) is kept verbatim in notes and left review-blocked.
-            # No sph/cyl values are ever fabricated here.
+            #  * grammar G3 (all via _parse_g3_stock_range): "Total Sph+Cyl
+            #    (a b) [Max ]Cyl (n)" (two-number envelope), "Total Sph+Cyl
+            #    (+P|-N) Cyl (n)" (single signed total, UNSIGNED cap), or
+            #    "Total Sph+Cyl (+P|-N) Cyl (+c|-c) [D]" (single signed total,
+            #    SIGNED directional cyl interval; total & cyl signs must agree).
+            # Every OTHER grammar (sign-mismatched single total, empty
+            # "Total Sph+Cyl ()", capless Total, "Max Cyl (n)" with no matched
+            # Total) is kept verbatim in notes and left review-blocked. No
+            # sph/cyl values are ever fabricated here.
             if i_range is not None:
                 rng_txt = cell(i_range)
                 if rng_txt:
@@ -1903,14 +1905,27 @@ class PDFHybridParser:
     # Grammar G3 slice 2: a SINGLE SIGNED-number "Total Sph+Cyl (+P)" / "(-N)"
     # with an UNSIGNED cylinder cap. The SIGN is mandatory - it selects the
     # commercial side (PLUS -> +P bounds the high meridian, low meridian >= 0 ;
-    # MINUS -> -N bounds the low meridian, high meridian <= 0). A SIGNED inner
-    # cylinder ("Cyl (+2.00)" / "Cyl (-3.00)") does NOT match here - those
-    # page-4 forms stay deferred / needs_review. Empty "()" and capless single
-    # totals also never match.
+    # MINUS -> -N bounds the low meridian, high meridian <= 0). Empty "()" and
+    # capless single totals never match.
     _G3_SINGLE_RE = re.compile(
         r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
         r"([+\-]\d+(?:\.\d+)?)\s*\)\s*"
         r"(?:max\s*)?cyl\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*$",
+        re.I,
+    )
+    # Grammar G3 slice 3: a SINGLE SIGNED total with a SIGNED DIRECTIONAL inner
+    # cylinder interval and an optional trailing diameter, as printed in the
+    # "Stock Lenses In Egypt" section. Both signs are mandatory AND must agree:
+    #   (+P) Cyl (+c) [D] -> total [0,+P], CYL interval [0,+c], PLUS-cyl form
+    #   (-N) Cyl (-c) [D] -> total [-N,0], CYL interval [-c,0], MINUS-cyl form
+    # A sign MISMATCH ("(+6.00) Cyl (-2.00)") does NOT match - it stays
+    # needs_review, never silently normalised. Unlike slice 2 this never sets
+    # max_cyl_abs - the directional cyl_min/cyl_max interval is the authority.
+    _G3_SIGNED_SINGLE_RE = re.compile(
+        r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
+        r"([+\-]\d+(?:\.\d+)?)\s*\)\s*"
+        r"(?:max\s*)?cyl\s*\(\s*([+\-]\d+(?:\.\d+)?)\s*\)\s*"
+        r"(\d+)?\s*$",
         re.I,
     )
 
@@ -1920,10 +1935,16 @@ class PDFHybridParser:
         Slice 1 - TWO-number envelope "(a b) Cyl (n)":
             total_power in [min(a,b), max(a,b)] (algebraic SPH+CYL, minus-cyl
             convention) AND abs(CYL) <= n (n UNSIGNED).
-        Slice 2 - SINGLE SIGNED-number "(+P) Cyl (n)" / "(-N) Cyl (n)":
+        Slice 2 - SINGLE SIGNED total with an UNSIGNED cap "(+P) Cyl (n)" /
+            "(-N) Cyl (n)":
             +P  -> total in [0.0, +P]   (PLUS side: low meridian >= 0)
             -N  -> total in [-N, 0.0]   (MINUS side: high meridian <= 0)
             AND abs(CYL) <= n (n UNSIGNED). 0.0 is a REAL bound, not missing.
+        Slice 3 - SINGLE SIGNED total with a SIGNED DIRECTIONAL cyl interval
+            "(+P) Cyl (+c) [D]" / "(-N) Cyl (-c) [D]" (signs must agree):
+            +P/+c -> total [0.0,+P], CYL interval [0.0,+c], max_cyl_abs None
+            -N/-c -> total [-N,0.0], CYL interval [-c,0.0], max_cyl_abs None
+            The trailing diameter is evidence-only (kept in 'diameter').
 
         Returns a dict with the same 'sph'/'cyl'/'diameter' keys as G1/G2
         (holding the COARSE prefilter box) plus 'total' and 'max_cyl_abs' (the
@@ -1949,27 +1970,53 @@ class PDFHybridParser:
                 "diameter": None,
             }
         m = self._G3_SINGLE_RE.match(cleaned)
+        if m:
+            try:
+                v, n = (float(m.group(1)), float(m.group(2)))
+            except ValueError:
+                return None
+            if abs(v) > self._RANGE_LIMIT or not (0.0 <= n <= 10.0):
+                return None
+            if v >= 0.0:                   # PLUS-side single total
+                tmin, tmax = 0.0, v
+            else:                          # MINUS-side single total
+                tmin, tmax = v, 0.0
+            # coarse box is EXACT here (not just a superset): high meridian = SPH
+            # <= tmax and low meridian = SPH + CYL >= tmin with CYL in [-n, 0]
+            # forces SPH in [tmin, tmax].
+            return {
+                "sph": (tmin, tmax),
+                "cyl": (-n, 0.0),
+                "total": (tmin, tmax),
+                "max_cyl_abs": n,
+                "diameter": None,
+            }
+        m = self._G3_SIGNED_SINGLE_RE.match(cleaned)
         if not m:
             return None
         try:
-            v, n = (float(m.group(1)), float(m.group(2)))
+            v, c = (float(m.group(1)), float(m.group(2)))
         except ValueError:
             return None
-        if abs(v) > self._RANGE_LIMIT or not (0.0 <= n <= 10.0):
+        d = int(m.group(3)) if m.group(3) else None
+        if abs(v) > self._RANGE_LIMIT or abs(c) > 10.0:
             return None
-        if v >= 0.0:                       # PLUS-side single total
-            tmin, tmax = 0.0, v
-        else:                              # MINUS-side single total
-            tmin, tmax = v, 0.0
-        # coarse box is EXACT here (not just a superset): high meridian = SPH
-        # <= tmax and low meridian = SPH + CYL >= tmin with CYL in [-n, 0]
-        # forces SPH in [tmin, tmax].
+        if (v >= 0.0) != (c >= 0.0):       # signs must agree - no silent normalise
+            return None
+        if v >= 0.0:                       # PLUS side: total [0,+P], CYL [0,+c]
+            total = (0.0, v)
+            cyl = (0.0, c)
+        else:                             # MINUS side: total [-N,0], CYL [-c,0]
+            total = (v, 0.0)
+            cyl = (c, 0.0)
+        # coarse SPH box = the total interval (exact, as for slice 2). The
+        # directional CYL interval is the authority - max_cyl_abs stays None.
         return {
-            "sph": (tmin, tmax),
-            "cyl": (-n, 0.0),
-            "total": (tmin, tmax),
-            "max_cyl_abs": n,
-            "diameter": None,
+            "sph": total,
+            "cyl": cyl,
+            "total": total,
+            "max_cyl_abs": None,
+            "diameter": d,
         }
 
     def _parse_range(self, value):

@@ -183,6 +183,16 @@ class LensMatcherFinal:
         if (getattr(power_range, "total_power_min", None) is not None
                 or getattr(power_range, "total_power_max", None) is not None
                 or getattr(power_range, "max_cyl_abs", None) is not None):
+            # A signed single-total with a genuinely POSITIVE directional CYL
+            # interval [0, +c] is written in PLUS-cyl notation - test it against
+            # the transposed plus form, reusing the G1 plus-form machinery.
+            # Unsigned single totals (max_cyl_abs set) and two-number / signed-
+            # negative totals (cyl_max <= 0) stay on the stored minus form.
+            if (getattr(power_range, "max_cyl_abs", None) is None
+                    and getattr(power_range, "cyl_min", None) is not None
+                    and getattr(power_range, "cyl_max", None) is not None
+                    and power_range.cyl_min >= 0 and power_range.cyl_max > 0):
+                return "plus"
             return "minus"
         lo, hi = power_range.cyl_min, power_range.cyl_max
         if lo == 0 and hi == 0:
@@ -237,8 +247,11 @@ class LensMatcherFinal:
         tp_max = getattr(power_range, "total_power_max", None)
         mca = getattr(power_range, "max_cyl_abs", None)
         if tp_min is not None or tp_max is not None:
-            high_meridian = sph
-            low_meridian = sph + cyl_needed
+            # convention-independent: the unordered meridian pair {SPH, SPH+CYL}
+            # is transposition-invariant, so this is a no-op for a minus form
+            # (cyl <= 0) and correct for a plus form (cyl >= 0).
+            m1, m2 = sph, sph + cyl_needed
+            low_meridian, high_meridian = min(m1, m2), max(m1, m2)
             if tp_min is not None and low_meridian < tp_min - self.tolerance_sph:
                 issues.append(
                     f"low meridian {round(low_meridian, 2)} < total_power_min {tp_min}")
