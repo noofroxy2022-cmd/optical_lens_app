@@ -2201,8 +2201,12 @@ def test_g3_F_capless_total_blocked(parser):
 
 
 # -- G/H/I. unsupported G3 forms stay needs_review ---------------
-def test_g3_G_single_number_total_blocked(parser):
-    for txt in ("Total Sph+Cyl (+6.00) Cyl (2.00)", "Total Sph+Cyl (-5.00) Cyl (-2.00) 70"):
+def test_g3_G_signed_inner_cyl_single_total_blocked(parser):
+    # single total with a SIGNED inner cylinder is the deferred page-4 form -
+    # it must NOT be picked up by the slice-2 unsigned single-total grammar
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (+2.00) 65",
+                "Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
+                "Total Sph+Cyl (-8.00) Cyl (-3.00) 70"):
         assert parser._parse_g3_stock_range(txt) is None
         r = _g3_rows(parser, txt)[0]
         assert r.has_range is False
@@ -2568,3 +2572,184 @@ def test_g3_Y_boundaries_inclusive_and_cap_unchanged():
     assert _g3_chk(pr, 0.0, -6.0) == []          # |cyl| == 6 exactly
     over = _g3_chk(pr, 0.0, -7.0)                # |cyl| 7 > 6
     assert over and any("magnitude" in i for i in over)
+
+
+# ============================================================
+#  G3 slice 2 - UNSIGNED single-total "Total Sph+Cyl (+P|-N) Cyl (n)"
+#    +P  -> total_power_min=0.0  total_power_max=+P  (PLUS side)
+#    -N  -> total_power_min=-N   total_power_max=0.0 (MINUS side)
+#    n UNSIGNED -> abs(CYL) <= n. Signed inner Cyl stays deferred.
+# ============================================================
+_G3S_PLUS = "Total Sph+Cyl (+6.00) Cyl (2.00)"
+_G3S_MINUS = "Total Sph+Cyl (-6.00) Cyl (3.00)"
+_G3S_G1SIB = "Sph (+0.25 To +2.75) Cyl (-3.00) 65"
+
+
+def _plus_pr():   # exactly what the parser emits for _G3S_PLUS
+    return _g3_pr(total_power_min=0.0, total_power_max=6.0, max_cyl_abs=2.0,
+                  sph_min=0.0, sph_max=6.0, cyl_min=-2.0, cyl_max=0.0)
+
+
+def _minus_pr():  # exactly what the parser emits for _G3S_MINUS
+    return _g3_pr(total_power_min=-6.0, total_power_max=0.0, max_cyl_abs=3.0,
+                  sph_min=-6.0, sph_max=0.0, cyl_min=-3.0, cyl_max=0.0)
+
+
+# -- 1. positive unsigned single-total parses to zero-bounded PLUS envelope
+def test_g3_s2_positive_parse(parser):
+    g = parser._parse_g3_stock_range(_G3S_PLUS)
+    assert g["total"] == (0.0, 6.0)
+    assert g["max_cyl_abs"] == 2.0
+    assert g["sph"] == (0.0, 6.0) and g["cyl"] == (-2.0, 0.0)
+    r = _g3_rows(parser, _G3S_PLUS)[0]
+    assert r.has_range is True
+    assert (r.total_power_min, r.total_power_max, r.max_cyl_abs) == (0.0, 6.0, 2.0)
+    assert (r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) == (0.0, 6.0, -2.0, 0.0)
+
+
+# -- 2. negative unsigned single-total parses to zero-bounded MINUS envelope
+def test_g3_s2_negative_parse(parser):
+    g = parser._parse_g3_stock_range(_G3S_MINUS)
+    assert g["total"] == (-6.0, 0.0)
+    assert g["max_cyl_abs"] == 3.0
+    assert g["sph"] == (-6.0, 0.0) and g["cyl"] == (-3.0, 0.0)
+    r = _g3_rows(parser, _G3S_MINUS)[0]
+    assert (r.total_power_min, r.total_power_max, r.max_cyl_abs) == (-6.0, 0.0, 3.0)
+
+
+# -- 3. signed inner Cyl in a single total is NOT matched by slice 2
+def test_g3_s2_signed_inner_cyl_still_blocked(parser):
+    for txt in ("Total Sph+Cyl (+6.00) Cyl (+2.00)",
+                "Total Sph+Cyl (-6.00) Cyl (-3.00)",
+                "Total Sph+Cyl (-8.00) Cyl (-3.00) 70",
+                "Total Sph+Cyl (-5.00) Cyl (-2.00) 70",
+                "Total Sph+Cyl (+6.00)",            # capless
+                "Total Sph+Cyl ()"):                # empty
+        assert parser._parse_g3_stock_range(txt) is None
+        r = _g3_rows(parser, txt)[0]
+        assert r.has_range is False
+        assert r.total_power_min is None
+        assert "unparsed stock range grammar" in r.review_reasons
+
+
+# -- 4. zero total bound survives the parser as a real 0.0 (not None)
+def test_g3_s2_zero_bound_survives_parser(parser):
+    rp = _g3_rows(parser, _G3S_PLUS)[0]
+    rm = _g3_rows(parser, _G3S_MINUS)[0]
+    assert rp.total_power_min == 0.0 and rp.total_power_min is not None
+    assert rm.total_power_max == 0.0 and rm.total_power_max is not None
+
+
+# -- 5/6. zero bound survives persistence; build_power_scope keeps exact 0.0
+def test_g3_s2_build_power_scope_preserves_zero_bound():
+    from app.crud import build_power_scope
+    sp = build_power_scope(0.0, 6.0, -2.0, 0.0, None, None, 0.0, 6.0, 2.0)
+    sm = build_power_scope(-6.0, 0.0, -3.0, 0.0, None, None, -6.0, 0.0, 3.0)
+    assert "total:+0.00/+6.00" in sp
+    assert "total:-6.00/+0.00" in sm
+    assert sp != sm
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_s2_zero_bound_survives_persistence(db):
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    row = p._rows_from_section([list(_H4)],
+                               [list(_H4), ["Hilux 1.6", "Long Life Blue Control",
+                                            "7600", _G3S_PLUS]],
+                               ParserContext(availability="stock"))[0]
+    assert (row.total_power_min, row.total_power_max) == (0.0, 6.0)
+    co = models.Company(name="G3s2", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path="/x",
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    p.extracted_models = [ExtractedLensModel(name="Hilux 1.6",
+                                             category="single_vision", power_ranges=[row])]
+    p.save_extractions_to_db(cat.id, db)
+    exts = _crud.get_extractions_by_catalog(db, cat.id)
+    for e in exts:
+        assert e.extracted_total_power_min == 0.0
+        _crud.confirm_extraction(db, e.id, "qa")
+    _crud.confirm_catalog_commercial(db, cat.id, "admin")
+    pr = db.query(models.PowerRange).one()
+    assert pr.total_power_min == 0.0 and pr.total_power_max == 6.0 and pr.max_cyl_abs == 2.0
+    vp = db.query(models.VariantPricing).one()
+    assert "total:+0.00/+6.00" in (vp.power_scope or "")
+
+
+# -- 7. PLUS clause +6 / cap2 - real matcher boundary behaviour
+def test_g3_s2_plus_matcher_boundaries():
+    plus = _plus_pr()
+    assert _g3_chk(plus, *_g3_norm(4.0, 2.0, 90)) == []      # +4/+2 -> (6,-2) PASS
+    assert _g3_chk(plus, 6.0, -2.0) == []                     # +6/-2 boundary PASS
+    assert _g3_chk(plus, 7.0, -2.0)                           # high +7 > +6 FAIL
+    assert any("high meridian" in i for i in _g3_chk(plus, 7.0, -2.0))
+    assert _g3_chk(plus, -1.0, -1.0)                          # low -2 < 0 FAIL
+    assert any("low meridian" in i for i in _g3_chk(plus, -1.0, -1.0))
+
+
+# -- 8. MINUS clause -6 / cap3 - real matcher boundary behaviour
+def test_g3_s2_minus_matcher_boundaries():
+    minus = _minus_pr()
+    assert _g3_chk(minus, -4.0, -2.0) == []                   # PASS
+    assert _g3_chk(minus, -3.0, -3.0) == []                   # low == -6 boundary PASS
+    assert _g3_chk(minus, -6.0, 0.0) == []                    # low == -6 boundary PASS
+    assert any("low meridian" in i for i in _g3_chk(minus, -6.0, -1.0))   # low -7 FAIL
+    assert any("high meridian" in i for i in _g3_chk(minus, 1.0, -1.0))   # high +1 > 0 FAIL
+
+
+# -- 9/10. open-ended false acceptance is prevented by the zero bound
+def test_g3_s2_false_acceptance_prevented():
+    assert _g3_chk(_plus_pr(), -20.0, -2.0)     # -20/-2 NOT accepted by +6 clause
+    assert any("low meridian" in i for i in _g3_chk(_plus_pr(), -20.0, -2.0))
+    assert _g3_chk(_minus_pr(), 20.0, -2.0)     # +20/-2 NOT accepted by -6 clause
+    assert any("high meridian" in i for i in _g3_chk(_minus_pr(), 20.0, -2.0))
+
+
+# -- 11/12. different caps stay separate; two clauses stay OR (not merged)
+def test_g3_s2_two_clauses_stay_separate_or(parser):
+    rows = _g3_rows(parser, _G3S_PLUS, _G3S_MINUS, _G3S_G1SIB)
+    assert len(rows) == 3
+    assert all(r.has_range for r in rows)
+    g3 = [r for r in rows if r.total_power_min is not None]
+    assert len(g3) == 2
+    assert {(r.total_power_min, r.total_power_max, r.max_cyl_abs) for r in g3} == {
+        (0.0, 6.0, 2.0), (-6.0, 0.0, 3.0)}
+    # caps 2 vs 3 preserved distinctly, never a merged [-6,+6] envelope
+    assert {r.max_cyl_abs for r in g3} == {2.0, 3.0}
+    assert not any(r.total_power_min == -6.0 and r.total_power_max == 6.0 for r in rows)
+
+
+# -- 13. G1 sibling parse is byte-for-byte unchanged
+def test_g3_s2_g1_sibling_unchanged(parser):
+    r = _g3_rows(parser, _G3S_G1SIB)[0]
+    assert r.has_range is True
+    assert (r.sph_min, r.sph_max, r.cyl_min, r.cyl_max) == (0.25, 2.75, -3.0, 0.0)
+    assert r.total_power_min is None and r.total_power_max is None and r.max_cyl_abs is None
+
+
+# -- 14. transposition parity - equivalent plus/minus entry, same result
+def test_g3_s2_transposition_parity():
+    assert _g3_norm(4.0, 2.0, 90) == _g3_norm(6.0, -2.0, 180) == (6.0, -2.0)
+    assert _g3_chk(_plus_pr(), *_g3_norm(4.0, 2.0, 90)) == \
+           _g3_chk(_plus_pr(), *_g3_norm(6.0, -2.0, 180)) == []
+    assert _g3_norm(-4.0, -2.0, 90) == _g3_norm(-6.0, 2.0, 180) == (-4.0, -2.0)
+    assert _g3_chk(_minus_pr(), *_g3_norm(-4.0, -2.0, 90)) == \
+           _g3_chk(_minus_pr(), *_g3_norm(-6.0, 2.0, 180)) == []
+
+
+# -- 15. wholesale privacy - page-7 unsigned single-totals carry only retail
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_s2_no_wholesale_leak(db):
+    import pdfplumber
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    rows = []
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[6]                          # page 7
+        for ov, hdr, mat in p._extract_page_tables(page):
+            rows += p._rows_from_section(hdr, mat, p._section_context(ParserContext(), ov))
+    singles = [r for r in rows if r.has_range and r.total_power_min is not None
+               and 0.0 in (r.total_power_min, r.total_power_max)]
+    assert singles                                   # page 7 really has them
+    assert not any("wholesale" in (r.notes or "").lower() for r in singles)
+    assert not any(r.price in (3600.0,) for r in singles)   # 3600 = wholesale col

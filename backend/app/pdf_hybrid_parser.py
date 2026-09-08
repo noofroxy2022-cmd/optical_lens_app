@@ -1349,12 +1349,13 @@ class PDFHybridParser:
             #  * a bare "a to b" / "+-a" cell (existing _parse_range),
             #  * grammar G1: "Sph (a To b) Cyl (c) [D]"       (_parse_g1_stock_range),
             #  * grammar G2: "Sph Only From (a To b) [D]"     (_parse_g2_stock_range),
-            #  * grammar G3 slice 1: "Total Sph+Cyl (a b) [Max ]Cyl (n)"
-            #    (_parse_g3_stock_range - two-number total + unsigned cap only).
-            # Every OTHER grammar (single-number Total, signed Cyl(c) single
-            # total, empty "Total Sph+Cyl ()", capless Total, "Max Cyl (n)"
-            # with no matched Total) is kept verbatim in notes and left
-            # review-blocked. No sph/cyl values are ever fabricated here.
+            #  * grammar G3: "Total Sph+Cyl (a b) [Max ]Cyl (n)" (two-number
+            #    envelope) OR "Total Sph+Cyl (+P|-N) Cyl (n)" (single SIGNED
+            #    total, UNSIGNED cap) - both via _parse_g3_stock_range.
+            # Every OTHER grammar (single total with a SIGNED inner Cyl(c),
+            # empty "Total Sph+Cyl ()", capless Total, "Max Cyl (n)" with no
+            # matched Total) is kept verbatim in notes and left review-blocked.
+            # No sph/cyl values are ever fabricated here.
             if i_range is not None:
                 rng_txt = cell(i_range)
                 if rng_txt:
@@ -1890,41 +1891,81 @@ class PDFHybridParser:
         d = int(m.group(3)) if m.group(3) else None
         return {"sph": (min(a, b), max(a, b)), "cyl": (0.0, 0.0), "diameter": d}
 
-    # Grammar G3 slice 1 ONLY: a TWO-number "Total Sph+Cyl (a b)" envelope with
-    # an UNSIGNED cylinder cap, either inline ("... Cyl (n)") or joined from a
-    # wrapped "Max Cyl (n)" line ("<total> || Max Cyl (n)"). Single-number
-    # totals, signed Cyl(c) forms, empty "Total Sph+Cyl ()" and capless totals
-    # never match here - they stay unparsed / needs_review.
+    # Grammar G3 slice 1: a TWO-number "Total Sph+Cyl (a b)" envelope with an
+    # UNSIGNED cylinder cap, either inline ("... Cyl (n)") or joined from a
+    # wrapped "Max Cyl (n)" line ("<total> || Max Cyl (n)").
     _G3_RE = re.compile(
         r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
         r"([+\-]?\d+(?:\.\d+)?)\s+([+\-]?\d+(?:\.\d+)?)\s*\)\s*"
         r"(?:\|\|\s*)?(?:max\s*)?cyl\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*$",
         re.I,
     )
+    # Grammar G3 slice 2: a SINGLE SIGNED-number "Total Sph+Cyl (+P)" / "(-N)"
+    # with an UNSIGNED cylinder cap. The SIGN is mandatory - it selects the
+    # commercial side (PLUS -> +P bounds the high meridian, low meridian >= 0 ;
+    # MINUS -> -N bounds the low meridian, high meridian <= 0). A SIGNED inner
+    # cylinder ("Cyl (+2.00)" / "Cyl (-3.00)") does NOT match here - those
+    # page-4 forms stay deferred / needs_review. Empty "()" and capless single
+    # totals also never match.
+    _G3_SINGLE_RE = re.compile(
+        r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
+        r"([+\-]\d+(?:\.\d+)?)\s*\)\s*"
+        r"(?:max\s*)?cyl\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*$",
+        re.I,
+    )
 
     def _parse_g3_stock_range(self, text):
-        """Parse ONLY G3 slice 1 - "Total Sph+Cyl (a b) [Max ]Cyl (n)".
+        """Parse G3 "Total Sph+Cyl (...) [Max ]Cyl (n)" stock ranges.
 
-        total_power in [min(a,b), max(a,b)] (algebraic SPH+CYL, minus-cyl
-        convention) AND abs(CYL) <= n (n UNSIGNED). Returns a dict with the
-        same 'sph'/'cyl'/'diameter' keys as G1/G2 (holding the COARSE
-        prefilter box) plus 'total' and 'max_cyl_abs' (the authority), or None
-        for every other grammar."""
-        m = self._G3_RE.match(_clean(text))
+        Slice 1 - TWO-number envelope "(a b) Cyl (n)":
+            total_power in [min(a,b), max(a,b)] (algebraic SPH+CYL, minus-cyl
+            convention) AND abs(CYL) <= n (n UNSIGNED).
+        Slice 2 - SINGLE SIGNED-number "(+P) Cyl (n)" / "(-N) Cyl (n)":
+            +P  -> total in [0.0, +P]   (PLUS side: low meridian >= 0)
+            -N  -> total in [-N, 0.0]   (MINUS side: high meridian <= 0)
+            AND abs(CYL) <= n (n UNSIGNED). 0.0 is a REAL bound, not missing.
+
+        Returns a dict with the same 'sph'/'cyl'/'diameter' keys as G1/G2
+        (holding the COARSE prefilter box) plus 'total' and 'max_cyl_abs' (the
+        authority), or None for every other grammar."""
+        cleaned = _clean(text)
+        m = self._G3_RE.match(cleaned)
+        if m:
+            try:
+                a, b, n = (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+            except ValueError:
+                return None
+            if any(abs(v) > self._RANGE_LIMIT for v in (a, b)) or not (0.0 <= n <= 10.0):
+                return None
+            tmin, tmax = min(a, b), max(a, b)
+            # coarse box, false-negative safe in MINUS-cyl convention (CYL in [-n,0]):
+            #   T = SPH + CYL,  T in [tmin, tmax],  CYL in [-n, 0]
+            #   -> SPH in [tmin, tmax + n]
+            return {
+                "sph": (tmin, tmax + n),
+                "cyl": (-n, 0.0),
+                "total": (tmin, tmax),
+                "max_cyl_abs": n,
+                "diameter": None,
+            }
+        m = self._G3_SINGLE_RE.match(cleaned)
         if not m:
             return None
         try:
-            a, b, n = (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+            v, n = (float(m.group(1)), float(m.group(2)))
         except ValueError:
             return None
-        if any(abs(v) > self._RANGE_LIMIT for v in (a, b)) or not (0.0 <= n <= 10.0):
+        if abs(v) > self._RANGE_LIMIT or not (0.0 <= n <= 10.0):
             return None
-        tmin, tmax = min(a, b), max(a, b)
-        # coarse box, false-negative safe in MINUS-cyl convention (CYL in [-n,0]):
-        #   T = SPH + CYL,  T in [tmin, tmax],  CYL in [-n, 0]
-        #   -> SPH in [tmin, tmax + n]
+        if v >= 0.0:                       # PLUS-side single total
+            tmin, tmax = 0.0, v
+        else:                              # MINUS-side single total
+            tmin, tmax = v, 0.0
+        # coarse box is EXACT here (not just a superset): high meridian = SPH
+        # <= tmax and low meridian = SPH + CYL >= tmin with CYL in [-n, 0]
+        # forces SPH in [tmin, tmax].
         return {
-            "sph": (tmin, tmax + n),
+            "sph": (tmin, tmax),
             "cyl": (-n, 0.0),
             "total": (tmin, tmax),
             "max_cyl_abs": n,
