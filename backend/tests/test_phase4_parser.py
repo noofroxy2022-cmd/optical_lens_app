@@ -3087,3 +3087,148 @@ def test_avail_empty_and_noise(parser):
     for h in ("", "   ", "\n\n", "(cid:531)(cid:650)", "8", "6100 12850",
               "Note : The Arrival Time is 10 Working Days."):
         assert _avail(parser, h) == (None, False)
+
+
+# ============================================================
+#  G3 two-number "(From a b)" - grammar variant + 3-row wrapped join
+#  Same semantics as "Total Sph+Cyl (a b) Max Cyl (n)". Mineral (RX).
+# ============================================================
+def _g3_wrapped3(parser, total_line, interval_line, maxcyl_line, *,
+                 type_="Mineral 1.9", coating="Multi Coat", price="",
+                 avail="rx"):
+    matrix = [list(_H4),
+              [type_, coating, price, total_line],
+              ["", "", "", interval_line],
+              ["", "", "", maxcyl_line]]
+    return parser._rows_from_section(matrix[:1], matrix,
+                                     ParserContext(availability=avail))
+
+
+# -- 1. inline "(From a b)" two-number grammar parses -----------
+def test_g3_from_inline_parses(parser):
+    a = parser._parse_g3_stock_range("Total Sph+Cyl (From -2.25 -30.00) Max Cyl (4)")
+    b = parser._parse_g3_stock_range("Total Sph+Cyl (-2.25 -30.00) Max Cyl (4)")
+    assert a == b                                    # "From" is a pure variant
+    assert a["total"] == (-30.0, -2.25) and a["max_cyl_abs"] == 4.0
+    assert a["sph"] == (-30.0, 1.75) and a["cyl"] == (-4.0, 0.0)
+
+
+# -- 2/3/4/5/6. wrapped 3-line Mineral rows -> one G3 clause ----
+def test_g3_from_wrapped_mineral_1_9(parser):
+    rows = _g3_wrapped3(parser, "Total Sph+Cyl", "(From -2.25 -30.00)", "Max Cyl (4)")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.has_range is True
+    assert (r.total_power_min, r.total_power_max) == (-30.0, -2.25)
+    assert r.max_cyl_abs == 4.0
+    assert (r.sph_min, r.sph_max) == (-30.0, 1.75)   # slice-1 box: [tmin, tmax+n]
+    assert (r.cyl_min, r.cyl_max) == (-4.0, 0.0)     # slice-1 box: [-n, 0]
+    assert r.availability == "rx"
+    assert "unparsed stock range grammar" not in r.review_reasons
+
+
+def test_g3_from_wrapped_mineral_1_81_summit(parser):
+    rows = _g3_wrapped3(parser, "Total Sph+Cyl", "(From -2.00 -20.00)", "Max Cyl (4)",
+                        type_="Mineral 1.81 Summit", coating="Progressive Multi Coat")
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r.total_power_min, r.total_power_max) == (-20.0, -2.0)
+    assert r.max_cyl_abs == 4.0
+    assert (r.sph_min, r.sph_max) == (-20.0, 2.0)
+    assert (r.cyl_min, r.cyl_max) == (-4.0, 0.0)
+    assert r.availability == "rx"
+
+
+# -- 7/16. malformed / non-two-number "From" stays needs_review -
+def test_g3_from_malformed_blocked(parser):
+    for iv in ("(From -8.00)",            # one number -> not two-number grammar
+               "(From)",                  # empty
+               "( -8.00 -14.00 )"):       # this DOES parse (no 'from' needed) - control
+        rows = _g3_wrapped3(parser, "Total Sph+Cyl", iv, "Max Cyl (4)")
+        if iv == "( -8.00 -14.00 )":
+            assert rows[0].has_range is True
+        else:
+            assert rows[0].has_range is False
+            assert "unparsed stock range grammar" in rows[0].review_reasons
+    # one-number "From" must NOT be picked up by the signed/unsigned single grammar
+    assert parser._parse_g3_stock_range("Total Sph+Cyl (From -8.00) Max Cyl (4)") is None
+
+
+# -- 8. missing Max Cyl -> the 3-row join does not fire ---------
+def test_g3_from_missing_maxcyl_blocked(parser):
+    matrix = [list(_H4),
+              ["Mineral 1.9", "Multi Coat", "", "Total Sph+Cyl"],
+              ["", "", "", "(From -2.25 -30.00)"],
+              ["", "", "", "Sph Only From (0.00 To -4.00)"]]   # not a Max Cyl line
+    rows = parser._rows_from_section(matrix[:1], matrix, ParserContext(availability="rx"))
+    tot_rows = [r for r in rows if "Total Sph+Cyl" in (r.notes or "")
+                or "(From" in (r.notes or "")]
+    assert tot_rows and all(r.has_range is False for r in tot_rows)
+
+
+# -- 11/12/13. false-merge guards -----------------------------
+def test_g3_from_false_merge_guards(parser):
+    base = ["Mineral 1.9", "Multi Coat", ""]
+    def run(mid_identity):
+        matrix = [list(_H4),
+                  [*base, "Total Sph+Cyl"],
+                  [*mid_identity, "(From -2.25 -30.00)"],
+                  [*base, "Max Cyl (4)"]]
+        return parser._rows_from_section(matrix[:1], matrix,
+                                        ParserContext(availability="rx"))
+    for mid in (["Mineral 1.81", "Multi Coat", ""],       # Type change
+                ["Mineral 1.9", "Photo", ""],             # Coating change
+                ["Mineral 1.9", "Multi Coat", "999"]):    # Price change
+        rows = run(mid)
+        # the 3-row join must NOT fire: no parsed clause, no fabricated bounds
+        assert not any(r.has_range for r in rows)
+        assert not any(r.total_power_min == -30.0 for r in rows)
+    # control: identical identity on all three rows DOES join
+    ok = run(base)
+    assert any(r.has_range and r.total_power_min == -30.0 for r in ok)
+
+
+# -- 17. existing two-number G3 (no "From") unchanged ----------
+def test_g3_from_existing_two_number_unchanged(parser):
+    r = _g3_rows(parser, "Total Sph+Cyl (+15.00 -26.00) Cyl (4)")[0]
+    assert (r.total_power_min, r.total_power_max) == (-26.0, 15.0)
+    assert r.max_cyl_abs == 4.0
+    w = _g3_wrapped(parser, "Total Sph+Cyl (+8.00 -14.00)", "Max Cyl (4)")[0]
+    assert (w.total_power_min, w.total_power_max) == (-14.0, 8.0)
+
+
+# -- 9/10/13. real HOYA Mineral RX: wrapped rows, retail only, RX --
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_g3_from_real_mineral_rx(parser_lwrr):
+    import pdfplumber
+    p = parser_lwrr
+    got = {}
+    with pdfplumber.open(_HOYA_UPD) as pdf:
+        page = pdf.pages[27]
+        ctx = ParserContext()
+        p._update_context_from_text(ctx, page.extract_text() or "")
+        assert ctx.availability == "rx"
+        for ov, hdr, mat in p._extract_page_tables(page):
+            for r in p._rows_from_section(hdr, mat, p._section_context(ctx, ov)):
+                if r.has_range and (r.total_power_min, r.total_power_max) in (
+                        (-30.0, -2.25), (-20.0, -2.0)):
+                    got[(r.total_power_min, r.total_power_max)] = r
+    assert set(got) == {(-30.0, -2.25), (-20.0, -2.0)}
+    r9 = got[(-30.0, -2.25)]
+    assert r9.max_cyl_abs == 4.0 and (r9.sph_min, r9.sph_max) == (-30.0, 1.75)
+    assert r9.availability == "rx"
+    assert r9.price == 31400.0                        # retail, not wholesale 14950
+    r81 = got[(-20.0, -2.0)]
+    assert r81.price == 26050.0                       # retail, not wholesale 12400
+    for r in got.values():
+        blob = f"{r.notes or ''} {getattr(r,'reason',None) or ''}".lower()
+        assert "14950" not in blob and "12400" not in blob and "wholesale" not in blob
+        assert "cd 11" not in blob and "pro 14" not in blob   # corridor qualifier not fabricated
+
+
+# -- 18/19. single-total grammars still reject "From" ----------
+def test_g3_from_single_total_grammars_reject_from(parser):
+    for txt in ("Total Sph+Cyl (From -6.00) Cyl (2.00)",     # unsigned single
+                "Total Sph+Cyl (From -6.00) Cyl (-2.00)",    # signed single
+                "Total Sph+Cyl (From +6.00) Cyl (+2.00)"):
+        assert parser._parse_g3_stock_range(txt) is None

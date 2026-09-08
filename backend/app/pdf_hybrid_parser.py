@@ -1233,15 +1233,22 @@ class PDFHybridParser:
 
         # ---- G3 wrapped-line pairing (safe, post-partition) ----------------
         # A wrapped "Total Sph+Cyl (a b)" line + the following "Max Cyl (n)"
-        # line are joined into ONE range cell ONLY when the two consecutive
-        # matrix rows resolve to the SAME commercial (Type, Coating, Price)
-        # after continuation-cell inheritance. Never joins across a price /
-        # Type-Coating boundary. If identity cannot be proved equal, both
-        # lines are left as-is (each stays unparsed -> needs_review).
+        # line are joined into ONE range cell ONLY when the consecutive matrix
+        # rows resolve to the SAME commercial (Type, Coating, Price) after
+        # continuation-cell inheritance. Two shapes are joined:
+        #   2-row:  "Total Sph+Cyl (a b)"        + "Max Cyl (n)"
+        #   3-row:  "Total Sph+Cyl"  + "(From a b)" (or "(a b)")  + "Max Cyl (n)"
+        # Never joins across a price / Type-Coating boundary. If identity cannot
+        # be proved equal, every line is left as-is (each -> needs_review).
         if merged_mode and i_range is not None:
-            _cap_txt = re.compile(r"^total\s*sph\s*\+\s*cyl\s*\(\s*[+\-]?\d+(?:\.\d+)?"
-                                  r"\s+[+\-]?\d+(?:\.\d+)?\s*\)\s*$", re.I)
+            _cap_txt = re.compile(r"^total\s*sph\s*\+\s*cyl\s*\(\s*(?:from\s+)?"
+                                  r"[+\-]?\d+(?:\.\d+)?\s+[+\-]?\d+(?:\.\d+)?\s*\)\s*$",
+                                  re.I)
             _bare_mc = re.compile(r"^(?:max\s*)?cyl\s*\(\s*\d+(?:\.\d+)?\s*\)\s*$", re.I)
+            _bare_total = re.compile(r"^total\s*sph\s*\+\s*cyl\s*$", re.I)
+            _from_interval = re.compile(
+                r"^(?:[\d.]+\s+)*\(\s*(?:from\s+)?"
+                r"[+\-]?\d+(?:\.\d+)?\s+[+\-]?\d+(?:\.\d+)?\s*\)\s*$", re.I)
             data = [list(r) + [""] * (ncol - len(r)) for r in matrix[1:]]
             m_c = c_c = p_c = ""
             resolved = []
@@ -1257,12 +1264,24 @@ class PDFHybridParser:
                 if k in skip:
                     continue
                 rt = _clean(r[i_range]) if i_range < len(r) else ""
+                rt1 = _clean(data[k + 1][i_range]) if k + 1 < len(data) else ""
+                rt2 = _clean(data[k + 2][i_range]) if k + 2 < len(data) else ""
                 if (_cap_txt.match(rt) and k + 1 < len(data)
-                        and _bare_mc.match(_clean(data[k + 1][i_range]))
+                        and _bare_mc.match(rt1)
                         and resolved[k] == resolved[k + 1]):
                     r = list(r)
-                    r[i_range] = rt + " || " + _clean(data[k + 1][i_range])
+                    r[i_range] = rt + " || " + rt1
                     skip.add(k + 1)
+                elif (_bare_total.match(rt) and k + 2 < len(data)
+                        and _from_interval.match(rt1) and _bare_mc.match(rt2)
+                        and resolved[k] == resolved[k + 1] == resolved[k + 2]):
+                    # strip a leading numeric price prefix from the interval
+                    # fragment ONLY (anchored, never digits inside the parens)
+                    frag = re.sub(r"^[\d.\s]+(?=\()", "", rt1).strip()
+                    r = list(r)
+                    r[i_range] = "Total Sph+Cyl " + frag + " || " + rt2
+                    skip.add(k + 1)
+                    skip.add(k + 2)
                 merged_rows.append(r)
             matrix = [matrix[0]] + merged_rows
 
@@ -1956,9 +1975,11 @@ class PDFHybridParser:
 
     # Grammar G3 slice 1: a TWO-number "Total Sph+Cyl (a b)" envelope with an
     # UNSIGNED cylinder cap, either inline ("... Cyl (n)") or joined from a
-    # wrapped "Max Cyl (n)" line ("<total> || Max Cyl (n)").
+    # wrapped "Max Cyl (n)" line ("<total> || Max Cyl (n)"). An optional "From"
+    # token before the two numbers ("(From a b)") is a printed-grammar variant
+    # only - identical semantics, min(a,b)/max(a,b) normalisation unchanged.
     _G3_RE = re.compile(
-        r"^total\s*sph\s*\+\s*cyl\s*\(\s*"
+        r"^total\s*sph\s*\+\s*cyl\s*\(\s*(?:from\s+)?"
         r"([+\-]?\d+(?:\.\d+)?)\s+([+\-]?\d+(?:\.\d+)?)\s*\)\s*"
         r"(?:\|\|\s*)?(?:max\s*)?cyl\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*$",
         re.I,
