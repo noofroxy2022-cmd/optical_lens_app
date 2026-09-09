@@ -32,6 +32,9 @@ export const lensModelAPI = {
   delete: (id) => api.delete(`/lens-models/${id}`),
 };
 
+// Back-compat alias: some pages import `lensAPI`; the real surface is lensModelAPI.
+export const lensAPI = lensModelAPI;
+
 export const lensVariantAPI = {
   getByModel: (modelId) => api.get(`/lens-models/${modelId}/variants`),
   create: (modelId, data) => api.post(`/lens-models/${modelId}/variants`, data),
@@ -45,6 +48,11 @@ export const powerRangeAPI = {
 export const prescriptionAPI = {
   getAll: () => api.get('/prescriptions/'),
   getById: (id) => api.get(`/prescriptions/${id}`),
+  create: (data) => api.post('/prescriptions/', data),
+  match: (id, { filters = null, preferStock = true, preferAspherical = true } = {}) =>
+    api.post(`/prescriptions/${id}/match`, filters, {
+      params: { prefer_stock: preferStock, prefer_aspherical: preferAspherical },
+    }),
   delete: (id) => api.delete(`/prescriptions/${id}`),
 };
 
@@ -58,9 +66,15 @@ export const pdfImportAPI = {
     });
   },
   preview: (catalogId) => api.post(`/pdf-import/preview/${catalogId}`),
-  extract: (catalogId, saveToPreview = true) => api.post(`/pdf-import/extract/${catalogId}`, null, {
-    params: { save_to_preview: saveToPreview }
-  }),
+  // Sends the per-catalog import policy as schemas.ExtractRequest. dualPriceSemantics
+  // is the generic reading rule (null = no special dual-price policy; the backend
+  // 422s on any unsupported value - never a silent fallback).
+  extract: (catalogId, { dualPriceSemantics = null, useVision = false, saveToPreview = true } = {}) =>
+    api.post(`/pdf-import/extract/${catalogId}`, {
+      dual_price_semantics: dualPriceSemantics,
+      use_vision: useVision,
+      save_to_preview: saveToPreview,
+    }),
   getExtractions: (catalogId, status) => api.get(`/pdf-import/extractions/${catalogId}`, { params: { status } }),
   updateExtraction: (id, data) => api.put(`/pdf-import/extractions/${id}`, data),
   confirm: (id) => api.post(`/pdf-import/extractions/${id}/confirm`),

@@ -11,7 +11,7 @@ import {
 } from '@ant-design/icons';
 import Dashboard from './pages/Dashboard';
 import Companies from './pages/Companies';
-import LensModels from './pages/LensModels';
+import LensModels from './pages/Lenses';
 import Prescriptions from './pages/Prescriptions';
 import PDFPreview from './pages/PDFPreview';
 
