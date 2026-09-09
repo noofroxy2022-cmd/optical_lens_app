@@ -53,7 +53,22 @@ export const prescriptionAPI = {
     api.post(`/prescriptions/${id}/match`, filters, {
       params: { prefer_stock: preferStock, prefer_aspherical: preferAspherical },
     }),
+  // V1.0.1 availability-first product search. mode "automatic" | "targeted".
+  search: (id, { mode = 'automatic', filters = null, preferStock = true, preferAspherical = true, includeAlternatives = true } = {}) =>
+    api.post(`/prescriptions/${id}/search`, {
+      mode,
+      filters,
+      prefer_stock: preferStock,
+      prefer_aspherical: preferAspherical,
+      include_alternatives: includeAlternatives,
+    }),
   delete: (id) => api.delete(`/prescriptions/${id}`),
+};
+
+export const backupAPI = {
+  list: () => api.get('/backup/'),
+  now: () => api.post('/backup/now'),
+  restore: (name) => api.post('/backup/restore', { name }),
 };
 
 export const pdfImportAPI = {

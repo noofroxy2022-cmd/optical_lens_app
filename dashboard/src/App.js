@@ -7,13 +7,14 @@ import {
   BuildOutlined,
   FileTextOutlined,
   FilePdfOutlined,
-  SettingOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons';
 import Dashboard from './pages/Dashboard';
 import Companies from './pages/Companies';
 import LensModels from './pages/Lenses';
 import Prescriptions from './pages/Prescriptions';
 import PDFPreview from './pages/PDFPreview';
+import Backup from './pages/Backup';
 
 const { Sider, Content } = Layout;
 
@@ -24,6 +25,7 @@ function App() {
     { key: '/lens-models', icon: <EyeOutlined />, label: 'نماذج العدسات' },
     { key: '/prescriptions', icon: <FileTextOutlined />, label: 'الوصفات' },
     { key: '/pdf-preview', icon: <FilePdfOutlined />, label: 'استيراد PDF' },
+    { key: '/backup', icon: <DatabaseOutlined />, label: 'نسخ احتياطي' },
   ];
 
   return (
@@ -52,6 +54,7 @@ function App() {
               <Route path="/lens-models" element={<LensModels />} />
               <Route path="/prescriptions" element={<Prescriptions />} />
               <Route path="/pdf-preview" element={<PDFPreview />} />
+              <Route path="/backup" element={<Backup />} />
             </Routes>
           </Content>
         </Layout>

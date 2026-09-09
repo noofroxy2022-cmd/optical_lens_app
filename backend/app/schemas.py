@@ -399,6 +399,13 @@ class LensFilters(BaseModel):
     features: Optional[List[str]] = None
     company_id: Optional[int] = None
     is_active: Optional[bool] = True
+    # V1.0.1 targeted-search dimensions - existing canonical DB fields only, no
+    # migration. Applied as strict AND on top of match_lenses eligibility by the
+    # product_search layer (the optical matcher itself ignores fields it does not
+    # already read, so its logic is unchanged).
+    lens_model_id: Optional[int] = None                  # LensModel.id  (Product / Model)
+    design_variant: Optional[str] = None                 # LensVariant.design_variant (commercial design line)
+    color_variant: Optional[str] = None                  # LensVariant.color_variant (technology / colour, e.g. "Sensity 2")
 
 
 # ===== PDF import policy =====
@@ -480,6 +487,69 @@ class MatchResponse(BaseModel):
     transposition_applied: bool
     index_recommendation: str
     aspherical_recommendation: str
+
+
+# ===== V1.0.1 product search (availability-first, targeted filters, alternatives) =====
+class ProductSearchRequest(BaseModel):
+    """Two modes:
+      - "automatic"  -> every lens optically valid for the prescription
+      - "targeted"   -> automatic result, then `filters` applied as strict AND;
+                        never silently relaxed. Alternatives (if any) are
+                        returned in a SEPARATE list, never mixed into the exact
+                        result and never labelled as exact.
+    """
+    mode: str = "automatic"                       # "automatic" | "targeted"
+    filters: Optional[LensFilters] = None
+    prefer_stock: bool = True
+    prefer_aspherical: bool = True
+    include_alternatives: bool = True             # only computed when targeted + zero exact
+
+
+class AvailabilityAnswer(BaseModel):
+    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "none"
+    code: str
+    title: str
+    detail: Optional[str] = None
+
+
+class LensSearchGroup(BaseModel):
+    # key: "stock_egypt" | "stock_out_of_egypt" | "rx"
+    key: str
+    label: str
+    availability: str                            # "stock" | "rx"
+    market: Optional[str] = None                 # "egypt" | "out_of_egypt" | None
+    catalog_note: str = "حسب الكتالوج"           # STOCK label accuracy - not real-time inventory
+    count: int
+    results: List[LensMatchResult]
+
+
+class AlternativeResult(BaseModel):
+    result: LensMatchResult
+    # which requested filters this alternative does NOT satisfy (why it is only
+    # an alternative, not an exact match)
+    relaxed_filters: List[str] = []
+    # commercially useful proximity, existing dimensions only
+    proximity_reason: str
+    proximity_score: int = 0
+
+
+class ProductSearchResponse(BaseModel):
+    prescription: PrescriptionResponse
+    mode: str
+    transposition_applied: bool
+    index_recommendation: str
+    aspherical_recommendation: str
+    availability_answer: AvailabilityAnswer
+    # exact result (automatic = all valid; targeted = valid AND all filters)
+    exact_total: int
+    best_match: Optional[LensMatchResult] = None
+    groups: List[LensSearchGroup] = []
+    stock_egypt_count: int = 0
+    stock_out_of_egypt_count: int = 0
+    rx_count: int = 0
+    # populated ONLY for targeted mode when exact_total == 0
+    alternatives: List[AlternativeResult] = []
+    alternatives_note: Optional[str] = None
 
 
 # ===== OCR =====

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.database import get_db
 from app import crud, schemas
+from app import product_search as product_search_service
 from app.ocr_service import ocr_service
 from app.lens_matcher import lens_matcher, TranspositionEngine, OpticsRecommender
 import os
@@ -95,6 +96,29 @@ def match_lenses(
         index_recommendation=index_rec,
         aspherical_recommendation=aspherical_rec
     )
+
+
+@router.post("/{prescription_id}/search", response_model=schemas.ProductSearchResponse)
+def product_search(
+    prescription_id: int,
+    req: Optional[schemas.ProductSearchRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """V1.0.1 fast product search.
+
+    mode="automatic": every lens optically valid for the prescription.
+    mode="targeted":  that result, then `filters` applied as strict AND (never
+    silently relaxed). Results come back grouped and ordered availability-first
+    (STOCK Egypt -> STOCK Out Of Egypt -> RX), with a direct availability answer
+    and - only when a targeted search has zero exact results - a SEPARATE
+    alternatives list (never mixed with or labelled as exact matches). The
+    optical matcher and its score are unchanged.
+    """
+    prescription = crud.get_prescription(db, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
+    req = req or schemas.ProductSearchRequest()
+    return product_search_service.search(db, prescription, req)
 
 
 @router.get("/{prescription_id}/recommendations")

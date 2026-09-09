@@ -1,18 +1,47 @@
 ﻿"""
 التطبيق الرئيسي - FastAPI
 """
+import asyncio
+import contextlib
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import companies, lens_models, prescriptions, pdf_import, uploads
+from app.routers import companies, lens_models, prescriptions, pdf_import, uploads, backup
+from app import backup_service
+
+
+async def _daily_backup_loop():
+    """Keep a rolling daily SQLite snapshot regardless of how long the process
+    stays up. Checks hourly; only writes a new file once per calendar day.
+    Never disturbs live matching - uses the SQLite online backup API."""
+    while True:
+        try:
+            await asyncio.to_thread(backup_service.ensure_daily_backup)
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await asyncio.to_thread(backup_service.ensure_daily_backup)
+    task = asyncio.create_task(_daily_backup_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(
     title="Optical Lens Matcher API - Final",
     description="API نهائي لمطابقة العدسات البصرية",
-    version="3.0.0",
+    version="3.0.1",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -28,6 +57,7 @@ app.include_router(lens_models.router)
 app.include_router(prescriptions.router)
 app.include_router(pdf_import.router)
 app.include_router(uploads.router)
+app.include_router(backup.router)
 
 
 @app.get("/")
