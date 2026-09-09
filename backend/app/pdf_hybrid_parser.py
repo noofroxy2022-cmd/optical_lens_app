@@ -1093,6 +1093,22 @@ class PDFHybridParser:
                 continue
             gtype = g_ident[0] if g_ident else ""
             gcoat = g_ident[1] if len(g_ident) > 1 else ""
+            # Type-cell continuation: a tall merged Type cell can wrap a
+            # technology descriptor ("Sensity 2", "Photo", "Transitions") onto
+            # its own line BELOW the Type+Coating pair. It is a real
+            # price-driving commercial dimension - fold it back into the Type
+            # cell so downstream extraction keeps it (as color_variant) and two
+            # otherwise-identical priced rows do not collapse. Purely structural:
+            # any extra ident line carrying a recognised technology token, no
+            # company / page / product-name assumption. Non-technology
+            # parentheticals (base-curve / colour-count notes shared by every
+            # price tier) are deliberately left out.
+            for _extra in g_ident[2:]:
+                _fold = (self._technology_from_type(_extra)
+                         or self._segment_design_from_type(_extra))
+                if _fold:
+                    gtype = f"{gtype} {_fold}".strip()
+                    break
 
             g_subs = sorted(y for y in sub_ys if gy0 < y < gy1)
             review_reason = None
@@ -1358,6 +1374,17 @@ class PDFHybridParser:
                 if geo:
                     r.design_type = geo
                     r.is_aspherical = geo in ("aspherical", "double_aspherical")
+                # commercial design line: an explicit DESIGN COLUMN value, else
+                # an explicit bifocal-segment design folded into the Type cell
+                # ("Flat Top S28" vs "Curve Top C28" are different commercial
+                # products at different prices). A page-level portfolio word
+                # (ctx.design_variant) is deliberately NOT propagated per row.
+                dv = (self._classify_design(cell(i_design)) if i_design is not None
+                      else None)
+                if dv is None and mdl_txt:
+                    dv = self._segment_design_from_type(mdl_txt)
+                if dv:
+                    r.design_variant = dv
                 r.color_variant = color_val
                 r.coating, r.coating_status, r.coating_confidence = coating, cstatus, cconf
                 if i_mat is not None and cell(i_mat):
@@ -1654,7 +1681,19 @@ class PDFHybridParser:
     # belongs in color_variant - _family_from_type strips it off the NAME and it
     # would otherwise be lost, collapsing distinct priced products.
     _TYPE_TECH_RE = re.compile(
-        r"\b(sensity(?:\s*\d)?|photochromic|photo|transitions?(?:\s*\d)?)\b", re.I
+        r"\b(sensity(?:\s+(?:\d|original))?|photochromic|photo|transitions?(?:\s*\d)?)\b",
+        re.I,
+    )
+    # Explicit bifocal / occupational SEGMENT design printed in a Type cell,
+    # e.g. "Flat Top (S28)", "Curve Top (C28)", "Round Top", "Executive". A
+    # genuine design_variant distinction (different segment geometry => different
+    # commercial product), NOT a colour/technology. Tolerates the catalog's
+    # "Falt Top" mis-spelling. The optional trailing segment code (S28 / C28 /
+    # R30 ...) is kept as source evidence when present.
+    _SEGMENT_DESIGN_RE = re.compile(
+        r"\b(flat|falt|curve|round|executive|ribbon)\s+top\b"
+        r"(?:\s*\(?\s*([a-z]{1,2}\d{1,2})\s*\)?)?",
+        re.I,
     )
 
     def _technology_from_type(self, text) -> Optional[str]:
@@ -1667,6 +1706,23 @@ class PDFHybridParser:
         if not m:
             return None
         return re.sub(r"\s+", " ", m.group(1)).strip().title()
+
+    def _segment_design_from_type(self, text) -> Optional[str]:
+        """Explicit bifocal / occupational segment design from a Type cell.
+        Normalised e.g. 'Flat Top S28', 'Curve Top C28', 'Round Top'. The
+        'Falt Top' catalog typo is corrected to 'Flat Top'. None when absent."""
+        s = _clean(text)
+        if not s:
+            return None
+        m = self._SEGMENT_DESIGN_RE.search(s)
+        if not m:
+            return None
+        style = m.group(1).lower()
+        style = "flat" if style in ("flat", "falt") else style
+        out = f"{style.title()} Top"
+        if m.group(2):
+            out += f" {m.group(2).upper()}"
+        return out
 
     def _family_from_type(self, text) -> Optional[str]:
         """Family/model name from an explicit 'Type'/'Model' cell:

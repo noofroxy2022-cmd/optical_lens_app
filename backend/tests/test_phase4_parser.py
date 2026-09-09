@@ -3392,3 +3392,178 @@ def test_batch1_full_hoya_confirms_and_matches(db):
         top = res[0]
         assert top.price_pair and float(top.price_pair) > 0
         assert top.availability in ("stock", "rx")
+
+
+# ============================================================
+#  Batch 2 - HOYA ingestion completion
+#   1. generic wrapped Type-cell continuation -> technology recovered
+#   2. dual_price_semantics exposed on the registered /pdf-import/extract
+#   3. structured partial-confirm response
+# ============================================================
+import fastapi as _fastapi                                   # noqa: E402
+from app.routers import pdf_import as _pdfr, prescriptions as _prescr  # noqa: E402
+
+
+def test_b2_wrapped_type_continuation_folds_technology(parser):
+    # a merged Type cell that wraps a technology descriptor onto a line BELOW
+    # Type+Coating must fold it back so it is not lost - generic, no product
+    # branch. Two same-index rows at different prices, one with a wrapped
+    # "Sensity 2" continuation, must NOT collapse.
+    g = parser._build_price_subgroups(
+        ["Type", "Coating", "Price", "Stock Range"],
+        0.0, 100.0,
+        [(10.0, "Widget 1.6"), (11.0, "Long Life UV Control"),
+         (40.0, "Widget 1.6"), (41.0, "Long Life UV Control"),
+         (42.0, "Sensity 2 ( Gray - Brown )")],
+        [(12.0, "300", None, None), (43.0, "800", None, None)],
+        [(13.0, "Sph (0.00 To -4.00) Cyl (-2.00) 70"),
+         (44.0, "Sph (0.00 To -4.00) Cyl (-2.00) 70")],
+        [30.0], [],
+    )
+    types = sorted(m[0] for _ov, _h, mat in g for m in mat[1:])
+    assert types == ["Widget 1.6", "Widget 1.6 Sensity 2"]
+
+
+def test_b2_wrapped_type_continuation_folds_segment_design(parser):
+    # an explicit bifocal SEGMENT design ("Flat Top (S28)" / "Curve Top (C28)")
+    # wrapped below Type+Coating is folded in - two same-index rows at different
+    # prices with different segment geometry must NOT collapse. "Falt Top"
+    # catalog typo is corrected.
+    assert parser._segment_design_from_type("Bi-Focal 1.5 Falt Top ( S28 )") == "Flat Top S28"
+    assert parser._segment_design_from_type("Curve Top ( C28 )") == "Curve Top C28"
+    assert parser._segment_design_from_type("iD LifeStyle 1.5") is None   # no false positive
+    g = parser._build_price_subgroups(
+        ["Type", "Coating", "Price", "Stock Range"],
+        0.0, 100.0,
+        [(10.0, "Bi-Focal 1.5"), (11.0, "Hi Vision Aqua"), (12.0, "Falt Top ( S28 )"),
+         (40.0, "Bi-Focal 1.5"), (41.0, "Hi Vision Aqua"), (42.0, "Curve Top ( C28 )")],
+        [(13.0, "9450", None, None), (43.0, "9900", None, None)],
+        [(14.0, "Total Sph+Cyl (+6.00 -8.00) Cyl (4)"),
+         (44.0, "Total Sph+Cyl (+6.00 -8.00) Cyl (4)")],
+        [30.0], [],
+    )
+    types = sorted(m[0] for _ov, _h, mat in g for m in mat[1:])
+    assert types == ["Bi-Focal 1.5 Curve Top C28", "Bi-Focal 1.5 Flat Top S28"]
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_b2_real_residual_conflicts_resolved(db):
+    p = PDFHybridParser(use_vision=False, dual_price_semantics=_LWRR)
+    p.parse_pdf(_HOYA_UPD)
+    p.save_extractions_to_db(_mk_cat(db), db)
+    cat_id = db.query(models.Catalog).one().id
+    for e in _crud.get_extractions_by_catalog(db, cat_id):
+        if e.status == "needs_review":
+            _crud.reject_extraction(db, e.id, "qa")
+        else:
+            _crud.confirm_extraction(db, e.id, "qa")
+    r = _crud.confirm_catalog_commercial(db, cat_id, "admin")
+
+    # every proven commercial dimension recovered -> zero remaining conflicts
+    assert r["conflicts"] == 0
+    assert r["confirmed"] >= 180
+    vps = db.query(models.VariantPricing).all()
+
+    # Nulux iDENTITY base vs Sensity 2 are distinct priced rows
+    nid = {(v.variant.index_value, v.variant.color_variant) for v in vps
+           if v.variant.lens_model.name == "Nulux iDENTITY"}
+    assert (1.5, None) in nid and (1.5, "Sensity 2") in nid
+
+    # Bi-Focal Flat Top S28 @ 9450 and Curve Top C28 @ 9900 are separate variants
+    bf = {(v.variant.design_variant, float(v.price_pair), v.availability.value)
+          for v in vps if v.variant.lens_model.name == "Bi-Focal"
+          and float(v.price_pair) in (9450.0, 9900.0)}
+    assert ("Flat Top S28", 9450.0, "rx") in bf
+    assert ("Curve Top C28", 9900.0, "rx") in bf
+
+
+def _mk_cat(db):
+    co = models.Company(name="HOYA_B2", is_active=True, is_deleted=False)
+    db.add(co); db.commit(); db.refresh(co)
+    cat = models.Catalog(company_id=co.id, filename="h.pdf", file_path=_HOYA_UPD,
+                         status=models.CatalogStatus.DRAFT)
+    db.add(cat); db.commit(); db.refresh(cat)
+    return cat.id
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_b2_registered_extract_price_policy(db):
+    cid = _mk_cat(db)
+    # unsupported policy -> 422, no silent fallback
+    with pytest.raises(_fastapi.HTTPException) as ei:
+        _pdfr.extract_catalog(cid, _schemas.ExtractRequest(dual_price_semantics="magnitude"), db)
+    assert ei.value.status_code == 422
+    # accepted policy -> parses, extractions saved
+    out = _pdfr.extract_catalog(
+        cid, _schemas.ExtractRequest(dual_price_semantics=_LWRR, use_vision=False), db)
+    assert out["status"] == "extracted" and out["total_power_ranges"] > 100
+    # no body at all -> still works, generic (no dual-price policy)
+    cid2 = _mk_cat(db)
+    out2 = _pdfr.extract_catalog(cid2, None, db)
+    assert out2["status"] == "extracted"
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_b2_registered_bulk_confirm_structured_partial(db):
+    cid = _mk_cat(db)
+    _pdfr.extract_catalog(cid, _schemas.ExtractRequest(dual_price_semantics=_LWRR), db)
+    for e in _crud.get_extractions_by_catalog(db, cid):
+        if e.status == "needs_review":
+            _crud.reject_extraction(db, e.id, "qa")
+        else:
+            _crud.confirm_extraction(db, e.id, "qa")
+
+    res = _pdfr.bulk_confirm(cid, "admin", db)
+
+    # structured, partial-success, no whole-catalog abort
+    assert res["success"] is True
+    assert res["confirmed"] > 100
+    assert _schemas.BulkConfirmResult(**res).confirmed == res["confirmed"]
+    for item in res["parked"]:
+        assert set(item.keys()) >= {"extraction_id", "reason"}
+        assert "wholesale" not in item["reason"].lower()
+        pe = db.get(models.CatalogExtraction, item["extraction_id"])
+        assert pe.status == "needs_review" and pe.review_notes
+    # edit -> reconfirm loop is reachable: a parked row can be edited then
+    # the catalog cannot be re-confirmed (already CONFIRMED) - a fresh catalog
+    # import is the supersede path; the parked row stays visible for review
+    if res["parked"]:
+        pid = res["parked"][0]["extraction_id"]
+        crud.update_extraction(db, pid, _schemas.CatalogExtractionUpdate(
+            review_notes="looked at"))
+        assert db.get(models.CatalogExtraction, pid).review_notes == "looked at"
+
+
+@pytest.mark.skipif(not os.path.exists(_HOYA_UPD), reason="real UPDATED HOYA catalog not present")
+def test_b2_full_registered_hoya_api_e2e(db):
+    from app.lens_matcher import TranspositionEngine as _TE
+    cid = _mk_cat(db)
+    _pdfr.extract_catalog(cid, _schemas.ExtractRequest(dual_price_semantics=_LWRR), db)
+    for e in _crud.get_extractions_by_catalog(db, cid):
+        if e.status == "needs_review":
+            _crud.reject_extraction(db, e.id, "qa")
+        else:
+            _crud.confirm_extraction(db, e.id, "qa")
+    res = _pdfr.bulk_confirm(cid, "admin", db)
+    assert res["confirmed"] > 100
+
+    def _pid(s, c):
+        return _prescr.create_prescription(_schemas.PrescriptionCreate(
+            od=_schemas.EyePrescription(sph=s, cyl=c, axis=90 if c else 0, add=0.0),
+            os=_schemas.EyePrescription(sph=s, cyl=c, axis=90 if c else 0, add=0.0)), db).id
+
+    known_prices = {float(v.price_pair) for v in db.query(models.VariantPricing).all()}
+    for label, (s, c) in {
+        "minus": (-2.0, 0.0), "plus": (2.0, 0.0), "astig": (-1.5, -1.0),
+        "mix": (1.5, -2.5), "sphere_only": (-8.0, 0.0), "g3": (3.0, -3.0),
+        "rx_high": (-13.0, 0.0),
+    }.items():
+        mr = _prescr.match_lenses(_pid(s, c), None, True, True, db)
+        r = mr.results
+        assert mr.total_matches >= 1, label
+        assert len(r) == len({x.source_pricing_id for x in r}), label       # deduped
+        keys = [(-x.match_score, 0 if x.availability == "stock" else 1, x.price_pair) for x in r]
+        assert keys == sorted(keys), label                                  # sorted
+        for x in r:
+            assert float(x.price_pair) in known_prices                      # retail only
+            assert x.availability in ("stock", "rx")

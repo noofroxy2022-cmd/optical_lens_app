@@ -79,10 +79,17 @@ def preview_catalog(catalog_id: int, db: Session = Depends(get_db)):
 @router.post("/extract/{catalog_id}")
 def extract_catalog(
     catalog_id: int,
-    save_to_preview: bool = True,
+    req: Optional[schemas.ExtractRequest] = None,
     db: Session = Depends(get_db)
 ):
-    """استخراج البيانات وحفظها في CatalogExtraction للمعاينة"""
+    """استخراج البيانات وحفظها في CatalogExtraction للمعاينة.
+
+    Optional JSON body (schemas.ExtractRequest) carries the per-catalog import
+    policy: dual_price_semantics (only 'left_wholesale_right_retail' accepted;
+    any other non-null value -> 422), use_vision, save_to_preview. No body ->
+    generic parse, no dual-price policy.
+    """
+    req = req or schemas.ExtractRequest()
     catalog = crud.get_catalog(db, catalog_id)
     if not catalog:
         raise HTTPException(status_code=404, detail="الكتالوج غير موجود")
@@ -90,11 +97,22 @@ def extract_catalog(
     if not os.path.exists(catalog.file_path):
         raise HTTPException(status_code=404, detail="ملف PDF غير موجود")
 
+    dps = req.dual_price_semantics
+    if dps is not None and dps != PDFHybridParser.DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unsupported dual_price_semantics {dps!r}; the only accepted "
+                f"value is '{PDFHybridParser.DUAL_PRICE_LEFT_WHOLESALE_RIGHT_RETAIL}' "
+                f"(or omit it)"
+            ),
+        )
+
     try:
-        parser = PDFHybridParser(use_vision=True)
+        parser = PDFHybridParser(use_vision=req.use_vision, dual_price_semantics=dps)
         extracted = parser.parse_pdf(catalog.file_path)
 
-        if save_to_preview:
+        if req.save_to_preview:
             parser.save_extractions_to_db(catalog_id, db)
 
         crud.update_catalog_status(db, catalog_id, "extracted")
@@ -184,7 +202,7 @@ def reject_extraction(
     return {"success": True, "message": "تم الرفض"}
 
 
-@router.post("/bulk-confirm/{catalog_id}")
+@router.post("/bulk-confirm/{catalog_id}", response_model=schemas.BulkConfirmResult)
 def bulk_confirm(
     catalog_id: int,
     reviewed_by: str = "admin",
@@ -192,12 +210,12 @@ def bulk_confirm(
 ):
     """The ONLY commercial writer.
 
-    Validates every extraction in the catalog first; if anything is unresolved the
-    whole catalog is blocked (422) and nothing is written. On success it runs one
-    atomic transaction: close all current company pricing, resolve/create
-    model+variant+coating, append new VariantPricing (+ PowerRange for real
-    ranges), mark this catalog CONFIRMED and the previous confirmed catalog
-    SUPERSEDED. Any failure rolls back completely.
+    Confirms the SAFE subset of the catalog atomically and PARKS the rest
+    (unresolved rows / true-duplicate collapses / price conflicts) back to
+    needs_review with an exact reason - a minority of bad rows never zeros out
+    the good ones. Response carries confirmed / skipped_unresolved /
+    true_duplicates_collapsed / conflicts / parked[]. Only when ZERO rows are
+    confirmable is the request rejected 422. Any write fault rolls back fully.
     """
     try:
         result = crud.confirm_catalog_commercial(db, catalog_id, reviewed_by)

@@ -401,6 +401,43 @@ class LensFilters(BaseModel):
     is_active: Optional[bool] = True
 
 
+# ===== PDF import policy =====
+class ExtractRequest(BaseModel):
+    """Optional per-catalog import policy for POST /pdf-import/extract.
+
+    The parser engine stays generic and manufacturer-agnostic; catalog-specific
+    reading rules arrive here as caller-supplied policy (the foundation for
+    future ZEISS / Essilor / Rodenstock catalogs without re-coding).
+
+    dual_price_semantics: the ONLY accepted non-null value is
+    'left_wholesale_right_retail' - the caller asserts that a two-value Price
+    cell is '<wholesale> <retail>'. Any other non-null value is rejected 422,
+    never a silent fallback. Absent/None -> unlabelled multi-value price cells
+    stay UNRESOLVED (needs_review); wholesale is never persisted or exposed.
+    """
+    dual_price_semantics: Optional[str] = None
+    use_vision: bool = False
+    save_to_preview: bool = True
+
+
+# ===== Bulk-confirm result =====
+class BulkConfirmParkedItem(BaseModel):
+    extraction_id: int
+    reason: str
+
+class BulkConfirmResult(BaseModel):
+    success: bool = True
+    catalog_id: int
+    status: str
+    confirmed: int
+    skipped_unresolved: int
+    true_duplicates_collapsed: int
+    conflicts: int
+    parked: List[BulkConfirmParkedItem] = []
+    closed_previous_current: int = 0
+    superseded_catalogs: List[int] = []
+
+
 # ===== Match =====
 class MatchRequest(BaseModel):
     prescription_id: int
