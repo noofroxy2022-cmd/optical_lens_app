@@ -506,21 +506,79 @@ class ProductSearchRequest(BaseModel):
 
 
 class AvailabilityAnswer(BaseModel):
-    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "none"
+    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "split" | "none"
     code: str
     title: str
     detail: Optional[str] = None
 
 
+# ===== V1.0.2 per-eye availability + pair fulfillment =====
+class EyeAvailability(BaseModel):
+    """Whether ONE eye is covered by any valid OR PowerRange of the SAME
+    commercial option, evaluated independently per pricing route. Reuses the
+    frozen optical eligibility - no new/duplicated range logic."""
+    stock_egypt: bool = False
+    stock_outside: bool = False
+    rx: bool = False
+    best: str = "none"                           # stock_egypt | stock_outside | rx | none
+
+
+class PairFulfillment(BaseModel):
+    """The best VERIFIED way to fulfill BOTH eyes as one pair from the SAME
+    commercial option.
+
+    `price_pair` is set ONLY when provenance is proven:
+      * provenance="single_route"  -> ONE VariantPricing row's OR PowerRange(s)
+        cover BOTH eyes; `source_pricing_ids` holds that single id.
+      * provenance="unproven_mixed" -> both eyes are covered at the tier, but by
+        SEPARATE VariantPricing rows of the same identity whose belonging to one
+        catalog pricing offer cannot be proven from persistence
+        (source_extraction_id differs). `price_pair` is null, `needs_review` is
+        true; `source_pricing_ids` lists every covering row for transparency.
+      * provenance="none" -> split / unavailable.
+    Never divided, summed, mixed (STOCK+RX) or estimated."""
+    status: str                                 # stock_egypt|stock_outside|rx|split|unavailable
+    price_pair: Optional[Decimal] = None
+    currency: Optional[str] = None
+    source_pricing_ids: List[int] = []
+    provenance: str = "none"                     # single_route | unproven_mixed | none
+    needs_review: bool = False
+    reason: str
+
+
+class PerEyeProductResult(BaseModel):
+    """One commercial option (strict identity) with independent OD / OS
+    availability and the unified pair fulfillment."""
+    company_id: int
+    company_name: Optional[str] = None
+    lens_model_id: int
+    model_name: str
+    category: Optional[str] = None
+    variant_id: int
+    index_value: float
+    material: Optional[str] = None
+    design_variant: Optional[str] = None
+    color_variant: Optional[str] = None
+    coating_id: Optional[int] = None
+    coating_code: Optional[str] = None
+    coating_name: Optional[str] = None
+    currency: str = "EGP"
+    match_score: float = Field(..., ge=0, le=100)
+    reason: str
+    od: EyeAvailability
+    os: EyeAvailability
+    pair_fulfillment: PairFulfillment
+
+
 class LensSearchGroup(BaseModel):
-    # key: "stock_egypt" | "stock_out_of_egypt" | "rx"
+    # key: "stock_egypt" | "stock_out_of_egypt" | "rx" | "split"
     key: str
     label: str
-    availability: str                            # "stock" | "rx"
+    availability: str                            # "stock" | "rx" | "mixed"
     market: Optional[str] = None                 # "egypt" | "out_of_egypt" | None
     catalog_note: str = "حسب الكتالوج"           # STOCK label accuracy - not real-time inventory
     count: int
-    results: List[LensMatchResult]
+    results: List[PerEyeProductResult]
 
 
 class AlternativeResult(BaseModel):
@@ -542,14 +600,21 @@ class ProductSearchResponse(BaseModel):
     availability_answer: AvailabilityAnswer
     # exact result (automatic = all valid; targeted = valid AND all filters)
     exact_total: int
-    best_match: Optional[LensMatchResult] = None
+    best_match: Optional[PerEyeProductResult] = None
     groups: List[LensSearchGroup] = []
-    stock_egypt_count: int = 0
-    stock_out_of_egypt_count: int = 0
-    rx_count: int = 0
+    stock_egypt_count: int = 0                   # full-pair STOCK Egypt
+    stock_out_of_egypt_count: int = 0            # full-pair STOCK Out Of Egypt
+    rx_count: int = 0                            # full-pair RX
+    split_count: int = 0                         # split / no unified route
     # populated ONLY for targeted mode when exact_total == 0
     alternatives: List[AlternativeResult] = []
     alternatives_note: Optional[str] = None
+    # V1.0.2 fix - the SAME requested commercial option(s) that satisfy every
+    # IDENTITY filter but fail the requested availability / market / max_price
+    # gate. Availability intelligence ONLY - never counted as exact, never
+    # relaxes the requested filters.
+    availability_intelligence: List[PerEyeProductResult] = []
+    availability_intelligence_note: Optional[str] = None
 
 
 # ===== OCR =====

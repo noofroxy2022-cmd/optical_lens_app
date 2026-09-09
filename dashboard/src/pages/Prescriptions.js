@@ -24,21 +24,78 @@ const availLabel = (v) => (v === 'stock' ? <Tag color="green">STOCK</Tag> : <Tag
 // index. Named materials (PNX, EYAS, EYNOA, polycarbonate, trivex, high-index …)
 // stay visible. DB is unchanged; this is display-only.
 const ORDINARY_MATERIAL = new Set(['cr39', 'cr-39', 'cr 39', 'plastic', 'standard', 'organic', '']);
-const materialLabel = (variant) => {
-  const m = (variant?.material || '').toString().trim();
+const materialLabel = (material) => {
+  const m = (material || '').toString().trim();
   if (ORDINARY_MATERIAL.has(m.toLowerCase())) return null;
   return m;
 };
-const indexMaterialText = (variant) => {
-  const idx = variant?.index_value;
-  const idxTxt = idx != null ? `Index ${Number(idx).toFixed(2)}` : 'Index —';
-  const mat = materialLabel(variant);
+const indexMaterialText = (material, indexValue) => {
+  const idxTxt = indexValue != null ? `Index ${Number(indexValue).toFixed(2)}` : 'Index —';
+  const mat = materialLabel(material);
   return mat ? `${mat} · ${idxTxt}` : idxTxt;
 };
 
-const designText = (r) =>
-  r.design_variant || r.variant?.design_variant ||
-  (r.variant?.is_aspherical ? 'Aspherical' : r.variant?.design_type) || '—';
+// ---- V1.0.2 per-eye / pair helpers ----
+const PAIR_STATUS_AR = {
+  stock_egypt: '🇪🇬 STOCK داخل مصر',
+  stock_outside: '🌍 STOCK خارج مصر',
+  rx: '🏭 RX / تصنيع',
+  split: '⚠️ مصدر غير موحد',
+  unavailable: '❌ غير متوفر',
+};
+const PAIR_STATUS_COLOR = {
+  stock_egypt: 'green', stock_outside: 'gold', rx: 'orange', split: 'volcano', unavailable: 'red',
+};
+const yn = (b) => (b ? <span style={{ color: '#52c41a' }}>✅</span> : <span style={{ color: '#cf1322' }}>❌</span>);
+
+// OD/OS × (Egypt / Outside / RX) verified-availability matrix (§8).
+const PairMatrix = ({ od, os }) => (
+  <table style={{ borderCollapse: 'collapse', fontSize: 13 }}>
+    <thead>
+      <tr>
+        <th style={{ padding: '2px 10px', textAlign: 'right' }} />
+        <th style={{ padding: '2px 10px' }}>OD</th>
+        <th style={{ padding: '2px 10px' }}>OS</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style={{ padding: '2px 10px' }}>STOCK داخل مصر</td><td align="center">{yn(od.stock_egypt)}</td><td align="center">{yn(os.stock_egypt)}</td></tr>
+      <tr><td style={{ padding: '2px 10px' }}>STOCK خارج مصر</td><td align="center">{yn(od.stock_outside)}</td><td align="center">{yn(os.stock_outside)}</td></tr>
+      <tr><td style={{ padding: '2px 10px' }}>RX / تصنيع</td><td align="center">{yn(od.rx)}</td><td align="center">{yn(os.rx)}</td></tr>
+    </tbody>
+  </table>
+);
+
+// "أفضل حل موحد للزوج" + a pair price only when provenance is proven (§4/§8/§2).
+const PairAnswer = ({ pf }) => {
+  const priced = pf.price_pair != null;
+  const unproven = pf.provenance === 'unproven_mixed';
+  return (
+    <div>
+      <div>
+        <b>أفضل حل موحد للزوج: </b>
+        <Tag color={PAIR_STATUS_COLOR[pf.status]}>{PAIR_STATUS_AR[pf.status] || pf.status}</Tag>
+        {(pf.status === 'stock_egypt' || pf.status === 'stock_outside') &&
+          <span style={{ color: '#888', fontSize: 12 }}>— حسب الكتالوج</span>}
+        {pf.needs_review && <Tag color="volcano" style={{ marginRight: 6 }}>بحاجة لمراجعة</Tag>}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <b>السعر: </b>
+        {priced
+          ? <span>{`${pf.price_pair} ${pf.currency || ''} / Pair`}</span>
+          : unproven
+            ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
+            : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
+      </div>
+      {pf.source_pricing_ids && pf.source_pricing_ids.length > 0 && (
+        <div style={{ marginTop: 2, color: '#999', fontSize: 11 }}>
+          مصادر التسعير: {pf.source_pricing_ids.join(', ')}
+        </div>
+      )}
+      <div style={{ marginTop: 4, color: '#666', fontSize: 12 }}>{pf.reason}</div>
+    </div>
+  );
+};
 
 const CATEGORIES = [
   { value: 'single_vision', label: 'Single Vision' },
@@ -48,7 +105,7 @@ const CATEGORIES = [
   { value: 'digital', label: 'Digital' },
 ];
 
-const ANSWER_TYPE = { stock_egypt: 'success', stock_out_of_egypt: 'warning', rx_only: 'warning', none: 'error' };
+const ANSWER_TYPE = { stock_egypt: 'success', stock_out_of_egypt: 'warning', rx_only: 'warning', split: 'warning', none: 'error' };
 
 const Prescriptions = () => {
   const [prescriptions, setPrescriptions] = useState([]);
@@ -204,41 +261,62 @@ const Prescriptions = () => {
     },
   ];
 
+  // ---- V1.0.2 exact result = one commercial option (PerEyeProductResult) ----
   const resultColumns = [
-    { title: 'الشركة', key: 'company', width: 110, render: (_, r) => r.lens_model?.company?.name || '—' },
-    { title: 'الموديل', key: 'model', width: 150, render: (_, r) => r.lens_model?.name || '—' },
-    { title: 'المادة / Index', key: 'idx', width: 150, render: (_, r) => indexMaterialText(r.variant) },
-    { title: 'الفئة', key: 'category', width: 110, render: (_, r) => r.lens_model?.category || '—' },
-    { title: 'التصميم', key: 'design', width: 130, render: (_, r) => designText(r) },
-    { title: 'الطلاء', key: 'coating', width: 130, render: (_, r) => r.coating_name || r.coating_code || '—' },
-    { title: 'التقنية / اللون', key: 'tech', width: 130, render: (_, r) => r.color_variant || r.variant?.color_variant || '—' },
-    { title: 'سعر التجزئة (زوج)', key: 'price', width: 130, render: (_, r) => `${r.price_pair} ${r.currency}` },
-    { title: 'التوفر', key: 'availability', width: 90, render: (_, r) => availLabel(r.availability) },
-    { title: 'السوق', key: 'market', width: 120, render: (_, r) => r.market_scope || '—' },
-    { title: 'الدرجة', key: 'score', width: 70, render: (_, r) => r.match_score?.toFixed(1) },
-    { title: 'السبب', key: 'reason', render: (_, r) => <span style={{ fontSize: 12 }}>{r.reason}</span> },
+    { title: 'الشركة', key: 'company', width: 100, render: (_, r) => r.company_name || '—' },
+    { title: 'الموديل', key: 'model', width: 140, render: (_, r) => r.model_name || '—' },
+    { title: 'المادة / Index', key: 'idx', width: 150, render: (_, r) => indexMaterialText(r.material, r.index_value) },
+    { title: 'الفئة', key: 'category', width: 100, render: (_, r) => r.category || '—' },
+    { title: 'التصميم', key: 'design', width: 120, render: (_, r) => r.design_variant || '—' },
+    { title: 'الطلاء', key: 'coating', width: 120, render: (_, r) => r.coating_name || r.coating_code || '—' },
+    { title: 'التقنية / اللون', key: 'tech', width: 120, render: (_, r) => r.color_variant || '—' },
+    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best]}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', none: '—' })[r.od.best]}</Tag> },
+    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best]}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', none: '—' })[r.os.best]}</Tag> },
+    { title: 'حل الزوج', key: 'pair', width: 130, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
+    { title: 'سعر الزوج', key: 'price', width: 130, render: (_, r) => (r.pair_fulfillment.price_pair != null ? `${r.pair_fulfillment.price_pair} ${r.pair_fulfillment.currency || ''} / Pair` : <span style={{ color: '#cf1322' }}>غير محسوب</span>) },
+    { title: 'الدرجة', key: 'score', width: 64, render: (_, r) => r.match_score?.toFixed(1) },
   ];
 
-  const renderResultCard = (r, extra) => (
-    <Descriptions size="small" column={3} bordered style={{ marginBottom: 8 }}>
+  const rowKey = (r) => `${r.lens_model_id}-${r.variant_id}-${r.coating_id}`;
+
+  const renderResultCard = (r) => (
+    <>
+      <Descriptions size="small" column={3} bordered style={{ marginBottom: 10 }}>
+        <Descriptions.Item label="الشركة">{r.company_name || '—'}</Descriptions.Item>
+        <Descriptions.Item label="الموديل">{r.model_name}</Descriptions.Item>
+        <Descriptions.Item label="المادة / Index">{indexMaterialText(r.material, r.index_value)}</Descriptions.Item>
+        <Descriptions.Item label="الفئة">{r.category || '—'}</Descriptions.Item>
+        <Descriptions.Item label="التصميم">{r.design_variant || '—'}</Descriptions.Item>
+        <Descriptions.Item label="الطلاء">{r.coating_name || r.coating_code || '—'}</Descriptions.Item>
+        <Descriptions.Item label="التقنية / اللون">{r.color_variant || '—'}</Descriptions.Item>
+        <Descriptions.Item label="الدرجة">{r.match_score?.toFixed(1)}</Descriptions.Item>
+        <Descriptions.Item label="العملة">{r.currency}</Descriptions.Item>
+      </Descriptions>
+      <Row gutter={16}>
+        <Col><PairMatrix od={r.od} os={r.os} /></Col>
+        <Col flex="auto"><PairAnswer pf={r.pair_fulfillment} /></Col>
+      </Row>
+    </>
+  );
+
+  // ---- alternatives still carry a frozen-matcher LensMatchResult ----
+  const renderLensMatchCard = (r) => (
+    <Descriptions size="small" column={3} bordered>
       <Descriptions.Item label="الشركة">{r.lens_model?.company?.name || '—'}</Descriptions.Item>
       <Descriptions.Item label="الموديل">{r.lens_model?.name}</Descriptions.Item>
-      <Descriptions.Item label="المادة / Index">{indexMaterialText(r.variant)}</Descriptions.Item>
+      <Descriptions.Item label="المادة / Index">{indexMaterialText(r.variant?.material, r.variant?.index_value)}</Descriptions.Item>
       <Descriptions.Item label="الفئة">{r.lens_model?.category}</Descriptions.Item>
-      <Descriptions.Item label="التصميم">{designText(r)}</Descriptions.Item>
+      <Descriptions.Item label="التصميم">{r.design_variant || r.variant?.design_variant || '—'}</Descriptions.Item>
       <Descriptions.Item label="الطلاء">{r.coating_name || r.coating_code || '—'}</Descriptions.Item>
       <Descriptions.Item label="التقنية / اللون">{r.color_variant || r.variant?.color_variant || '—'}</Descriptions.Item>
       <Descriptions.Item label="سعر التجزئة (زوج)">{`${r.price_pair} ${r.currency}`}</Descriptions.Item>
       <Descriptions.Item label="التوفر">
         {availLabel(r.availability)}{' '}
-        <span style={{ color: '#888', fontSize: 12 }}>
-          {r.availability === 'stock' ? '— حسب الكتالوج' : '— RX / تصنيع'}
-        </span>
+        <span style={{ color: '#888', fontSize: 12 }}>{r.availability === 'stock' ? '— حسب الكتالوج' : '— RX / تصنيع'}</span>
       </Descriptions.Item>
       <Descriptions.Item label="السوق">{r.market_scope || '—'}</Descriptions.Item>
       <Descriptions.Item label="الدرجة">{r.match_score?.toFixed(1)}</Descriptions.Item>
       <Descriptions.Item label="السبب" span={2}>{r.reason}</Descriptions.Item>
-      {extra}
     </Descriptions>
   );
 
@@ -400,51 +478,75 @@ const Prescriptions = () => {
               description={sd.availability_answer.detail}
               style={{ marginBottom: 12 }}
             />
-            <Descriptions size="small" column={4} bordered style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="نتائج مطابقة">{sd.exact_total}</Descriptions.Item>
-              <Descriptions.Item label="STOCK مصر">{sd.stock_egypt_count}</Descriptions.Item>
-              <Descriptions.Item label="STOCK خارج مصر">{sd.stock_out_of_egypt_count}</Descriptions.Item>
-              <Descriptions.Item label="RX">{sd.rx_count}</Descriptions.Item>
-              <Descriptions.Item label="توصية Index" span={2}>{sd.index_recommendation}</Descriptions.Item>
+            <Descriptions size="small" column={5} bordered style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="خيارات الزوج">{sd.exact_total}</Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK مصر">{sd.stock_egypt_count}</Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK خارج مصر">{sd.stock_out_of_egypt_count}</Descriptions.Item>
+              <Descriptions.Item label="زوج RX">{sd.rx_count}</Descriptions.Item>
+              <Descriptions.Item label="مقسّم / غير متوفر">{sd.split_count}</Descriptions.Item>
+              <Descriptions.Item label="توصية Index" span={3}>{sd.index_recommendation}</Descriptions.Item>
               <Descriptions.Item label="توصية Aspherical" span={2}>{sd.aspherical_recommendation}</Descriptions.Item>
             </Descriptions>
 
             {best && (
-              <Card size="small" title="⭐ أفضل خيار" style={{ marginBottom: 12, borderColor: '#52c41a', borderWidth: 2 }}>
+              <Card size="small" title="⭐ أفضل خيار للزوج" style={{ marginBottom: 12, borderColor: '#52c41a', borderWidth: 2 }}>
                 {renderResultCard(best)}
               </Card>
             )}
 
             {sd.exact_total === 0 && <Empty description="لا توجد نتيجة مطابقة تماماً" />}
 
-            <Collapse defaultActiveKey={['stock_egypt', 'stock_out_of_egypt', 'rx']}>
+            <Collapse defaultActiveKey={['stock_egypt', 'stock_out_of_egypt', 'rx', 'split']}>
               {sd.groups.map((grp) => (
                 <Panel
                   key={grp.key}
                   header={
                     <span>
                       {grp.label} <Tag>{grp.count}</Tag>
-                      <span style={{ color: '#888', fontSize: 12, marginRight: 8 }}>
-                        {grp.availability === 'stock' ? 'حسب الكتالوج' : 'تصنيع حسب الطلب'}
-                      </span>
+                      <span style={{ color: '#888', fontSize: 12, marginRight: 8 }}>{grp.catalog_note}</span>
                     </span>
                   }
                 >
                   {grp.count === 0 ? (
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="لا شيء في هذه المجموعة" />
                   ) : (
-                    <Table
-                      dataSource={grp.results}
-                      columns={resultColumns}
-                      rowKey="source_pricing_id"
-                      size="small"
-                      pagination={grp.count > 20 ? { pageSize: 20 } : false}
-                      scroll={{ x: 1200 }}
-                    />
+                    <>
+                      <Table
+                        dataSource={grp.results}
+                        columns={resultColumns}
+                        rowKey={rowKey}
+                        size="small"
+                        pagination={grp.count > 15 ? { pageSize: 15 } : false}
+                        scroll={{ x: 1280 }}
+                        expandable={{
+                          expandedRowRender: (r) => (
+                            <Row gutter={16} style={{ padding: 8 }}>
+                              <Col><PairMatrix od={r.od} os={r.os} /></Col>
+                              <Col flex="auto"><PairAnswer pf={r.pair_fulfillment} /></Col>
+                            </Row>
+                          ),
+                        }}
+                      />
+                    </>
                   )}
                 </Panel>
               ))}
             </Collapse>
+
+            {sd.availability_intelligence && sd.availability_intelligence.length > 0 && (
+              <>
+                <Divider />
+                <h3>توفر نفس المنتج (خارج المطلوب)</h3>
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                  message={sd.availability_intelligence_note
+                    || 'نفس المنتج المطلوب متاح خارج التوفر/السوق/السعر المطلوب — ليس نتيجة مطابقة.'} />
+                {sd.availability_intelligence.map((r) => (
+                  <Card key={`intel-${rowKey(r)}`} size="small" style={{ marginBottom: 8, borderColor: '#faad14' }}>
+                    {renderResultCard(r)}
+                  </Card>
+                ))}
+              </>
+            )}
 
             {sd.alternatives && sd.alternatives.length > 0 && (
               <>
@@ -458,7 +560,7 @@ const Prescriptions = () => {
                       <Tag color="blue">سبب الاقتراح: {a.proximity_reason}</Tag>
                       {a.relaxed_filters.map((rf) => <Tag color="volcano" key={rf}>مختلف: {rf}</Tag>)}
                     </Space>
-                    {renderResultCard(a.result)}
+                    {renderLensMatchCard(a.result)}
                   </Card>
                 ))}
               </>

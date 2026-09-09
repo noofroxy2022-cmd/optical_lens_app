@@ -1,25 +1,38 @@
-"""V1.0.1 product-search layer: availability-first ordering, strict targeted
-AND filters, a direct availability answer, and a SEPARATE alternatives list.
+"""V1.0.2 product-search layer.
 
-This is a thin layer on top of the FROZEN optical matcher. It never changes
-optical eligibility or match_score - it only:
-  * applies the V1.0.1 targeted filters that `lens_matcher` does not already
-    read (lens_model_id / design_variant / color_variant) as strict AND,
-  * re-orders results availability-first (STOCK Egypt -> STOCK Out Of Egypt
-    -> RX; within a tier: match_score desc, then retail price asc),
-  * groups results into the three fixed buckets,
-  * derives the operator's availability answer,
-  * computes commercially-close alternatives (existing dimensions only) when a
-    targeted search has no exact result - kept in their own list, never mixed
-    with or labelled as exact matches.
+Two things sit on top of the FROZEN optical matcher (`lens_matcher`), which is
+never modified and whose eligibility maths / match_score are reused verbatim:
+
+  1. V1.0.1 - two search modes, strict targeted AND filters, availability-first
+     grouping, a direct availability answer, a SEPARATE alternatives list.
+
+  2. V1.0.2 - for every exact commercial option, evaluate OD and OS
+     INDEPENDENTLY against each pricing route (STOCK Egypt / STOCK Out Of Egypt
+     / RX), then decide the best VERIFIED way to fulfill the PAIR:
+        - a tier qualifies only when BOTH eyes are covered by the SAME
+          commercial option at that tier;
+        - a pair price is shown ONLY when one proven VariantPricing route (or
+          same-identity/same-tier OR-clause rows carrying one identical catalog
+          pair price) covers BOTH eyes - never /2, never half+half, never
+          STOCK+RX, never estimated;
+        - otherwise the pair is `split` (both eyes sourceable separately, no
+          proven mixed price) or `unavailable` (an eye has no route at all).
+
+  Per-eye eligibility calls `lens_matcher.check_power_range(pr, prescription,
+  eye)` directly - the existing G1/G2/G3 / transposition / principal-meridian /
+  RX-range logic, one eye at a time. Nothing optical is re-implemented here.
 """
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
 from app import schemas, models
 from app.lens_matcher import lens_matcher
+
+_RX = models.PricingAvailability.RX
+_STOCK = models.PricingAvailability.STOCK
+_TIERS = ("stock_egypt", "stock_outside", "rx")
 
 
 # ---------------------------------------------------------------- market / tier
@@ -32,139 +45,37 @@ def market_is_egypt(market_scope: Optional[str]) -> Optional[bool]:
     s = _norm(market_scope)
     if not s:
         return None
-    if "out" in s and "egypt" in s:      # "Out Of Egypt", "out_of_egypt"
+    if "out" in s and "egypt" in s:
         return False
     if s in ("egypt", "eg", "مصر"):
         return True
-    if "egypt" in s:                      # bare "Egypt ..." with no "out"
+    if "egypt" in s:
         return True
-    return False                          # any other named market -> treat as non-Egypt
+    return False
 
 
+def _row_route(p: models.VariantPricing) -> str:
+    if p.availability == _STOCK:
+        return "stock_egypt" if market_is_egypt(p.market_scope) is True else "stock_outside"
+    return "rx"
+
+
+# ------------------------------------------------------- V1.0.1 alternatives bits
 def result_tier(r: schemas.LensMatchResult) -> int:
-    """0 = STOCK Egypt, 1 = STOCK (non-Egypt / unspecified), 2 = RX."""
     if r.availability == "stock":
         return 0 if market_is_egypt(r.market_scope) is True else 1
     return 2
 
 
-def order_results(results: List[schemas.LensMatchResult]) -> List[schemas.LensMatchResult]:
-    """Authoritative availability-first order. No RX ever sits between STOCK
-    rows. Within a tier: existing match_score first, then retail price as a
-    deterministic tie-break."""
-    return sorted(
-        results,
-        key=lambda r: (result_tier(r), -float(r.match_score), Decimal(str(r.price_pair))),
-    )
-
-
-_GROUP_DEFS = [
-    ("stock_egypt", "🇪🇬 STOCK داخل مصر", "stock", "egypt"),
-    ("stock_out_of_egypt", "🌍 STOCK خارج مصر", "stock", "out_of_egypt"),
-    ("rx", "🏭 RX / تصنيع", "rx", None),
-]
-
-
-def build_groups(ordered: List[schemas.LensMatchResult]) -> List[schemas.LensSearchGroup]:
-    buckets = {"stock_egypt": [], "stock_out_of_egypt": [], "rx": []}
-    for r in ordered:
-        t = result_tier(r)
-        buckets["stock_egypt" if t == 0 else "stock_out_of_egypt" if t == 1 else "rx"].append(r)
-    groups = []
-    for key, label, avail, market in _GROUP_DEFS:
-        rows = buckets[key]
-        groups.append(schemas.LensSearchGroup(
-            key=key, label=label, availability=avail, market=market,
-            catalog_note="حسب الكتالوج" if avail == "stock" else "تصنيع حسب الطلب",
-            count=len(rows), results=rows,
-        ))
-    return groups
-
-
-# ---------------------------------------------------------------- targeted AND
-# filters that lens_matcher already enforces internally
-_MATCHER_NATIVE = {
-    "company_id", "category", "index_value", "min_index", "max_index",
-    "material", "design_type", "prefer_aspherical", "coating", "market_scope",
-    "availability", "max_price", "features", "is_active",
-}
-# extra V1.0.1 dimensions the matcher does not read - enforced here
-_IDENTITY_EXTRA = {"lens_model_id", "design_variant", "color_variant"}
-
-
-def _passes_extra_identity(r: schemas.LensMatchResult, f: schemas.LensFilters) -> bool:
-    if f.lens_model_id is not None and r.lens_model.id != f.lens_model_id:
-        return False
-    if f.design_variant:
-        if _norm(f.design_variant) not in _norm(r.design_variant or r.variant.design_variant):
-            return False
-    if f.color_variant:
-        if _norm(f.color_variant) not in _norm(r.color_variant or r.variant.color_variant):
-            return False
-    return True
-
-
-def _identity_filters_only(f: schemas.LensFilters) -> schemas.LensFilters:
-    """A copy with availability & market_scope dropped - used to answer 'does
-    this product exist for the Rx at all, in any tier?'."""
-    data = f.model_dump()
-    data["availability"] = None
-    data["market_scope"] = None
-    return schemas.LensFilters(**data)
-
-
-def _matcher_filters(f: Optional[schemas.LensFilters]) -> Optional[schemas.LensFilters]:
-    """Strip the extra V1.0.1 dimensions so we pass the matcher only what it
-    already understands (it would ignore them anyway; this keeps intent clear)."""
-    if f is None:
-        return None
-    data = f.model_dump()
-    for k in _IDENTITY_EXTRA:
-        data[k] = None
-    return schemas.LensFilters(**data)
-
-
-# ---------------------------------------------------------------- availability answer
-def _answer_from_tiers(has0: bool, has1: bool, has2: bool, *, requested_market_egypt: Optional[bool]) -> schemas.AvailabilityAnswer:
-    if has0:
-        return schemas.AvailabilityAnswer(
-            code="stock_egypt",
-            title="✅ متوفر STOCK داخل مصر لهذه الوصفة",
-            detail="حسب الكتالوج الحالي.",
-        )
-    if has1:
-        return schemas.AvailabilityAnswer(
-            code="stock_out_of_egypt",
-            title="🌍 غير متوفر داخل مصر — متوفر STOCK خارج مصر",
-            detail="حسب الكتالوج الحالي.",
-        )
-    if has2:
-        return schemas.AvailabilityAnswer(
-            code="rx_only",
-            title="🏭 غير متوفر STOCK — متاح RX / تصنيع",
-            detail="يُصنع حسب الطلب.",
-        )
-    return schemas.AvailabilityAnswer(
-        code="none",
-        title="❌ لا توجد عدسة بهذه المواصفات متوافقة مع الوصفة في الكتالوج الحالي",
-        detail="جرّب البحث التلقائي أو راجع أقرب البدائل." ,
-    )
-
-
-# ---------------------------------------------------------------- alternatives
 def _family_token(name: Optional[str]) -> str:
     return _norm((name or "").split()[0]) if name else ""
 
 
-def _alt_scored(
-    r: schemas.LensMatchResult, f: schemas.LensFilters,
-    ref_family: str,
-) -> Tuple[int, List[str], str]:
-    """proximity_score, relaxed_filters (unsatisfied requested dims), reason."""
+def _alt_scored(r: schemas.LensMatchResult, f: schemas.LensFilters,
+                ref_family: str) -> Tuple[int, List[str], str]:
     score = 0
     matches: List[str] = []
     relaxed: List[str] = []
-
     if f.company_id is not None:
         if r.lens_model.company_id == f.company_id:
             score += 3; matches.append("نفس الشركة")
@@ -207,7 +118,6 @@ def _alt_scored(
             score += 1
         else:
             relaxed.append(f"السعر ≤ {f.max_price}")
-    # requested availability / market that this alternative does not meet
     if f.availability is not None and getattr(f.availability, "value", f.availability) != "both":
         want = getattr(f.availability, "value", f.availability)
         if r.availability != want:
@@ -220,19 +130,14 @@ def _alt_scored(
             relaxed.append("السوق (مصر)" if want_eg else "السوق (خارج مصر)")
         else:
             score += 1
-    # closest availability tier is always a mild plus for STOCK Egypt
     score += (2 - result_tier(r))
     reason = "، ".join(matches) if matches else "أقرب بديل متوافق مع الوصفة"
     return score, relaxed, reason
 
 
-def compute_alternatives(
-    all_results: List[schemas.LensMatchResult],
-    exact_ids: set,
-    f: schemas.LensFilters,
-    limit: int = 15,
-) -> List[schemas.AlternativeResult]:
-    ref_family = ""  # resolved lazily from the first requested-model match if any
+def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: set,
+                         f: schemas.LensFilters, limit: int = 15) -> List[schemas.AlternativeResult]:
+    ref_family = ""
     if f.lens_model_id is not None:
         for r in all_results:
             if r.lens_model.id == f.lens_model_id:
@@ -244,93 +149,404 @@ def compute_alternatives(
             continue
         score, relaxed, reason = _alt_scored(r, f, ref_family)
         alts.append(schemas.AlternativeResult(
-            result=r, relaxed_filters=relaxed, proximity_reason=reason, proximity_score=score,
-        ))
-    alts.sort(key=lambda a: (
-        -a.proximity_score,
-        result_tier(a.result),
-        -float(a.result.match_score),
-        Decimal(str(a.result.price_pair)),
-    ))
+            result=r, relaxed_filters=relaxed, proximity_reason=reason, proximity_score=score))
+    alts.sort(key=lambda a: (-a.proximity_score, result_tier(a.result),
+                             -float(a.result.match_score), Decimal(str(a.result.price_pair))))
     return alts[:limit]
 
 
+# ---------------------------------------------------------------- per-eye engine
+def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> bool:
+    """One pricing row covers one eye when any of its OR PowerRanges is valid for
+    that eye, OR it is RX made-to-order (no explicit range) - identical to the
+    frozen matcher's own RX handling."""
+    ranges = list(p.power_ranges)
+    if not ranges:
+        return p.availability == _RX
+    return any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
+
+
+def _route_covers_eye(rows: List[models.VariantPricing], prescription: models.Prescription,
+                      eye: str) -> bool:
+    return any(_row_covers_eye(p, prescription, eye) for p in rows)
+
+
+def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
+                      prescription: models.Prescription, eye: str) -> schemas.EyeAvailability:
+    se = _route_covers_eye(routes["stock_egypt"], prescription, eye)
+    so = _route_covers_eye(routes["stock_outside"], prescription, eye)
+    rx = _route_covers_eye(routes["rx"], prescription, eye)
+    best = "stock_egypt" if se else "stock_outside" if so else "rx" if rx else "none"
+    return schemas.EyeAvailability(stock_egypt=se, stock_outside=so, rx=rx, best=best)
+
+
+def _same_pricing_offer(a: models.VariantPricing, b: models.VariantPricing) -> bool:
+    """Proven (from persistence) to be OR-clause rows of ONE catalog pricing
+    offer: same source extraction line AND same catalog AND identical commercial
+    facets. Distinct source_extraction_id => two separate catalog lines that only
+    happen to match; NOT provable as one offer."""
+    if a.id == b.id:
+        return True
+    return (a.source_extraction_id is not None
+            and a.source_extraction_id == b.source_extraction_id
+            and a.source_catalog_id == b.source_catalog_id
+            and a.variant_id == b.variant_id
+            and a.coating_id == b.coating_id
+            and a.availability == b.availability
+            and _norm(a.market_scope) == _norm(b.market_scope)
+            and a.price_pair == b.price_pair
+            and a.currency == b.currency)
+
+
+def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
+                      od: schemas.EyeAvailability, os_: schemas.EyeAvailability,
+                      prescription: models.Prescription) -> schemas.PairFulfillment:
+    od_ok = {"stock_egypt": od.stock_egypt, "stock_outside": od.stock_outside, "rx": od.rx}
+    os_ok = {"stock_egypt": os_.stock_egypt, "stock_outside": os_.stock_outside, "rx": os_.rx}
+    tier_label = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر", "rx": "RX / تصنيع"}
+
+    for tier in _TIERS:
+        if not (od_ok[tier] and os_ok[tier]):
+            continue
+        rows = routes[tier]
+        od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od")]
+        os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os")]
+
+        # (a) ONE VariantPricing row (its OR PowerRanges) covers BOTH eyes -> a
+        #     single proven pricing route. Its catalog pair price stands.
+        both = next((p for p in od_rows if _row_covers_eye(p, prescription, "os")), None)
+        if both is not None:
+            return schemas.PairFulfillment(
+                status=tier, price_pair=both.price_pair, currency=both.currency,
+                source_pricing_ids=[both.id], provenance="single_route", needs_review=False,
+                reason=f"مسار تسعير واحد يغطي العينين ({tier_label[tier]}) — سعر الزوج من الكتالوج.")
+
+        # (a2) OD and OS covered by DIFFERENT rows, but a proven OR-clause pair of
+        #      ONE catalog pricing offer (same source_extraction_id + facets).
+        proven = None
+        for a in od_rows:
+            for b in os_rows:
+                if a.id != b.id and _same_pricing_offer(a, b):
+                    proven = (a, b); break
+            if proven:
+                break
+        if proven is not None:
+            a, b = proven
+            return schemas.PairFulfillment(
+                status=tier, price_pair=a.price_pair, currency=a.currency,
+                source_pricing_ids=sorted({a.id, b.id}), provenance="single_route",
+                needs_review=False,
+                reason=(f"عرض تسعير واحد بعدة مدى قوة (OR) يغطي العينين ({tier_label[tier]}) — "
+                        f"سعر الزوج من الكتالوج."))
+
+        # (b) both eyes at this tier, but via SEPARATE VariantPricing rows whose
+        #     belonging to one catalog offer cannot be proven -> NO pair price.
+        ids = sorted({p.id for p in od_rows} | {p.id for p in os_rows})
+        return schemas.PairFulfillment(
+            status=tier, price_pair=None, currency=None,
+            source_pricing_ids=ids, provenance="unproven_mixed", needs_review=True,
+            reason=(f"العينان متاحتان ضمن {tier_label[tier]} لكن عبر صفوف تسعير منفصلة "
+                    f"لنفس المنتج؛ لا يمكن إثبات أنها نفس عرض السعر الواحد — سعر الزوج غير "
+                    f"مثبت (unproven mixed pricing provenance). يحتاج مراجعة."))
+
+    # no single tier covers both eyes
+    od_any = od.best != "none"
+    os_any = os_.best != "none"
+    if od_any and os_any:
+        return schemas.PairFulfillment(
+            status="split", price_pair=None, currency=None, source_pricing_ids=[],
+            provenance="none", needs_review=False,
+            reason=("يمكن توفير العينين من مصدرين مختلفين، لكن سعر الزوج المختلط غير مثبت "
+                    "في الكتالوج."))
+    missing = "العين اليمنى (OD)" if not od_any else "العين اليسرى (OS)"
+    if not od_any and not os_any:
+        missing = "كلتا العينين"
+    return schemas.PairFulfillment(
+        status="unavailable", price_pair=None, currency=None, source_pricing_ids=[],
+        provenance="none", needs_review=False,
+        reason=f"{missing} غير متوافقة مع أي مسار متوفر لهذا المنتج في الكتالوج الحالي.")
+
+
+# --------------------------------------------------- commercial-option gathering
+_IDENTITY_EXTRA = ("lens_model_id", "design_variant", "color_variant")
+
+
+def _probe_filters(f: Optional[schemas.LensFilters]) -> Optional[schemas.LensFilters]:
+    """What the matcher's own candidate gather / native-filter check sees: the
+    identity dimensions it already understands, WITHOUT availability / market /
+    max_price / the V1.0.2-only dims (those are applied afterwards so the full
+    OD/OS/tier matrix stays visible)."""
+    if f is None:
+        return None
+    data = f.model_dump()
+    for k in ("availability", "market_scope", "max_price", *_IDENTITY_EXTRA):
+        data[k] = None
+    return schemas.LensFilters(**data)
+
+
+def _passes_extra_identity(variant: models.LensVariant, f: schemas.LensFilters) -> bool:
+    if f.lens_model_id is not None and variant.lens_model_id != f.lens_model_id:
+        return False
+    if f.design_variant and _norm(f.design_variant) not in _norm(variant.design_variant):
+        return False
+    if f.color_variant and _norm(f.color_variant) not in _norm(variant.color_variant):
+        return False
+    return True
+
+
+def _identity_key(p: models.VariantPricing):
+    v = p.variant
+    m = v.lens_model
+    return (m.company_id, m.id, v.id, round(v.index_value, 3),
+            getattr(v.material, "value", v.material),
+            getattr(m.category, "value", m.category),
+            _norm(v.design_variant), _norm(v.color_variant),
+            p.coating_id, p.currency)
+
+
+def _per_eye_results(db: Session, prescription: models.Prescription,
+                     filters: Optional[schemas.LensFilters], req: schemas.ProductSearchRequest,
+                     rec_index: float, need_asph: bool,
+                     ) -> List[schemas.PerEyeProductResult]:
+    probe = _probe_filters(filters)
+    rows = lens_matcher._current_pricing_candidates(db, probe)
+
+    groups: Dict[tuple, List[models.VariantPricing]] = {}
+    for p in rows:
+        v = p.variant
+        if v is None or not v.is_active:
+            continue
+        m = v.lens_model
+        if probe is not None and not lens_matcher._passes_commercial_and_optical_filters(v, m, p, probe):
+            continue
+        if filters is not None and not _passes_extra_identity(v, filters):
+            continue
+        groups.setdefault(_identity_key(p), []).append(p)
+
+    out: List[schemas.PerEyeProductResult] = []
+    want_specific_product = bool(filters and filters.lens_model_id is not None)
+    for _key, opt_rows in groups.items():
+        routes = {
+            "stock_egypt": [p for p in opt_rows if _row_route(p) == "stock_egypt"],
+            "stock_outside": [p for p in opt_rows if _row_route(p) == "stock_outside"],
+            "rx": [p for p in opt_rows if _row_route(p) == "rx"],
+        }
+        od = _eye_availability(routes, prescription, "od")
+        os_ = _eye_availability(routes, prescription, "os")
+        pf = _pair_fulfillment(routes, od, os_, prescription)
+
+        if pf.status == "unavailable" and not want_specific_product:
+            continue  # automatic / non-specific: drop options no eye combo can use
+
+        sample = opt_rows[0]
+        v = sample.variant
+        m = v.lens_model
+        # score: reuse the frozen calculator on the fulfilling route's row + a
+        # covering range (falls back to a representative row for split/unavailable)
+        score_row = None
+        if pf.source_pricing_ids:
+            score_row = next((p for p in opt_rows if p.id in pf.source_pricing_ids), None)
+        if score_row is None:
+            score_row = (routes["stock_egypt"] or routes["stock_outside"]
+                         or routes["rx"] or opt_rows)[0]
+        score_range = lens_matcher._best_matching_range(list(score_row.power_ranges), prescription)
+        score = lens_matcher.calculate_match_score(
+            m, v, score_row, score_range, prescription, filters,
+            req.prefer_stock, req.prefer_aspherical)
+
+        bits = [f"الزوج: {_STATUS_AR.get(pf.status, pf.status)}",
+                f"OD: {_EYEBEST_AR[od.best]}", f"OS: {_EYEBEST_AR[os_.best]}"]
+        if abs(v.index_value - rec_index) < 0.1:
+            bits.append(f"Index {v.index_value} مثالي")
+        if v.is_aspherical and need_asph:
+            bits.append("Aspherical مناسب")
+
+        out.append(schemas.PerEyeProductResult(
+            company_id=m.company_id, company_name=(m.company.name if m.company else None),
+            lens_model_id=m.id, model_name=m.name,
+            category=getattr(m.category, "value", m.category),
+            variant_id=v.id, index_value=v.index_value,
+            material=getattr(v.material, "value", v.material),
+            design_variant=v.design_variant, color_variant=v.color_variant,
+            coating_id=sample.coating_id,
+            coating_code=(sample.coating.code if sample.coating else None),
+            coating_name=(sample.coating.name if sample.coating else None),
+            currency=sample.currency, match_score=score, reason=" | ".join(bits),
+            od=od, os=os_, pair_fulfillment=pf))
+    return out
+
+
+_STATUS_ORDER = {"stock_egypt": 0, "stock_outside": 1, "rx": 2, "split": 3, "unavailable": 3}
+_STATUS_AR = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر",
+              "rx": "RX / تصنيع", "split": "مصدر مقسّم (غير موحد)", "unavailable": "غير متوفر"}
+_EYEBEST_AR = {"stock_egypt": "STOCK مصر", "stock_outside": "STOCK خارج مصر",
+               "rx": "RX / تصنيع", "none": "غير متوفر"}
+
+
+def _order_key(r: schemas.PerEyeProductResult):
+    pf = r.pair_fulfillment
+    price = pf.price_pair
+    return (_STATUS_ORDER.get(pf.status, 3),
+            0 if pf.provenance == "single_route" else 1,   # proven-price pairs first within a tier
+            -float(r.match_score),
+            Decimal(str(price)) if price is not None else Decimal("999999999"))
+
+
+_GROUP_DEFS = [
+    ("stock_egypt", "🇪🇬 زوج STOCK داخل مصر", "stock", "egypt"),
+    ("stock_out_of_egypt", "🌍 زوج STOCK خارج مصر", "stock", "out_of_egypt"),
+    ("rx", "🏭 زوج RX / تصنيع", "rx", None),
+    ("split", "⚠️ مصدر غير موحد / غير متوفر للزوج", "mixed", None),
+]
+_STATUS_TO_GROUP = {"stock_egypt": "stock_egypt", "stock_outside": "stock_out_of_egypt",
+                    "rx": "rx", "split": "split", "unavailable": "split"}
+
+
+def _build_groups(ordered: List[schemas.PerEyeProductResult]) -> List[schemas.LensSearchGroup]:
+    buckets: Dict[str, List[schemas.PerEyeProductResult]] = {
+        "stock_egypt": [], "stock_out_of_egypt": [], "rx": [], "split": []}
+    for r in ordered:
+        buckets[_STATUS_TO_GROUP[r.pair_fulfillment.status]].append(r)
+    groups = []
+    for key, label, avail, market in _GROUP_DEFS:
+        rows = buckets[key]
+        groups.append(schemas.LensSearchGroup(
+            key=key, label=label, availability=avail, market=market,
+            catalog_note=("حسب الكتالوج" if avail == "stock"
+                          else "تصنيع حسب الطلب" if avail == "rx"
+                          else "سعر الزوج غير مثبت"),
+            count=len(rows), results=rows))
+    return groups
+
+
+# ---------------------------------------------------------------- answer
+def _answer(ordered: List[schemas.PerEyeProductResult]) -> schemas.AvailabilityAnswer:
+    statuses = {r.pair_fulfillment.status for r in ordered}
+    if "stock_egypt" in statuses:
+        return schemas.AvailabilityAnswer(code="stock_egypt",
+            title="✅ الزوج متوفر STOCK داخل مصر لهذه الوصفة", detail="حسب الكتالوج الحالي.")
+    if "stock_outside" in statuses:
+        return schemas.AvailabilityAnswer(code="stock_out_of_egypt",
+            title="🌍 الزوج غير متوفر داخل مصر — متوفر STOCK خارج مصر", detail="حسب الكتالوج الحالي.")
+    if "rx" in statuses:
+        return schemas.AvailabilityAnswer(code="rx_only",
+            title="🏭 الزوج غير متوفر STOCK — متاح RX / تصنيع", detail="يُصنع حسب الطلب.")
+    if "split" in statuses:
+        return schemas.AvailabilityAnswer(code="split",
+            title="⚠️ لا يوجد مصدر موحد مؤكد للزوج بهذه المواصفات",
+            detail="يمكن توفير كل عين على حدة؛ سعر الزوج المختلط غير مثبت في الكتالوج.")
+    return schemas.AvailabilityAnswer(code="none",
+        title="❌ لا توجد عدسة بهذه المواصفات متوافقة مع الوصفة في الكتالوج الحالي",
+        detail="جرّب البحث التلقائي أو راجع أقرب البدائل.")
+
+
+# ---------------------------------------------------------------- exact gate
+def _passes_targeted_gate(r: schemas.PerEyeProductResult, f: schemas.LensFilters) -> bool:
+    """availability / market / max_price applied to the PAIR fulfillment (strict
+    AND, never relaxed)."""
+    st = r.pair_fulfillment.status
+    if f.max_price is not None:
+        p = r.pair_fulfillment.price_pair
+        if p is None or p > Decimal(str(f.max_price)):
+            return False
+    if f.availability is not None:
+        want = getattr(f.availability, "value", f.availability)
+        if want == "stock" and st not in ("stock_egypt", "stock_outside"):
+            return False
+        if want == "rx" and st != "rx":
+            return False
+    if f.market_scope:
+        want_eg = market_is_egypt(f.market_scope)
+        if want_eg is True and st != "stock_egypt":
+            return False
+        if want_eg is False and st not in ("stock_outside", "rx"):
+            return False
+    return True
+
+
 # ---------------------------------------------------------------- entry point
-def search(
-    db: Session,
-    prescription: models.Prescription,
-    req: schemas.ProductSearchRequest,
-) -> schemas.ProductSearchResponse:
+def search(db: Session, prescription: models.Prescription,
+           req: schemas.ProductSearchRequest) -> schemas.ProductSearchResponse:
     targeted = (req.mode or "automatic").strip().lower() == "targeted"
     filters = req.filters if targeted else None
 
-    # 1) FROZEN matcher - full automatic candidate set for this prescription
-    all_results, _sc, _rc, index_desc, aspherical_desc = lens_matcher.match_lenses(
-        db, prescription, None, req.prefer_stock, req.prefer_aspherical
-    )
+    max_sph = max(abs(prescription.od_sph), abs(prescription.os_sph))
+    max_cyl = max(abs(prescription.od_cyl or 0), abs(prescription.os_cyl or 0))
+    rec_index, index_desc = lens_matcher.recommender.recommend_index(max_sph)
+    need_asph, aspherical_desc = lens_matcher.recommender.recommend_aspherical(max_sph, max_cyl)
+
+    # per-eye / pair analysis for every commercial option that satisfies the
+    # IDENTITY filters (company / product / index / category / design / coating /
+    # colour-technology). Availability / market / max_price are NOT applied here.
+    options = _per_eye_results(db, prescription, filters, req, rec_index, need_asph)
+
+    alternatives: List[schemas.AlternativeResult] = []
+    alt_note = None
+    intel: List[schemas.PerEyeProductResult] = []
+    intel_note = None
 
     if not targeted or filters is None:
-        exact = list(all_results)
-        answer_pool = exact
-        alternatives: List[schemas.AlternativeResult] = []
-        alt_note = None
+        exact = [r for r in options if r.pair_fulfillment.status != "unavailable"]
     else:
-        # 2a) matcher-native filters (strict) via a second matcher pass -> honours
-        #     company/index/category/coating/market/availability/max_price exactly
-        native, _s2, _r2, _i2, _a2 = lens_matcher.match_lenses(
-            db, prescription, _matcher_filters(filters), req.prefer_stock, req.prefer_aspherical
-        )
-        # 2b) extra V1.0.1 identity dimensions (strict AND) applied here
-        exact = [r for r in native if _passes_extra_identity(r, filters)]
+        # ALL requested targeted filters stay strict AND - availability / market /
+        # max_price gate the pair fulfillment and are NEVER relaxed, not even for
+        # a pinned product.
+        gated = bool(filters.availability is not None or filters.market_scope or filters.max_price is not None)
+        # a pinned product with no availability/market/price gate may surface even
+        # when an eye is impossible, so §7's per-eye matrix + warning can show.
+        keep_unavailable = filters.lens_model_id is not None and not gated
+        exact = [r for r in options
+                 if _passes_targeted_gate(r, filters)
+                 and (keep_unavailable or r.pair_fulfillment.status != "unavailable")]
 
-        # identity-only pool (drops availability & market) -> answers "does this
-        # product exist for the Rx at all, in any tier?"
-        id_only = _identity_filters_only(filters)
-        id_native, *_ = lens_matcher.match_lenses(
-            db, prescription, _matcher_filters(id_only), req.prefer_stock, req.prefer_aspherical
-        )
-        answer_pool = [r for r in id_native if _passes_extra_identity(r, id_only)]
+        if not exact and gated:
+            # same requested commercial option(s), just outside the requested
+            # availability / market / price - shown SEPARATELY as availability
+            # intelligence, never counted as exact, never relaxing the filters.
+            intel = sorted(
+                [r for r in options if r.pair_fulfillment.status != "unavailable"],
+                key=_order_key)
+            if intel:
+                intel_note = ("المطلوب غير متوفر بهذه المواصفات؛ هذا توفر نفس المنتج المطلوب "
+                              "خارج التوفر/السوق/السعر المطلوب — ليس نتيجة مطابقة.")
 
-        alternatives = []
-        alt_note = None
-        if not exact and req.include_alternatives:
-            exact_ids = {r.source_pricing_id for r in exact}
-            alternatives = compute_alternatives(all_results, exact_ids, filters)
+        if not exact and not intel and req.include_alternatives:
+            all_results, *_ = lens_matcher.match_lenses(
+                db, prescription, None, req.prefer_stock, req.prefer_aspherical)
+            alternatives = compute_alternatives(all_results, set(), filters)
             if alternatives:
-                alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل "
-                            "تجارياً وهي ليست مطابقات تامة.")
+                alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "
+                            "وهي ليست مطابقات تامة.")
 
-    # 3) availability answer from the answer pool's tiers
-    has0 = any(result_tier(r) == 0 for r in answer_pool)
-    has1 = any(result_tier(r) == 1 for r in answer_pool)
-    has2 = any(result_tier(r) == 2 for r in answer_pool)
-    req_market_eg = market_is_egypt(filters.market_scope) if (targeted and filters) else None
-    answer = _answer_from_tiers(has0, has1, has2, requested_market_egypt=req_market_eg)
-    # targeted: nothing at all after ALL filters, but the product exists in
-    # another tier -> keep the informative tier answer, it is carried by the
-    # alternatives list below.
-    if targeted and filters is not None and not exact and not answer_pool:
-        answer = _answer_from_tiers(False, False, False, requested_market_egypt=req_market_eg)
+    ordered = sorted(exact, key=_order_key)
+    groups = _build_groups(ordered)
+    answer = _answer(ordered)
 
-    ordered = order_results(exact)
-    groups = build_groups(ordered)
-    stock_eg = sum(1 for r in ordered if result_tier(r) == 0)
-    stock_ooe = sum(1 for r in ordered if result_tier(r) == 1)
-    rx_n = sum(1 for r in ordered if result_tier(r) == 2)
+    if not ordered and intel:
+        want_bits = []
+        if filters and filters.availability is not None:
+            want_bits.append(getattr(filters.availability, "value", filters.availability).upper())
+        if filters and filters.market_scope:
+            want_bits.append(filters.market_scope)
+        want = " / ".join(want_bits) if want_bits else "المواصفات المطلوبة"
+        answer = schemas.AvailabilityAnswer(
+            code="none",
+            title=f"❌ غير متوفر بهذه المواصفات ({want})",
+            detail="راجع «توفر نفس المنتج» أدناه — نفس المنتج متاح خارج المطلوب.")
+
+    counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "rx": 0, "split": 0}
+    for r in ordered:
+        counts[_STATUS_TO_GROUP[r.pair_fulfillment.status]] += 1
 
     return schemas.ProductSearchResponse(
         prescription=schemas.PrescriptionResponse.model_validate(prescription),
         mode="targeted" if targeted else "automatic",
         transposition_applied=prescription.transposition_applied,
-        index_recommendation=index_desc,
-        aspherical_recommendation=aspherical_desc,
-        availability_answer=answer,
-        exact_total=len(ordered),
-        best_match=ordered[0] if ordered else None,
-        groups=groups,
-        stock_egypt_count=stock_eg,
-        stock_out_of_egypt_count=stock_ooe,
-        rx_count=rx_n,
-        alternatives=alternatives,
-        alternatives_note=alt_note,
-    )
+        index_recommendation=index_desc, aspherical_recommendation=aspherical_desc,
+        availability_answer=answer, exact_total=len(ordered),
+        best_match=ordered[0] if ordered else None, groups=groups,
+        stock_egypt_count=counts["stock_egypt"],
+        stock_out_of_egypt_count=counts["stock_out_of_egypt"],
+        rx_count=counts["rx"], split_count=counts["split"],
+        alternatives=alternatives, alternatives_note=alt_note,
+        availability_intelligence=intel, availability_intelligence_note=intel_note)
