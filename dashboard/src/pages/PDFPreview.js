@@ -65,6 +65,7 @@ const PDFPreview = () => {
   const [loadingExtractions, setLoadingExtractions] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkConfirming, setBulkConfirming] = useState(false);
+  const [approving, setApproving] = useState(false);
 
   useEffect(() => {
     loadCompanies();
@@ -143,6 +144,35 @@ const PDFPreview = () => {
       loadExtractions(catalogId);
     } catch (error) {
       message.error(errMsg(error, 'فشل رفض الصف'));
+    }
+  };
+
+  // Commercial confirmation only writes rows that have passed row-level review
+  // approval first. Approve every clean pending row in one action so the operator
+  // is not clicking "موافقة" hundreds of times; rows the backend rejects (e.g.
+  // unresolved coating) stay pending and are reported, not forced.
+  const handleApproveAllPending = async () => {
+    const pend = extractions.filter((e) => e.status === 'pending');
+    if (pend.length === 0) return;
+    setApproving(true);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (let i = 0; i < pend.length; i += 10) {
+        const chunk = pend.slice(i, i + 10);
+        const outcomes = await Promise.allSettled(chunk.map((e) => pdfImportAPI.confirm(e.id)));
+        outcomes.forEach((o) => (o.status === 'fulfilled' ? (ok += 1) : (failed += 1)));
+      }
+      if (failed === 0) {
+        message.success(`تم اعتماد ${ok} صف للمراجعة`);
+      } else {
+        message.warning(`تم اعتماد ${ok} صف؛ تعذّر اعتماد ${failed} (طلاء أو بيانات غير محسومة - عدّلها ثم أعد المحاولة)`);
+      }
+      await loadExtractions(catalogId);
+    } catch (error) {
+      message.error(errMsg(error, 'فشل اعتماد الصفوف'));
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -300,11 +330,21 @@ const PDFPreview = () => {
       {catalogId && (
         <>
           <Row gutter={16} style={{ marginBottom: 16 }}>
-            <Col span={6}><Card size="small"><Statistic title="قيد المراجعة" value={pendingCount} valueStyle={{ color: '#faad14' }} /></Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="يحتاج مراجعة" value={needsReviewCount} valueStyle={{ color: '#d4380d' }} /></Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="مؤكد" value={confirmedCount} valueStyle={{ color: '#52c41a' }} /></Card></Col>
-            <Col span={6}>
+            <Col span={5}><Card size="small"><Statistic title="قيد المراجعة" value={pendingCount} valueStyle={{ color: '#faad14' }} /></Card></Col>
+            <Col span={5}><Card size="small"><Statistic title="يحتاج مراجعة" value={needsReviewCount} valueStyle={{ color: '#d4380d' }} /></Card></Col>
+            <Col span={5}><Card size="small"><Statistic title="مؤكد" value={confirmedCount} valueStyle={{ color: '#52c41a' }} /></Card></Col>
+            <Col span={9}>
               <Card size="small">
+                <Button
+                  block
+                  icon={<CheckOutlined />}
+                  loading={approving}
+                  onClick={handleApproveAllPending}
+                  disabled={pendingCount === 0}
+                  style={{ marginBottom: 8 }}
+                >
+                  اعتماد كل الصفوف المعلّقة ({pendingCount})
+                </Button>
                 <Button
                   type="primary"
                   block
@@ -315,6 +355,9 @@ const PDFPreview = () => {
                 >
                   تأكيد الكتالوج
                 </Button>
+                <div style={{ marginTop: 6, color: '#888', fontSize: 12 }}>
+                  اعتمد الصفوف المعلّقة أولاً، ثم أكّد الكتالوج لكتابة الأسعار التجارية.
+                </div>
               </Card>
             </Col>
           </Row>
