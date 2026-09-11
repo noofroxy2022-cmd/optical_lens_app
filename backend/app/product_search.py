@@ -137,6 +137,7 @@ def _alt_scored(r: schemas.LensMatchResult, f: schemas.LensFilters,
 
 def _proven_eligible_for_alternatives(
     db: Session, all_results: List[schemas.LensMatchResult], prescription: models.Prescription,
+    applicability_key: Optional[str] = None,
 ) -> List[schemas.LensMatchResult]:
     """Phase 3C safety gate: alternatives must be prescription-safe too. A
     candidate is only a USABLE alternative when its underlying VariantPricing
@@ -166,8 +167,8 @@ def _proven_eligible_for_alternatives(
         vp = rows.get(r.source_pricing_id)
         if vp is None:
             continue  # defensive: row vanished between the match and this lookup
-        if (_row_eye_status(vp, prescription, "od") == "eligible"
-                and _row_eye_status(vp, prescription, "os") == "eligible"):
+        if (_row_eye_status(vp, prescription, "od", applicability_key) == "eligible"
+                and _row_eye_status(vp, prescription, "os", applicability_key) == "eligible"):
             out.append(r)
     return out
 
@@ -196,7 +197,36 @@ def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: 
 _UNRESOLVED = models.PowerEligibilityStatus.UNRESOLVED
 
 
-def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> str:
+def _applicable_ranges(p: models.VariantPricing, applicability_key: Optional[str]):
+    """The PowerRange rows of `p` that an explicit subtype filter leaves in
+    play. `applicability_key=None` (the default, and the ONLY case for every
+    manufacturer that never splits one price into optical sub-options) never
+    filters anything - full backward compatibility.
+
+    When a caller DOES ask for one specific sub-option (e.g. "POL"):
+      - if this row genuinely offers that sub-option (some range carries that
+        exact key), narrow to just those ranges - the other sub-option's
+        range(s) must never be consulted for this eye.
+      - if this row is split into sub-options but NONE of them is the one
+        requested, there is nothing to evaluate for the requested subtype -
+        return an empty list (the caller then correctly reports ineligible,
+        never falling back to "no range -> any power").
+      - if this row was never split at all (no ranges, or every range has
+        applicability_key=None), the filter simply does not apply to it -
+        return the ranges unchanged so ordinary (non-ZEISS-split) rows are
+        completely unaffected by a filter that has no meaning for them.
+    """
+    ranges = list(p.power_ranges)
+    if applicability_key is None:
+        return ranges
+    keys_present = {pr.applicability_key for pr in ranges}
+    if keys_present in (set(), {None}):
+        return ranges   # never split - filter not applicable, unchanged
+    return [pr for pr in ranges if pr.applicability_key == applicability_key]
+
+
+def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription, eye: str,
+                    applicability_key: Optional[str] = None) -> str:
     """Tri-state optical eligibility of ONE pricing row for ONE eye:
     "eligible" | "ineligible" | "unknown".
 
@@ -207,11 +237,16 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
     when `power_eligibility` is UNRESTRICTED (the catalog genuinely states no
     restriction, or predates Phase 3 and defaults there). When it is
     UNRESOLVED - the catalog's real power limits are simply not modeled yet -
-    eligibility is UNKNOWN, never silently True."""
-    ranges = list(p.power_ranges)
+    eligibility is UNKNOWN, never silently True.
+
+    `applicability_key`, when given, restricts evaluation to that one optical
+    sub-option's range(s) only - see _applicable_ranges."""
+    ranges = _applicable_ranges(p, applicability_key)
     if ranges:
         ok = any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
         return "eligible" if ok else "ineligible"
+    if list(p.power_ranges):
+        return "ineligible"       # split row that doesn't offer the requested subtype at all
     if p.availability != _RX:
         return "ineligible"       # STOCK with no range is not a real commercial row
     if getattr(p, "power_eligibility", None) == _UNRESOLVED:
@@ -219,18 +254,53 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
     return "eligible"              # genuinely unrestricted RX made-to-order
 
 
-def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> bool:
+def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str,
+                    applicability_key: Optional[str] = None) -> bool:
     """Backward-compatible boolean view: True only for a PROVEN-eligible row."""
-    return _row_eye_status(p, prescription, eye) == "eligible"
+    return _row_eye_status(p, prescription, eye, applicability_key) == "eligible"
+
+
+def _row_eye_proving_keys(p: models.VariantPricing, prescription: models.Prescription,
+                          eye: str, applicability_key: Optional[str] = None) -> frozenset:
+    """Which PowerRange.applicability_key value(s) prove this eye eligible for
+    this ONE pricing row - None for an ordinary undifferentiated range (the
+    overwhelming majority: HOYA, and every non-split ZEISS row). A row can
+    carry MULTIPLE optically distinct sub-options under one price (e.g.
+    ZEISS's single-priced "Polarized / AdaptiveSun" offer, whose POL and
+    AdaptiveSun PowerRanges differ) - this reports exactly which of them this
+    eye's Rx actually satisfies, so pair-fulfillment can require the SAME
+    sub-option on both eyes rather than silently letting one eye's POL match
+    and the other eye's AdaptiveSun match count as "the same offer covers
+    both". Empty frozenset = not proven eligible via any range on this row.
+
+    A row with NO PowerRange at all (the ordinary RX-made-to-order / STOCK-
+    with-no-explicit-range shape most HOYA rows use) has no range to report
+    a key for, but IS eligible via _row_eye_status's existing fallback -
+    that case reports {None} (the universal "no sub-option" key) rather
+    than an empty set, so it still intersects correctly against the same
+    row's other eye and against any other undifferentiated (key=None) row.
+
+    `applicability_key`, when given, restricts consideration to that one
+    sub-option, exactly like _row_eye_status."""
+    ranges = _applicable_ranges(p, applicability_key)
+    if not ranges:
+        if list(p.power_ranges):
+            return frozenset()   # split row, requested subtype not offered here
+        return frozenset({None}) if _row_eye_status(p, prescription, eye) == "eligible" else frozenset()
+    return frozenset(
+        pr.applicability_key
+        for pr in ranges
+        if lens_matcher.check_power_range(pr, prescription, eye)[0]
+    )
 
 
 def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Prescription,
-                      eye: str) -> str:
+                      eye: str, applicability_key: Optional[str] = None) -> str:
     """Tri-state aggregation across every row of one route for one eye:
     "eligible" if ANY row is proven eligible (an eligible row always wins over
     an unknown one elsewhere in the same route); else "unknown" if ANY row is
     unresolved; else "ineligible"."""
-    statuses = [_row_eye_status(p, prescription, eye) for p in rows]
+    statuses = [_row_eye_status(p, prescription, eye, applicability_key) for p in rows]
     if any(s == "eligible" for s in statuses):
         return "eligible"
     if any(s == "unknown" for s in statuses):
@@ -239,15 +309,16 @@ def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Pr
 
 
 def _route_covers_eye(rows: List[models.VariantPricing], prescription: models.Prescription,
-                      eye: str) -> bool:
-    return _route_eye_status(rows, prescription, eye) == "eligible"
+                      eye: str, applicability_key: Optional[str] = None) -> bool:
+    return _route_eye_status(rows, prescription, eye, applicability_key) == "eligible"
 
 
 def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
-                      prescription: models.Prescription, eye: str) -> schemas.EyeAvailability:
-    se = _route_eye_status(routes["stock_egypt"], prescription, eye)
-    so = _route_eye_status(routes["stock_outside"], prescription, eye)
-    rx = _route_eye_status(routes["rx"], prescription, eye)
+                      prescription: models.Prescription, eye: str,
+                      applicability_key: Optional[str] = None) -> schemas.EyeAvailability:
+    se = _route_eye_status(routes["stock_egypt"], prescription, eye, applicability_key)
+    so = _route_eye_status(routes["stock_outside"], prescription, eye, applicability_key)
+    rx = _route_eye_status(routes["rx"], prescription, eye, applicability_key)
     best = ("stock_egypt" if se == "eligible" else
             "stock_outside" if so == "eligible" else
             "rx" if rx == "eligible" else
@@ -278,7 +349,8 @@ def _same_pricing_offer(a: models.VariantPricing, b: models.VariantPricing) -> b
 
 def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                       od: schemas.EyeAvailability, os_: schemas.EyeAvailability,
-                      prescription: models.Prescription) -> schemas.PairFulfillment:
+                      prescription: models.Prescription,
+                      applicability_key: Optional[str] = None) -> schemas.PairFulfillment:
     od_ok = {"stock_egypt": od.stock_egypt, "stock_outside": od.stock_outside, "rx": od.rx}
     os_ok = {"stock_egypt": os_.stock_egypt, "stock_outside": os_.stock_outside, "rx": os_.rx}
     tier_label = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر", "rx": "RX / تصنيع"}
@@ -287,35 +359,65 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
         if not (od_ok[tier] and os_ok[tier]):
             continue
         rows = routes[tier]
-        od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od")]
-        os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os")]
+        od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od", applicability_key)]
+        os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os", applicability_key)]
 
         # (a) ONE VariantPricing row (its OR PowerRanges) covers BOTH eyes -> a
-        #     single proven pricing route. Its catalog pair price stands.
-        both = next((p for p in od_rows if _row_covers_eye(p, prescription, "os")), None)
+        #     single proven pricing route. Its catalog pair price stands -
+        #     PROVIDED both eyes are proven via the SAME optical sub-option
+        #     when the row carries more than one (applicability_key). A row
+        #     with only undifferentiated ranges (every key None) always
+        #     matches here unchanged; one whose OD proof and OS proof come
+        #     from DIFFERENT non-overlapping sub-options (e.g. OD via "POL",
+        #     OS via "AdaptiveSun" under one "Polarized / AdaptiveSun" offer)
+        #     must NOT be treated as proving this row for the pair. An
+        #     explicit applicability_key filter narrows BOTH eyes to that one
+        #     sub-option from the start (via od_rows/os_rows above), so the
+        #     intersection here is naturally restricted to it already.
+        both = None
+        proving_key = None
+        for p in od_rows:
+            if not _row_covers_eye(p, prescription, "os", applicability_key):
+                continue
+            common = (_row_eye_proving_keys(p, prescription, "od", applicability_key)
+                     & _row_eye_proving_keys(p, prescription, "os", applicability_key))
+            if common:
+                both, proving_key = p, next(iter(common - {None}), None)
+                break
         if both is not None:
+            subtype_note = f" (subtype: {proving_key})" if proving_key else ""
             return schemas.PairFulfillment(
                 status=tier, price_pair=both.price_pair, currency=both.currency,
                 source_pricing_ids=[both.id], provenance="single_route", needs_review=False,
-                reason=f"مسار تسعير واحد يغطي العينين ({tier_label[tier]}) — سعر الزوج من الكتالوج.")
+                reason=f"مسار تسعير واحد يغطي العينين ({tier_label[tier]}){subtype_note} — سعر الزوج من الكتالوج.",
+                applicability_key=proving_key)
 
         # (a2) OD and OS covered by DIFFERENT rows, but a proven OR-clause pair of
-        #      ONE catalog pricing offer (same source_extraction_id + facets).
+        #      ONE catalog pricing offer (same source_extraction_id + facets) -
+        #      same same-sub-option discipline as (a).
         proven = None
+        proving_key = None
         for a in od_rows:
             for b in os_rows:
-                if a.id != b.id and _same_pricing_offer(a, b):
-                    proven = (a, b); break
+                if a.id == b.id or not _same_pricing_offer(a, b):
+                    continue
+                common = (_row_eye_proving_keys(a, prescription, "od", applicability_key)
+                         & _row_eye_proving_keys(b, prescription, "os", applicability_key))
+                if common:
+                    proven, proving_key = (a, b), next(iter(common - {None}), None)
+                    break
             if proven:
                 break
         if proven is not None:
             a, b = proven
+            subtype_note = f" (subtype: {proving_key})" if proving_key else ""
             return schemas.PairFulfillment(
                 status=tier, price_pair=a.price_pair, currency=a.currency,
                 source_pricing_ids=sorted({a.id, b.id}), provenance="single_route",
                 needs_review=False,
-                reason=(f"عرض تسعير واحد بعدة مدى قوة (OR) يغطي العينين ({tier_label[tier]}) — "
-                        f"سعر الزوج من الكتالوج."))
+                reason=(f"عرض تسعير واحد بعدة مدى قوة (OR) يغطي العينين ({tier_label[tier]})"
+                        f"{subtype_note} — سعر الزوج من الكتالوج."),
+                applicability_key=proving_key)
 
         # (b) both eyes at this tier, but via SEPARATE VariantPricing rows whose
         #     belonging to one catalog offer cannot be proven -> NO pair price.
@@ -336,8 +438,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
     if od.best == "unknown" or os_.best == "unknown":
         unresolved_ids = sorted({
             p.id for tier in _TIERS for p in routes[tier]
-            if _row_eye_status(p, prescription, "od") == "unknown"
-            or _row_eye_status(p, prescription, "os") == "unknown"
+            if _row_eye_status(p, prescription, "od", applicability_key) == "unknown"
+            or _row_eye_status(p, prescription, "os", applicability_key) == "unknown"
         })
         return schemas.PairFulfillment(
             status="eligibility_unknown", price_pair=None, currency=None,
@@ -433,9 +535,10 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
             "stock_outside": [p for p in opt_rows if _row_route(p) == "stock_outside"],
             "rx": [p for p in opt_rows if _row_route(p) == "rx"],
         }
-        od = _eye_availability(routes, prescription, "od")
-        os_ = _eye_availability(routes, prescription, "os")
-        pf = _pair_fulfillment(routes, od, os_, prescription)
+        applicability_key = filters.applicability_key if filters else None
+        od = _eye_availability(routes, prescription, "od", applicability_key)
+        os_ = _eye_availability(routes, prescription, "os", applicability_key)
+        pf = _pair_fulfillment(routes, od, os_, prescription, applicability_key)
 
         if pf.status == "unavailable" and not want_specific_product:
             continue  # automatic / non-specific: drop options no eye combo can use
@@ -647,7 +750,8 @@ def search(db: Session, prescription: models.Prescription,
             # candidate whose power_eligibility is UNRESOLVED (or genuinely
             # ineligible) is never a usable fallback, never offered as a
             # priced recommendation.
-            all_results = _proven_eligible_for_alternatives(db, all_results, prescription)
+            all_results = _proven_eligible_for_alternatives(
+                db, all_results, prescription, filters.applicability_key if filters else None)
             alternatives = compute_alternatives(all_results, set(), filters)
             if alternatives:
                 alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "

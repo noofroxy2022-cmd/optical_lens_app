@@ -145,6 +145,10 @@ class CatalogExtractionBase(BaseModel):
     extracted_total_power_min: Optional[float] = None
     extracted_total_power_max: Optional[float] = None
     extracted_max_cyl_abs: Optional[float] = None
+    # Optical applicability sub-branch (Phase 4K) - which sub-option of a
+    # multi-range single-priced offer this row's range belongs to ("POL" /
+    # "AdaptiveSun" / ...). NULL for every ordinary (non-split) row.
+    extracted_applicability_key: Optional[str] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
     # commercial identity (parser-populated in Phase 4)
@@ -177,6 +181,7 @@ class CatalogExtractionUpdate(BaseModel):
     extracted_total_power_min: Optional[float] = None
     extracted_total_power_max: Optional[float] = None
     extracted_max_cyl_abs: Optional[float] = None
+    extracted_applicability_key: Optional[str] = None
     extracted_price: Optional[float] = None
     extracted_features: Optional[List[str]] = None
     # commercial identity + coating human correction / review (mirrors CatalogExtraction)
@@ -226,6 +231,8 @@ class PowerRangeBase(BaseModel):
     total_power_min: Optional[float] = Field(None, ge=-40.0, le=40.0)
     total_power_max: Optional[float] = Field(None, ge=-40.0, le=40.0)
     max_cyl_abs: Optional[float] = Field(None, ge=0.0, le=10.0)
+    # Optical applicability sub-branch (Phase 4K) - see PairFulfillment.applicability_key.
+    applicability_key: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = None
 
 class PowerRangeCreate(PowerRangeBase):
@@ -416,6 +423,17 @@ class LensFilters(BaseModel):
     # Phase 2 (ZEISS) targeted-search dimensions - same strict-AND rule as above.
     design_tier: Optional[str] = None                    # LensVariant.design_tier (tier within a design family)
     treatment_band: Optional[str] = None                      # LensVariant.treatment_band (treatment_band/technology band evidence)
+    # Phase 4K-final: which optical sub-option to evaluate when ONE priced
+    # commercial offer covers more than one (PowerRange.applicability_key) -
+    # e.g. ZEISS's single-priced "Polarized / AdaptiveSun" offer, whose POL
+    # and AdaptiveSun ranges differ. Unlike treatment_band (an IDENTITY
+    # filter on LensVariant), this does NOT change which commercial options
+    # are considered - it restricts WHICH PowerRange(s) are evaluated for
+    # eligibility within them. None (default): every applicable sub-option
+    # may prove eligibility, exactly as before this field existed - a row
+    # that was never split (the overwhelming majority: HOYA, and any
+    # non-split ZEISS row) is completely unaffected regardless of this value.
+    applicability_key: Optional[str] = None
 
 
 # ===== PDF import policy =====
@@ -578,6 +596,11 @@ class PairFulfillment(BaseModel):
     provenance: str = "none"                     # single_route | unproven_mixed | none
     needs_review: bool = False
     reason: str
+    # Which PowerRange.applicability_key actually proved this pair (e.g. "POL"
+    # vs "AdaptiveSun" under one ZEISS "Polarized / AdaptiveSun" offer). None
+    # for every ordinary (undifferentiated) proven pair - ~all HOYA rows and
+    # any non-split catalog row - and whenever provenance != "single_route".
+    applicability_key: Optional[str] = None
 
 
 class PerEyeProductResult(BaseModel):

@@ -265,6 +265,27 @@ _TREATMENT_BAND_EXPANSION = {
     "Clear/BlueGuard": ("Clear", "BlueGuard"),
 }
 
+# Phase 4K: the REAL SV-RX price grid (reconstructed in Phase 4J from the
+# authoritative PDF via the production index-grid strategy) prices "POL" and
+# "AdaptiveSun" together as ONE commercial offer literally named "Polarized /
+# AdaptiveSun" - confirmed identical price_pair per (family, index, coating)
+# triple, one LensVariant, one treatment_band string in the real data. The
+# chart proves these two bands have DIFFERENT power ranges (different bars,
+# different numbers) - this is a real grain mismatch: one price, two
+# optically distinct sub-options. Never merge the ranges and never invent a
+# second price: each row keeps ITS OWN range and is tagged with
+# applicability_key = its original band ("POL" / "AdaptiveSun"), while the
+# treatment_band used to FIND the real commercial identity is remapped to
+# the actual printed name. Confirmed present (Phase 4J query) for exactly
+# these (family, index) pairs; SPH RX at 1.67 was checked and has NO
+# "Polarized / AdaptiveSun" (or "AdaptiveSun Polarized") SKU at all - its two
+# POL rows are correctly left unmapped and stay in the no-real-SKU bucket,
+# never guessed into this one.
+_POL_ADAPTIVESUN_MERGED_OFFER = "Polarized / AdaptiveSun"
+_POL_ADAPTIVESUN_REAL_COMBOS = frozenset({
+    ("ClearView RX", 1.67), ("ClearMind", 1.67), ("ClearMind", 1.5), ("SPH RX", 1.6),
+})
+
 
 def build_extracted_models(
     *, availability: str = "rx", market_scope: Optional[str] = None,
@@ -289,6 +310,13 @@ def build_extracted_models(
             by_family[row.family] = model
         bands = _TREATMENT_BAND_EXPANSION.get(row.treatment_band, (row.treatment_band,))
         for band in bands:
+            # POL/AdaptiveSun single-price-offer remap (proven combos only -
+            # see _POL_ADAPTIVESUN_REAL_COMBOS; e.g. SPH RX @ 1.67 is
+            # deliberately excluded and stays unmapped/unattachable).
+            if band in ("POL", "AdaptiveSun") and (row.family, row.index_value) in _POL_ADAPTIVESUN_REAL_COMBOS:
+                real_band, applicability_key = _POL_ADAPTIVESUN_MERGED_OFFER, band
+            else:
+                real_band, applicability_key = band, None
             pr = ExtractedPowerRange(
                 sph_min=min(row.total_power_min, row.total_power_max),
                 sph_max=max(row.total_power_min, row.total_power_max),
@@ -298,7 +326,8 @@ def build_extracted_models(
                 material=_INDEX_MATERIAL[row.index_value],
                 availability=availability,
                 design_tier=row.design_tier,
-                treatment_band=band,
+                treatment_band=real_band,
+                applicability_key=applicability_key,
                 power_eligibility="unresolved",
                 market_scope=market_scope,
                 has_range=True,
@@ -306,7 +335,9 @@ def build_extracted_models(
                 total_power_max=row.total_power_max,
                 max_cyl_abs=row.max_cyl_abs,
                 notes=f"diameter_mm={row.diameter_zone} | source={SOURCE_PAGE}"
-                      + (f" | expanded from '{row.treatment_band}'" if len(bands) > 1 else ""),
+                      + (f" | expanded from '{row.treatment_band}'" if len(bands) > 1 else "")
+                      + (f" | applicability={applicability_key} of merged offer '{real_band}'"
+                         if applicability_key else ""),
             )
             if row.confidence == "review":
                 pr.flag_review(row.review_reason or "graphical chart row needs independent re-verification")

@@ -222,6 +222,11 @@ class ExtractedPowerRange:
     total_power_min: Optional[float] = None
     total_power_max: Optional[float] = None
     max_cyl_abs: Optional[float] = None
+    # Optical applicability sub-branch when this range is one of several
+    # optically distinct sub-options under ONE single-priced commercial offer
+    # (proven by the catalog itself, never invented). NULL for every ordinary
+    # row - the overwhelming majority, including every non-ZEISS strategy.
+    applicability_key: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
@@ -2534,6 +2539,7 @@ class PDFHybridParser:
                     extracted_total_power_min=(pr.total_power_min if _has_range else None),
                     extracted_total_power_max=(pr.total_power_max if _has_range else None),
                     extracted_max_cyl_abs=(pr.max_cyl_abs if _has_range else None),
+                    extracted_applicability_key=(pr.applicability_key if _has_range else None),
                     extracted_price=pr.price,
                     extracted_features=model.features,
                     review_notes=("; ".join(pr.review_reasons) or None),

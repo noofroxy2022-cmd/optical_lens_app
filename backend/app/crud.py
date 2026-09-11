@@ -1200,6 +1200,7 @@ def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
     total_power_min = md.get("total_power_min", ext.extracted_total_power_min)
     total_power_max = md.get("total_power_max", ext.extracted_total_power_max)
     max_cyl_abs = md.get("max_cyl_abs", ext.extracted_max_cyl_abs)
+    applicability_key = md.get("applicability_key", ext.extracted_applicability_key)
     has_range = any(
         v is not None for v in (sph_min, sph_max, total_power_min, total_power_max, max_cyl_abs)
     )
@@ -1335,6 +1336,9 @@ def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
                     models.PowerRange.total_power_min == total_power_min,
                     models.PowerRange.total_power_max == total_power_max,
                     models.PowerRange.max_cyl_abs == max_cyl_abs,
+                    models.PowerRange.applicability_key == applicability_key
+                    if applicability_key is not None
+                    else models.PowerRange.applicability_key.is_(None),
                 )
                 .first()
             )
@@ -1349,7 +1353,7 @@ def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
                 cyl_min=norm_cyl_min, cyl_max=norm_cyl_max,
                 add_min=add_min, add_max=add_max,
                 total_power_min=total_power_min, total_power_max=total_power_max,
-                max_cyl_abs=max_cyl_abs,
+                max_cyl_abs=max_cyl_abs, applicability_key=applicability_key,
                 notes=ext.review_notes,
             )
             db.add(pr)

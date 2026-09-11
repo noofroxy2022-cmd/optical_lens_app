@@ -252,13 +252,16 @@ def test_4h_idempotent_reattach_no_duplicate_powerrange(db):
 
 
 def test_4h_review_row_cannot_be_attached_fail_closed(db):
+    # "AdaptiveSun POL" (the distinct 3rd band, never remapped by the Phase
+    # 4K POL/AdaptiveSun merge - see _POL_ADAPTIVESUN_REAL_COMBOS) carries
+    # this anomaly and stays literal, unaffected by that remap.
     _seed_existing_pricing(
         db, family="ClearMind", index_value=1.5, material="CR39",
-        treatment_band="POL", coatings=["DuraVision Plus Gold"],
+        treatment_band="AdaptiveSun POL", coatings=["DuraVision Plus Gold"],
     )
     cat, confirmed, held = _build_and_confirm(db)
-    assert held, "the ClearMind 1.5 POL anomaly row must stay needs_review"
-    flagged = next(e for e in held if e.extracted_treatment_band == "POL"
+    assert held, "the ClearMind 1.5 AdaptiveSun POL anomaly row must stay needs_review"
+    flagged = next(e for e in held if e.extracted_treatment_band == "AdaptiveSun POL"
                    and e.extracted_name == "ClearMind" and e.extracted_index == 1.5)
     result = _crud.attach_range_to_existing_pricing(db, flagged.id)
     assert "error" in result and "not review-approved" in result["error"]
@@ -336,40 +339,41 @@ def test_4h_multiple_diameter_zones_or_together_one_result(db):
 # into an unresolved/different one
 # ============================================================
 def test_4h_treatment_band_separation_no_cross_leakage(db):
+    # "Clear" and "PhotoFusion X" at 1.74 - both stay LITERAL (1.74 is not in
+    # the Phase 4K POL/AdaptiveSun merge set), so this exercises ordinary
+    # treatment_band separation, untouched by that remap.
     _seed_existing_pricing(
-        db, family="ClearView RX", index_value=1.67, material="high_index_1.67",
+        db, family="ClearView RX", index_value=1.74, material="high_index_1.74",
         treatment_band="Clear", coatings=["DuraVision Plus Gold"],
     )
     _seed_existing_pricing(
-        db, family="ClearView RX", index_value=1.67, material="high_index_1.67",
-        treatment_band="POL", coatings=["Sun Polarized"],
+        db, family="ClearView RX", index_value=1.74, material="high_index_1.74",
+        treatment_band="PhotoFusion X", coatings=["DuraVision Plus Platinum"],
     )
     cat, confirmed, held = _build_and_confirm(db)
     for e in confirmed:
-        if e.extracted_name == "ClearView RX" and e.extracted_index == 1.67:
+        if e.extracted_name == "ClearView RX" and e.extracted_index == 1.74:
             _crud.attach_range_to_existing_pricing(db, e.id)
 
     cb_pricing = db.query(models.VariantPricing).join(models.LensVariant).filter(
         models.LensVariant.treatment_band == "Clear",
-        models.LensVariant.index_value == 1.67,
+        models.LensVariant.index_value == 1.74,
     ).first()
-    pol_pricing = db.query(models.VariantPricing).join(models.LensVariant).filter(
-        models.LensVariant.treatment_band == "POL",
-        models.LensVariant.index_value == 1.67,
+    pf_pricing = db.query(models.VariantPricing).join(models.LensVariant).filter(
+        models.LensVariant.treatment_band == "PhotoFusion X",
+        models.LensVariant.index_value == 1.74,
     ).first()
-    assert cb_pricing.id != pol_pricing.id
+    assert cb_pricing.id != pf_pricing.id
     # each pricing carries exactly its OWN evidence rows - never merged /
     # never leaking the other treatment_band's diameter zones onto it.
-    # "Clear" also picks up its own standalone ø80 row (-6/+6) alongside the
-    # two ranges expanded from the "Clear/BlueGuard" merged chart rows.
     assert {(r.total_power_min, r.total_power_max) for r in cb_pricing.power_ranges} == {
-        (-6.0, 6.0), (-10.0, 8.0), (-17.0, 11.0)}
-    assert {(r.total_power_min, r.total_power_max) for r in pol_pricing.power_ranges} == {
-        (-4.0, 4.0), (-12.0, 11.0)}
+        (-12.0, 9.0), (-15.0, 13.0), (-20.0, 16.0)}
+    assert {(r.total_power_min, r.total_power_max) for r in pf_pricing.power_ranges} == {
+        (-10.0, 9.0), (-14.0, 11.25)}
 
-    # SPH=-11, CYL=-4 -> M1=-11, M2=-15: covered by Clear/BlueGuard's -17/+11
-    # zone, but outside BOTH of POL's zones (-4/+4 and -12/+11) - proves one
-    # treatment's eligibility never unlocks another's.
+    # SPH=-11, CYL=-4 -> M1=-11, M2=-15: covered by Clear's widest -20/+16
+    # zone, but outside PhotoFusion X's widest zone (-14/+11.25, M2=-15<-14)
+    # - proves one treatment's eligibility never unlocks another's.
     presc = models.Prescription(
         od_sph_original=-11.0, os_sph_original=-11.0, od_sph=-11.0, os_sph=-11.0,
         od_cyl_original=-4.0, os_cyl_original=-4.0, od_cyl=-4.0, os_cyl=-4.0,
@@ -377,9 +381,9 @@ def test_4h_treatment_band_separation_no_cross_leakage(db):
     )
     db.add(presc); db.commit(); db.refresh(presc)
     cb_ok = any(_matcher.check_power_range(pr, presc, "od")[0] for pr in cb_pricing.power_ranges)
-    pol_ok = any(_matcher.check_power_range(pr, presc, "od")[0] for pr in pol_pricing.power_ranges)
+    pf_ok = any(_matcher.check_power_range(pr, presc, "od")[0] for pr in pf_pricing.power_ranges)
     assert cb_ok is True
-    assert pol_ok is False, "POL must not inherit Clear/BlueGuard's eligibility"
+    assert pf_ok is False, "PhotoFusion X must not inherit Clear's eligibility"
 
 
 # ============================================================

@@ -219,6 +219,13 @@ class CatalogExtraction(Base):
     extracted_total_power_min = Column(Float, nullable=True)
     extracted_total_power_max = Column(Float, nullable=True)
     extracted_max_cyl_abs = Column(Float, nullable=True)
+    # Optical applicability sub-branch under ONE commercial priced offer whose
+    # printed treatment_band names cover more than one distinct optical range
+    # (e.g. ZEISS's "Polarized / AdaptiveSun" one-price offer, where the chart
+    # proves POL and AdaptiveSun have different power ranges). NULL for every
+    # ordinary row - one price, one undifferentiated range. Never a new
+    # commercial identity axis; see PowerRange.applicability_key.
+    extracted_applicability_key = Column(String(50), nullable=True)
 
     extracted_price = Column(Float, nullable=True)
     extracted_features = Column(JSON, nullable=True)
@@ -525,6 +532,18 @@ class PowerRange(Base):
     total_power_min = Column(Float, nullable=True)
     total_power_max = Column(Float, nullable=True)
     max_cyl_abs = Column(Float, nullable=True)
+
+    # Optical applicability sub-branch, when ONE commercial priced offer
+    # (one VariantPricing row) legitimately covers more than one optically
+    # distinct sub-option with different ranges (proven by the catalog, e.g.
+    # ZEISS's "Polarized / AdaptiveSun" single-price offer). NULL means this
+    # range applies to the WHOLE offer undifferentiated - true for every
+    # pre-existing row (HOYA and the other 28 attached ZEISS ranges) and for
+    # any manufacturer that never has this split. Two ranges under one
+    # pricing row with DIFFERENT non-null keys must never be treated as
+    # interchangeable for pair-fulfillment purposes - see
+    # product_search._row_eye_proving_keys.
+    applicability_key = Column(String(50), nullable=True)
 
     notes = Column(Text, nullable=True)
 
