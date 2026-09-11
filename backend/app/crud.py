@@ -1071,3 +1071,295 @@ def confirm_catalog_commercial(
         "closed_previous_current": len(current_rows),
         "superseded_catalogs": [c.id for c in superseded],
     }
+
+
+# ===== Phase 4H: attach graphical/G3 power-range evidence to EXISTING pricing ====
+def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
+    """Attach one CONFIRMED extraction's power-range evidence (coarse box and/or
+    G3 total_power_min/total_power_max/max_cyl_abs) to an ALREADY-CURRENT
+    VariantPricing row, by exact commercial identity match.
+
+    This is deliberately NOT confirm_catalog_commercial: that function is a
+    whole-company pricing writer (it closes every current price for the
+    company and appends new VariantPricing rows with a required price). A
+    range-only extraction has no price and must never go through it - doing
+    so would supersede/close the very pricing rows this function exists to
+    leave untouched. This function only ever ADDS PowerRange row(s); it never
+    creates, closes, or modifies a Company/LensModel/LensVariant/Coating/
+    VariantPricing. If any part of the commercial identity does not already
+    exist, it parks with an exact reason instead of fabricating one.
+
+    Coating is deliberately NOT part of the identity match here (unlike
+    confirm_catalog_commercial's price identity, which requires one). A
+    graphical/G3 power-range chart states its limits per index/diameter/
+    treatment_band and never varies them per coating (DuraVision Gold vs
+    Platinum vs Chrome, etc. all share one optical range) - LensVariant
+    itself carries no coating column; only VariantPricing does. So when the
+    extraction carries no coating evidence at all (coating_extraction_status
+    is unset - this is graphical range evidence, not a priced commercial
+    row), the same proven range is attached to EVERY currently-current
+    VariantPricing row under the matching LensVariant/availability/
+    market_scope, one PowerRange copy per pricing_id (PowerRange.pricing_id
+    is NOT NULL, so it cannot point at a variant "for all coatings" any
+    other way). This does not create new commercial identities or duplicate
+    search results - those coating rows already existed as separate priced
+    products; this only makes each of them correctly power-eligible. If the
+    extraction DOES carry resolved coating evidence, it is honored and the
+    range is attached to that one coating's pricing only.
+
+    Generic across manufacturers/catalogs: the identity axes are the same
+    ones confirm_catalog_commercial/_resolve_or_create_variant use (material,
+    index, design_type, is_aspherical, design_variant, color_variant,
+    design_tier, treatment_band, availability, market_scope) - no brand/
+    family branching here.
+
+    Returns {"power_range_ids": [int, ...], "created": [int, ...],
+    "reused": [int, ...]} on success, or {"error": str} on failure. Never
+    raises for an expected identity-mismatch, so a caller can batch many
+    extractions and collect per-row outcomes.
+    """
+    ext = get_extraction(db, extraction_id)
+    if ext is None:
+        return {"error": f"extraction {extraction_id}: not found"}
+    if ext.status != "confirmed":
+        return {"error": f"extraction {extraction_id}: not review-approved (status={ext.status!r})"}
+
+    catalog = get_catalog(db, ext.catalog_id)
+    if catalog is None:
+        return {"error": f"extraction {extraction_id}: parent catalog not found"}
+    company = get_company(db, catalog.company_id)
+    if company is None:
+        return {
+            "error": f"extraction {extraction_id}: company {catalog.company_id} is "
+                     f"inactive/deleted - graphical range NOT attached"
+        }
+
+    md = ext.modified_data or {}
+
+    name = (md.get("name") or ext.extracted_name or "").strip()
+    if not name or name == models.UNRESOLVED_FAMILY_NAME:
+        return {"error": f"extraction {extraction_id}: unresolved/missing product family"}
+
+    category_enum = _coerce_enum(
+        models.LensCategory, md.get("category") or ext.extracted_category,
+        models.LensCategory.SINGLE_VISION,
+    )
+    material_enum = _coerce_enum(
+        models.MaterialType, md.get("material") or ext.extracted_material or "CR39"
+    )
+    idx_raw = md.get("index", ext.extracted_index)
+    try:
+        idx = round(float(idx_raw), 2)
+    except (TypeError, ValueError):
+        return {"error": f"extraction {extraction_id}: invalid/missing index {idx_raw!r}"}
+    design_type_enum = _coerce_enum(models.DesignType, md.get("design_type"), models.DesignType.SPHERICAL)
+    is_asph = bool(md.get("is_aspherical", False))
+    design_variant = md.get("design_variant") or ext.extracted_design or None
+    color_variant = md.get("color_variant") or ext.extracted_color_variant or None
+    design_tier = md.get("design_tier") or ext.extracted_design_tier or None
+    treatment_band = md.get("treatment_band") or ext.extracted_treatment_band or None
+    market_scope = md.get("market_scope") or ext.extracted_market_scope or None
+
+    avail_raw = _norm(md.get("availability") or ext.extracted_availability)
+    if avail_raw not in ("stock", "rx"):
+        return {"error": f"extraction {extraction_id}: invalid availability {avail_raw!r} (STOCK/RX only)"}
+    availability = (
+        models.PricingAvailability.STOCK if avail_raw == "stock" else models.PricingAvailability.RX
+    )
+
+    # Coating is deliberately NOT required here (see docstring): a graphical
+    # range chart never varies by coating, only by treatment_band. Only when
+    # the extraction DOES carry resolved coating evidence do we narrow to
+    # that one coating's pricing.
+    cs = ext.coating_extraction_status
+    coating_id = None
+    coating_constrained = False
+    if cs == models.CoatingExtractionStatus.RESOLVED:
+        coating_constrained = True
+        if ext.coating_id is not None:
+            coating_id = int(ext.coating_id)
+        elif ext.extracted_coating:
+            coating = (
+                db.query(models.Coating)
+                .filter(func.lower(models.Coating.code) == ext.extracted_coating.strip().lower())
+                .first()
+            )
+            if coating is None:
+                return {"error": f"extraction {extraction_id}: coating {ext.extracted_coating!r} does not exist"}
+            coating_id = coating.id
+        else:
+            return {"error": f"extraction {extraction_id}: coating RESOLVED but no coating_id / extracted_coating"}
+    elif cs == models.CoatingExtractionStatus.EXPLICIT_NONE:
+        coating_constrained = True  # valid: uncoated identity only, coating_id stays None
+    # cs is None / NOT_FOUND -> graphical evidence with no coating axis at all;
+    # coating_constrained stays False -> attach across every current coating.
+
+    sph_min, sph_max = md.get("sph_min", ext.sph_min), md.get("sph_max", ext.sph_max)
+    cyl_min, cyl_max = md.get("cyl_min", ext.cyl_min), md.get("cyl_max", ext.cyl_max)
+    add_min, add_max = md.get("add_min", ext.add_min), md.get("add_max", ext.add_max)
+    total_power_min = md.get("total_power_min", ext.extracted_total_power_min)
+    total_power_max = md.get("total_power_max", ext.extracted_total_power_max)
+    max_cyl_abs = md.get("max_cyl_abs", ext.extracted_max_cyl_abs)
+    has_range = any(
+        v is not None for v in (sph_min, sph_max, total_power_min, total_power_max, max_cyl_abs)
+    )
+    if not has_range:
+        return {"error": f"extraction {extraction_id}: no range data to attach"}
+
+    model = (
+        db.query(models.LensModel)
+        .filter(
+            models.LensModel.company_id == catalog.company_id,
+            func.lower(func.trim(models.LensModel.name)) == name.lower(),
+            models.LensModel.category == category_enum,
+            models.LensModel.is_active == True,
+            models.LensModel.is_deleted == False,
+        )
+        .first()
+    )
+    if model is None:
+        return {
+            "error": f"extraction {extraction_id}: no existing ACTIVE LensModel {name!r} "
+                     f"for this company/category - graphical range NOT attached "
+                     f"(this function never creates commercial identity, and never "
+                     f"attaches to an inactive/deleted one)"
+        }
+
+    # design_variant / color_variant / design_tier are wildcarded when the
+    # extraction leaves them None: a family-level graphical chart (no tier
+    # column, e.g. ClearMind's chart shared by "Individual 3" and "Superb")
+    # proves the range applies regardless of that axis, so it must attach to
+    # every existing variant that matches on every axis the chart DOES speak
+    # to - never invented as a specific tier, never narrowed to "no tier".
+    # treatment_band is never wildcarded: the chart always states a specific
+    # band for every row, and bands must stay commercially distinct.
+    base_filters = [
+        models.LensVariant.lens_model_id == model.id,
+        models.LensVariant.index_value == idx,
+        models.LensVariant.design_type == design_type_enum,
+        models.LensVariant.is_aspherical == is_asph,
+        func.lower(func.trim(func.coalesce(models.LensVariant.treatment_band, ""))) == _norm(treatment_band),
+    ]
+    if design_variant is not None:
+        base_filters.append(
+            func.lower(func.trim(func.coalesce(models.LensVariant.design_variant, ""))) == _norm(design_variant)
+        )
+    if color_variant is not None:
+        base_filters.append(
+            func.lower(func.trim(func.coalesce(models.LensVariant.color_variant, ""))) == _norm(color_variant)
+        )
+    if design_tier is not None:
+        base_filters.append(
+            func.lower(func.trim(func.coalesce(models.LensVariant.design_tier, ""))) == _norm(design_tier)
+        )
+
+    variants = db.query(models.LensVariant).filter(
+        *base_filters, models.LensVariant.material == material_enum
+    ).all()
+    material_relaxed = False
+    if not variants:
+        # Fallback: material is dropped from the filter, index_value alone
+        # already uniquely identifies the optical index within one LensModel
+        # (ZEISS never sells two different materials at the same index under
+        # one family) - a stored material that doesn't match the material a
+        # graphical-chart index implies (e.g. a commercial extraction that
+        # left every row at a generic default material instead of resolving
+        # it per index) is a known, one-sided upstream data gap, not a real
+        # commercial distinction, so it must never block an otherwise exact,
+        # unique identity match. If this fallback ever matches MULTIPLE
+        # distinct materials at the same index (a genuine ambiguity), it is
+        # surfaced as an error below, never silently guessed.
+        variants = db.query(models.LensVariant).filter(*base_filters).all()
+        if variants:
+            material_relaxed = True
+            distinct_materials = {v.material for v in variants}
+            if len(distinct_materials) > 1:
+                return {
+                    "error": f"extraction {extraction_id}: ambiguous - {len(distinct_materials)} "
+                             f"different materials exist at this exact index/treatment_band "
+                             f"identity ({sorted(m.value for m in distinct_materials)}) and none "
+                             f"matches the expected {material_enum.value!r} - graphical range "
+                             f"NOT attached (never guessed)"
+                }
+    if not variants:
+        return {
+            "error": f"extraction {extraction_id}: no existing LensVariant for this "
+                     f"commercial identity - graphical range NOT attached"
+        }
+
+    pricing_rows: List[models.VariantPricing] = []
+    for variant in variants:
+        pricing_query = db.query(models.VariantPricing).filter(
+            models.VariantPricing.variant_id == variant.id,
+            models.VariantPricing.availability == availability,
+            models.VariantPricing.effective_to.is_(None),
+            models.VariantPricing.market_scope == market_scope
+            if market_scope is not None
+            else models.VariantPricing.market_scope.is_(None),
+        )
+        if coating_constrained:
+            pricing_query = pricing_query.filter(
+                models.VariantPricing.coating_id == coating_id
+                if coating_id is not None
+                else models.VariantPricing.coating_id.is_(None)
+            )
+        pricing_rows.extend(pricing_query.all())
+    if not pricing_rows:
+        return {
+            "error": f"extraction {extraction_id}: no existing CURRENT VariantPricing for "
+                     f"this identity - graphical range NOT attached (price truth is never "
+                     f"created or altered by this function)"
+        }
+
+    norm_sph_min = float(sph_min) if sph_min is not None else 0.0
+    norm_sph_max = float(sph_max) if sph_max is not None else 0.0
+    norm_cyl_min = float(cyl_min) if cyl_min is not None else -10.0
+    norm_cyl_max = float(cyl_max) if cyl_max is not None else 0.0
+
+    created_ids: List[int] = []
+    reused_ids: List[int] = []
+    try:
+        for pricing in pricing_rows:
+            # idempotent: an identical range under the same pricing is a no-op,
+            # not a duplicate PowerRange row (guards re-running on the same
+            # extraction, or attaching the same evidence to the same coating
+            # twice from two different rows).
+            dup = (
+                db.query(models.PowerRange)
+                .filter(
+                    models.PowerRange.pricing_id == pricing.id,
+                    models.PowerRange.sph_min == norm_sph_min,
+                    models.PowerRange.sph_max == norm_sph_max,
+                    models.PowerRange.cyl_min == norm_cyl_min,
+                    models.PowerRange.cyl_max == norm_cyl_max,
+                    models.PowerRange.total_power_min == total_power_min,
+                    models.PowerRange.total_power_max == total_power_max,
+                    models.PowerRange.max_cyl_abs == max_cyl_abs,
+                )
+                .first()
+            )
+            if dup is not None:
+                reused_ids.append(dup.id)
+                continue
+            pr = models.PowerRange(
+                lens_model_id=model.id,
+                variant_id=pricing.variant_id,
+                pricing_id=pricing.id,
+                sph_min=norm_sph_min, sph_max=norm_sph_max,
+                cyl_min=norm_cyl_min, cyl_max=norm_cyl_max,
+                add_min=add_min, add_max=add_max,
+                total_power_min=total_power_min, total_power_max=total_power_max,
+                max_cyl_abs=max_cyl_abs,
+                notes=ext.review_notes,
+            )
+            db.add(pr)
+            db.flush()
+            created_ids.append(pr.id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {
+        "power_range_ids": created_ids + reused_ids, "created": created_ids,
+        "reused": reused_ids, "material_relaxed": material_relaxed,
+    }
