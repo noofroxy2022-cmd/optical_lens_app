@@ -79,6 +79,28 @@ class PricingAvailability(str, PyEnum):
     RX = "rx"
 
 
+class PowerEligibilityStatus(str, PyEnum):
+    """Whether an RX row with NO explicit PowerRange may be treated as
+    prescription-UNRESTRICTED (the frozen matcher's long-standing "RX
+    made-to-order, no range printed -> any power" rule).
+
+        UNRESTRICTED -> the source catalog states (or a STOCK/ranged RX row
+                        proves) there genuinely is no power restriction; the
+                        existing no-range-means-eligible behaviour applies.
+        UNRESOLVED   -> the source catalog's power applicability is NOT yet
+                        modeled (an explicit numeric bound, a sign-dependent
+                        CYL cap, an ADD exclusion, a graphical/zoned map, or an
+                        external/deferred reference such as "see VISUSTORE"
+                        all count) - eligibility must be reported UNKNOWN, never
+                        auto-eligible, until that rule is actually represented.
+
+    Ignored whenever the row HAS explicit PowerRange rows - those are checked
+    normally regardless of this flag. Defaults to UNRESTRICTED so every
+    existing (HOYA) row is completely unaffected."""
+    UNRESTRICTED = "unrestricted"
+    UNRESOLVED = "unresolved"
+
+
 # Sentinel the parser writes to CatalogExtraction.extracted_name when the source
 # PDF carries no relation that uniquely determines the product family. It must
 # never reach a real LensModel name - a human review overlay (modified_data["name"]
@@ -208,6 +230,24 @@ class CatalogExtraction(Base):
     extracted_design = Column(String(50), nullable=True)          # commercial design line
     extracted_color_variant = Column(String(50), nullable=True)   # commercial colour / technology line
     extracted_market_scope = Column(String(50), nullable=True)    # generic catalog market key
+    # ----- Phase 2 (ZEISS): two more independent commercial axes -----
+    # extracted_design_tier: a commercial TIER within a shared design family
+    #   (e.g. family "ClearMind" -> tier "Individual 3" / "Superb"), populated
+    #   ONLY when the source document itself proves a shared-family/tier split.
+    # extracted_treatment_band: the raw treatment/technology band label as printed
+    #   (e.g. "Clear" / "BlueGuard" / "PhotoFusion X" / "Tinted"); distinct from
+    #   design_variant (a design LINE) and from color_variant (an actual colour) -
+    #   a neutral catalog-structure name, never a claim that the band is a
+    #   coating or a material (ZEISS itself describes "BlueGuard" as a
+    #   substrate/material technology, not a treatment).
+    extracted_design_tier = Column(String(50), nullable=True)
+    extracted_treatment_band = Column(String(50), nullable=True)
+    # ----- Phase 3 (ZEISS): power-eligibility provenance for RX rows with no
+    # explicit PowerRange - see PowerEligibilityStatus. Nullable here (the
+    # authoritative value lives on VariantPricing.power_eligibility once
+    # confirmed); "unresolved" whenever the parser strategy that produced this
+    # row does not yet model the source catalog's real power limits.
+    extracted_power_eligibility = Column(String(20), nullable=True)
 
     # ----- Coating extraction semantics -----
     # extracted_coating: raw/normalised coating text as found in the source (if any).
@@ -292,7 +332,21 @@ class LensVariant(Base):
     #   This is the authoritative destination for commercial "Free Form".
     design_variant = Column(String(50), nullable=True)
     # color_variant = commercial colour / tint line, e.g. "Clear", "Transmatic/G/B".
+    # ACTUAL COLOUR ONLY - never a treatment_band/technology bucket; when a catalog
+    # states a treatment_band/technology but no colour, color_variant stays NULL
+    # (never guessed) and the treatment_band is recorded on `treatment_band` below.
     color_variant = Column(String(50), nullable=True)
+    # ----- Phase 2 (ZEISS): two more independent commercial axes -----
+    # design_tier = a commercial TIER within design_variant's family (e.g.
+    #   family "ClearMind" -> tier "Individual 3" / "Superb"). Populated ONLY
+    #   when catalog structure proves a shared-family/tier split; never
+    #   invented for a family with no sibling tier.
+    design_tier = Column(String(50), nullable=True)
+    # treatment_band = raw treatment_band/technology band evidence (e.g. "Clear",
+    #   "BlueGuard", "PhotoFusion X", "Tinted", "Polarized / AdaptiveSun").
+    #   Kept distinct from design_variant and color_variant; NOT reclassified
+    #   as a coating or a material by this field alone.
+    treatment_band = Column(String(50), nullable=True)
 
     price = Column(Float, nullable=False)
     currency = Column(String(10), default="USD")
@@ -333,6 +387,8 @@ class LensVariant(Base):
             text("is_aspherical"),
             text("lower(trim(coalesce(design_variant, '')))"),
             text("lower(trim(coalesce(color_variant, '')))"),
+            text("lower(trim(coalesce(design_tier, '')))"),
+            text("lower(trim(coalesce(treatment_band, '')))"),
             unique=True,
         ),
     )
@@ -360,6 +416,17 @@ class VariantPricing(Base):
 
     # STOCK / RX only - never BOTH (enum has no BOTH; CHECK enforces it at the DB).
     availability = Column(Enum(PricingAvailability), nullable=False)
+
+    # Power-eligibility provenance for an RX row with NO explicit PowerRange
+    # (see PowerEligibilityStatus). Irrelevant whenever this row DOES have
+    # PowerRange rows - those are always checked normally. Defaults to
+    # UNRESTRICTED so every pre-Phase-3 (HOYA) row keeps its existing "RX
+    # made-to-order = any power" behaviour unchanged.
+    power_eligibility = Column(
+        Enum(PowerEligibilityStatus), nullable=False,
+        default=PowerEligibilityStatus.UNRESTRICTED,
+        server_default=PowerEligibilityStatus.UNRESTRICTED.name,
+    )
 
     # Catalog price for exactly ONE pair (both lenses). Exact fixed-point money -
     # PostgreSQL NUMERIC(12,2); SQLite round-trips 2dp Decimals exactly via the
@@ -396,6 +463,10 @@ class VariantPricing(Base):
         # No BOTH at the pricing level (enum is persisted by NAME).
         CheckConstraint(
             "availability IN ('STOCK', 'RX')", name="ck_variant_pricing_availability"
+        ),
+        CheckConstraint(
+            "power_eligibility IN ('UNRESTRICTED', 'UNRESOLVED')",
+            name="ck_variant_pricing_power_eligibility",
         ),
         # Zero-length / inverted effective intervals are invalid.
         CheckConstraint(

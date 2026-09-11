@@ -42,9 +42,11 @@ const PAIR_STATUS_AR = {
   rx: '🏭 RX / تصنيع',
   split: '⚠️ مصدر غير موحد',
   unavailable: '❌ غير متوفر',
+  eligibility_unknown: '❓ توافق الوصفة غير مؤكد',
 };
 const PAIR_STATUS_COLOR = {
   stock_egypt: 'green', stock_outside: 'gold', rx: 'orange', split: 'volcano', unavailable: 'red',
+  eligibility_unknown: 'default',
 };
 const yn = (b) => (b ? <span style={{ color: '#52c41a' }}>✅</span> : <span style={{ color: '#cf1322' }}>❌</span>);
 
@@ -70,6 +72,7 @@ const PairMatrix = ({ od, os }) => (
 const PairAnswer = ({ pf }) => {
   const priced = pf.price_pair != null;
   const unproven = pf.provenance === 'unproven_mixed';
+  const unknownEligibility = pf.status === 'eligibility_unknown';
   return (
     <div>
       <div>
@@ -80,12 +83,18 @@ const PairAnswer = ({ pf }) => {
         {pf.needs_review && <Tag color="volcano" style={{ marginRight: 6 }}>بحاجة لمراجعة</Tag>}
       </div>
       <div style={{ marginTop: 4 }}>
-        <b>السعر: </b>
+        {/* eligibility_unknown: never label this line "السعر" - price_pair is
+            always null here (backend never exposes a catalog price as an
+            actionable pair price while power eligibility is unresolved), so
+            this deliberately reads as a compatibility question, not a price. */}
+        <b>{unknownEligibility ? 'توافق الوصفة: ' : 'السعر: '}</b>
         {priced
           ? <span>{`${pf.price_pair} ${pf.currency || ''} / Pair`}</span>
-          : unproven
-            ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
-            : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
+          : unknownEligibility
+            ? <span style={{ color: '#cf1322' }}>غير مؤكد بسبب نطاق القوة — يحتاج مراجعة قبل اعتماد الطلب</span>
+            : unproven
+              ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
+              : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
       </div>
       {pf.source_pricing_ids && pf.source_pricing_ids.length > 0 && (
         <div style={{ marginTop: 2, color: '#999', fontSize: 11 }}>
@@ -270,10 +279,12 @@ const Prescriptions = () => {
     { title: 'التصميم', key: 'design', width: 120, render: (_, r) => r.design_variant || '—' },
     { title: 'الطلاء', key: 'coating', width: 120, render: (_, r) => r.coating_name || r.coating_code || '—' },
     { title: 'التقنية / اللون', key: 'tech', width: 120, render: (_, r) => r.color_variant || '—' },
-    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best]}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', none: '—' })[r.od.best]}</Tag> },
-    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best]}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', none: '—' })[r.os.best]}</Tag> },
+    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', unknown: '؟', none: '—' })[r.od.best]}</Tag> },
+    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', unknown: '؟', none: '—' })[r.os.best]}</Tag> },
     { title: 'حل الزوج', key: 'pair', width: 130, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
-    { title: 'سعر الزوج', key: 'price', width: 130, render: (_, r) => (r.pair_fulfillment.price_pair != null ? `${r.pair_fulfillment.price_pair} ${r.pair_fulfillment.currency || ''} / Pair` : <span style={{ color: '#cf1322' }}>غير محسوب</span>) },
+    { title: 'سعر الزوج', key: 'price', width: 130, render: (_, r) => (r.pair_fulfillment.price_pair != null
+      ? `${r.pair_fulfillment.price_pair} ${r.pair_fulfillment.currency || ''} / Pair`
+      : <span style={{ color: '#cf1322' }}>{r.pair_fulfillment.status === 'eligibility_unknown' ? 'غير مؤكد (نطاق القوة)' : 'غير محسوب'}</span>) },
     { title: 'الدرجة', key: 'score', width: 64, render: (_, r) => r.match_score?.toFixed(1) },
   ];
 

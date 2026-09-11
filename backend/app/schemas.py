@@ -151,6 +151,9 @@ class CatalogExtractionBase(BaseModel):
     extracted_design: Optional[str] = None
     extracted_color_variant: Optional[str] = None
     extracted_market_scope: Optional[str] = None
+    # Phase 2 (ZEISS): two more independent commercial axes
+    extracted_design_tier: Optional[str] = None
+    extracted_treatment_band: Optional[str] = None
     extracted_coating: Optional[str] = None
     coating_id: Optional[int] = None
     coating_extraction_status: Optional[CoatingExtractionStatus] = None
@@ -180,6 +183,8 @@ class CatalogExtractionUpdate(BaseModel):
     extracted_design: Optional[str] = None
     extracted_color_variant: Optional[str] = None
     extracted_market_scope: Optional[str] = None
+    extracted_design_tier: Optional[str] = None
+    extracted_treatment_band: Optional[str] = None
     extracted_coating: Optional[str] = None
     coating_id: Optional[int] = None
     coating_extraction_status: Optional[CoatingExtractionStatus] = None
@@ -250,6 +255,8 @@ class LensVariantBase(BaseModel):
     is_aspherical: bool = False
     design_variant: Optional[str] = Field(None, max_length=50)  # commercial design line
     color_variant: Optional[str] = Field(None, max_length=50)   # commercial colour line
+    design_tier: Optional[str] = Field(None, max_length=50)     # tier within design_variant's family
+    treatment_band: Optional[str] = Field(None, max_length=50)       # treatment_band/technology band evidence
     price: float = Field(..., ge=0)
     currency: str = "USD"
     diameter: Optional[int] = Field(None, ge=50, le=80)
@@ -405,7 +412,10 @@ class LensFilters(BaseModel):
     # already read, so its logic is unchanged).
     lens_model_id: Optional[int] = None                  # LensModel.id  (Product / Model)
     design_variant: Optional[str] = None                 # LensVariant.design_variant (commercial design line)
-    color_variant: Optional[str] = None                  # LensVariant.color_variant (technology / colour, e.g. "Sensity 2")
+    color_variant: Optional[str] = None                  # LensVariant.color_variant (actual colour only)
+    # Phase 2 (ZEISS) targeted-search dimensions - same strict-AND rule as above.
+    design_tier: Optional[str] = None                    # LensVariant.design_tier (tier within a design family)
+    treatment_band: Optional[str] = None                      # LensVariant.treatment_band (treatment_band/technology band evidence)
 
 
 # ===== PDF import policy =====
@@ -475,9 +485,15 @@ class LensMatchResult(BaseModel):
     power_scope: Optional[str] = None
     design_variant: Optional[str] = None
     color_variant: Optional[str] = None
+    design_tier: Optional[str] = None
+    treatment_band: Optional[str] = None
     source_pricing_id: int
     source_catalog_id: Optional[int] = None
 
+# UNUSED as of Phase 3B: POST /prescriptions/{id}/match no longer returns this
+# shape - it delegates to product_search.search() (ProductSearchResponse) so
+# there is exactly one prescription-eligibility decision path. Kept only in
+# case an external caller still deserialises it; not produced anywhere.
 class MatchResponse(BaseModel):
     prescription: PrescriptionResponse
     results: List[LensMatchResult]
@@ -506,7 +522,8 @@ class ProductSearchRequest(BaseModel):
 
 
 class AvailabilityAnswer(BaseModel):
-    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "split" | "none"
+    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "split" |
+    #       "power_eligibility_unknown" | "none"
     code: str
     title: str
     detail: Optional[str] = None
@@ -516,11 +533,21 @@ class AvailabilityAnswer(BaseModel):
 class EyeAvailability(BaseModel):
     """Whether ONE eye is covered by any valid OR PowerRange of the SAME
     commercial option, evaluated independently per pricing route. Reuses the
-    frozen optical eligibility - no new/duplicated range logic."""
+    frozen optical eligibility - no new/duplicated range logic.
+
+    Phase 3: eligibility is tri-state per route. `stock_egypt`/`stock_outside`/
+    `rx` are True ONLY when a route is PROVEN eligible (an explicit PowerRange
+    matches, or the row is genuinely unrestricted). The matching
+    `*_unknown` flag is True when that route's real power applicability is not
+    yet modeled (see PowerEligibilityStatus) - NEVER folded into the proven
+    bool, and NEVER silently treated as ineligible either."""
     stock_egypt: bool = False
     stock_outside: bool = False
     rx: bool = False
-    best: str = "none"                           # stock_egypt | stock_outside | rx | none
+    stock_egypt_unknown: bool = False
+    stock_outside_unknown: bool = False
+    rx_unknown: bool = False
+    best: str = "none"          # stock_egypt | stock_outside | rx | unknown | none
 
 
 class PairFulfillment(BaseModel):
@@ -535,9 +562,16 @@ class PairFulfillment(BaseModel):
         catalog pricing offer cannot be proven from persistence
         (source_extraction_id differs). `price_pair` is null, `needs_review` is
         true; `source_pricing_ids` lists every covering row for transparency.
-      * provenance="none" -> split / unavailable.
-    Never divided, summed, mixed (STOCK+RX) or estimated."""
-    status: str                                 # stock_egypt|stock_outside|rx|split|unavailable
+      * provenance="none" -> split / unavailable / eligibility_unknown.
+    Never divided, summed, mixed (STOCK+RX) or estimated.
+
+    status="eligibility_unknown" (Phase 3): no tier has BOTH eyes PROVEN
+    eligible, and at least one eye's optical eligibility is itself unresolved
+    (not proven ineligible - simply unproven, e.g. a catalog price whose real
+    power limits are not yet modeled). The pair is NEVER reported as a proven
+    STOCK/RX route in this case; `price_pair` stays null and `needs_review` is
+    true, exactly like `unproven_mixed`."""
+    status: str  # stock_egypt|stock_outside|rx|split|unavailable|eligibility_unknown
     price_pair: Optional[Decimal] = None
     currency: Optional[str] = None
     source_pricing_ids: List[int] = []
@@ -559,6 +593,8 @@ class PerEyeProductResult(BaseModel):
     material: Optional[str] = None
     design_variant: Optional[str] = None
     color_variant: Optional[str] = None
+    design_tier: Optional[str] = None
+    treatment_band: Optional[str] = None
     coating_id: Optional[int] = None
     coating_code: Optional[str] = None
     coating_name: Optional[str] = None
@@ -571,10 +607,10 @@ class PerEyeProductResult(BaseModel):
 
 
 class LensSearchGroup(BaseModel):
-    # key: "stock_egypt" | "stock_out_of_egypt" | "rx" | "split"
+    # key: "stock_egypt" | "stock_out_of_egypt" | "rx" | "split" | "eligibility_unknown"
     key: str
     label: str
-    availability: str                            # "stock" | "rx" | "mixed"
+    availability: str                            # "stock" | "rx" | "mixed" | "unknown"
     market: Optional[str] = None                 # "egypt" | "out_of_egypt" | None
     catalog_note: str = "حسب الكتالوج"           # STOCK label accuracy - not real-time inventory
     count: int
@@ -606,6 +642,7 @@ class ProductSearchResponse(BaseModel):
     stock_out_of_egypt_count: int = 0            # full-pair STOCK Out Of Egypt
     rx_count: int = 0                            # full-pair RX
     split_count: int = 0                         # split / no unified route
+    eligibility_unknown_count: int = 0            # power applicability unresolved
     # populated ONLY for targeted mode when exact_total == 0
     alternatives: List[AlternativeResult] = []
     alternatives_note: Optional[str] = None

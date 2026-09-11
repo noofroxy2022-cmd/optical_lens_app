@@ -225,7 +225,8 @@ def test_N_unique_relation_resolves_family(parser):
     ]
     assert parser._resolve_family(ctx, {"astro"}) == "Aquila"
     assert parser._assign_family(ctx, [ExtractedPowerRange(sph_min=0.0, sph_max=0.0,
-                                                          coating="Astro", price=1.0)]) == "Aquila"
+                                                          coating="Astro", price=1.0,
+                                                          power_eligibility="unrestricted")]) == "Aquila"
 
 
 # ===========================================================================
@@ -239,7 +240,8 @@ def test_O_two_compatible_families_needs_review(parser):
         {"family": "Falcon", "availability": "rx", "category": "progressive",
          "market": "Out Of Egypt", "terms": {"astro"}},
     ]
-    rows = [ExtractedPowerRange(sph_min=-6.0, sph_max=0.0, has_range=True, price=100.0)]
+    rows = [ExtractedPowerRange(sph_min=-6.0, sph_max=0.0, has_range=True, price=100.0,
+                                power_eligibility="unrestricted")]
     name = parser._assign_family(ctx, rows)
     assert name == parser.UNRESOLVED_FAMILY
     assert rows[0].review_status == "needs_review"
@@ -252,7 +254,8 @@ def test_O_zero_compatible_families_needs_review(parser):
         {"family": "Aquila", "availability": "rx", "category": "progressive",
          "market": "Out Of Egypt", "terms": {"astro"}},
     ]
-    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=100.0)]
+    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=100.0,
+                                power_eligibility="unrestricted")]
     assert parser._assign_family(ctx, rows) == parser.UNRESOLVED_FAMILY
     assert "ambiguous/unresolved product family" in rows[0].review_reasons
 
@@ -260,7 +263,8 @@ def test_O_zero_compatible_families_needs_review(parser):
 def test_family_never_resolves_from_price_or_heading(parser):
     ctx = _ctx(availability="stock", category="single_vision", market="Egypt")
     ctx.relations = []                       # no relationship evidence at all
-    rows = [ExtractedPowerRange(sph_min=-6.0, sph_max=0.0, has_range=True, price=999.0)]
+    rows = [ExtractedPowerRange(sph_min=-6.0, sph_max=0.0, has_range=True, price=999.0,
+                                power_eligibility="unrestricted")]
     name = parser._assign_family(ctx, rows)
     assert name == parser.UNRESOLVED_FAMILY  # price / section heading never used
     assert "ambiguous/unresolved product family" in rows[0].review_reasons
@@ -286,6 +290,7 @@ def test_P_commercial_fields_persist(parser, db):
         design_variant="Free Form", color_variant="Transmatic/G/B",
         market_scope="Egypt", coating="HMC", coating_status="resolved",
         coating_confidence=0.9, review_status="pending",
+        power_eligibility="unrestricted",
     )
     parser.extracted_models = [ExtractedLensModel(name="Aquila", power_ranges=[pr])]
     parser.save_extractions_to_db(cat.id, db)
@@ -309,7 +314,8 @@ def test_P2_needs_review_status_persists(parser, db):
     pr = ExtractedPowerRange(sph_min=0.0, sph_max=0.0, availability="stock",
                              price=100.0, coating_status="not_found",
                              review_status="needs_review",
-                             review_reasons=["STOCK without PowerRange", "coating not_found"])
+                             review_reasons=["STOCK without PowerRange", "coating not_found"],
+                             power_eligibility="unrestricted")
     parser.extracted_models = [ExtractedLensModel(name="X", power_ranges=[pr])]
     parser.save_extractions_to_db(cat.id, db)
     ext = db.query(models.CatalogExtraction).one()
@@ -474,7 +480,8 @@ def test_10J_ambiguous_relation_needs_review(parser):
         {"family": "Falcon", "availability": "rx", "category": "progressive",
          "market": "Out Of Egypt", "terms": {"astro"}},
     ]
-    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=100.0)]
+    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=100.0,
+                                power_eligibility="unrestricted")]
     assert parser._assign_family(ctx, rows) == parser.UNRESOLVED_FAMILY
     assert rows[0].review_status == "needs_review"
     assert "ambiguous/unresolved product family" in rows[0].review_reasons
@@ -718,7 +725,8 @@ def test_override_3_no_generic_bifocal_or_catalog_rule_added(db):
         {"family": "Aquila", "availability": "rx", "category": "progressive",
          "market": "Out Of Egypt", "terms": {"astro"}},
     ]
-    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=2500.0, design_variant="D Type")]
+    rows = [ExtractedPowerRange(sph_min=0.0, sph_max=0.0, price=2500.0, design_variant="D Type",
+                                power_eligibility="unrestricted")]
     assert parser._assign_family(ctx, rows) == parser.UNRESOLVED_FAMILY
     assert "ambiguous/unresolved product family" in rows[0].review_reasons
     # override helper never hardcodes a family
@@ -779,6 +787,7 @@ def _rx_norange_pr():
         index_value=1.5, design_variant="Core", color_variant="Clear",
         market_scope="Out Of Egypt", coating="Astro", coating_status="resolved",
         coating_confidence=0.9, has_range=False, review_status="pending",
+        power_eligibility="unrestricted",
     )
 
 
@@ -845,7 +854,7 @@ def test_rxfix_E_stock_without_range_still_blocks(parser, db):
         sph_min=0.0, sph_max=0.0, availability="stock", price=700.0, index_value=1.5,
         color_variant="Clear", market_scope="Egypt", coating="Astro",
         coating_status="resolved", coating_confidence=0.9, has_range=False,
-        review_status="pending",
+        review_status="pending", power_eligibility="unrestricted",
     )
     ext = _persist_via_parser(parser, db, cat, stock_pr, name="StockFam",
                               category="single_vision")
@@ -863,7 +872,7 @@ def test_rxfix_F_explicit_rx_range_still_constrains(parser, db):
         availability="rx", price=5500.0, index_value=1.6, design_variant="Premium",
         color_variant="Clear", market_scope="Out Of Egypt", coating="Astro",
         coating_status="resolved", coating_confidence=0.9, has_range=True,
-        review_status="pending",
+        review_status="pending", power_eligibility="unrestricted",
     )
     ext = _persist_via_parser(parser, db, cat, rx_ranged, name="RxRanged")
     # explicit range survives the parser -> extraction boundary
@@ -901,6 +910,7 @@ def _stock_ranged_pr(index=1.5, price=700.0, design_variant="Core"):
         design_variant=design_variant, color_variant="Clear",
         market_scope="Egypt", coating="Astro", coating_status="resolved",
         coating_confidence=0.9, has_range=True, review_status="pending",
+        power_eligibility="unrestricted",
     )
 
 
@@ -910,6 +920,7 @@ def _rx_norange_pr_named(index=1.5, price=4000.0, design_variant="Core"):
         index_value=index, design_variant=design_variant, color_variant="Clear",
         market_scope="Out Of Egypt", coating="Astro", coating_status="resolved",
         coating_confidence=0.9, has_range=False, review_status="pending",
+        power_eligibility="unrestricted",
     )
 
 
@@ -3070,7 +3081,8 @@ def test_avail_rx_and_stock_powerrange_persist(db):
                                   has_range=True, availability=avail_str, price=1000.0,
                                   index_value=1.5, material="CR39",
                                   coating="HMC", coating_status="resolved",
-                                  coating_confidence=0.9, review_status="pending")
+                                  coating_confidence=0.9, review_status="pending",
+                                  power_eligibility="unrestricted")
         p.extracted_models = [ExtractedLensModel(name="Hilux", category="single_vision",
                                                  power_ranges=[row])]
         p.save_extractions_to_db(cat.id, db)
@@ -3558,12 +3570,30 @@ def test_b2_full_registered_hoya_api_e2e(db):
         "mix": (1.5, -2.5), "sphere_only": (-8.0, 0.0), "g3": (3.0, -3.0),
         "rx_high": (-13.0, 0.0),
     }.items():
+        # Phase 3B: POST /prescriptions/{id}/match is now a compatibility alias
+        # that delegates to product_search.search() (ProductSearchResponse) -
+        # there is exactly one prescription-eligibility decision path, so the
+        # frozen lens_matcher.match_lenses() is never called from the router.
         mr = _prescr.match_lenses(_pid(s, c), None, True, True, db)
-        r = mr.results
-        assert mr.total_matches >= 1, label
-        assert len(r) == len({x.source_pricing_id for x in r}), label       # deduped
-        keys = [(-x.match_score, 0 if x.availability == "stock" else 1, x.price_pair) for x in r]
+        r = [x for g in mr.groups for x in g.results]
+        assert mr.exact_total >= 1, label
+        # each PerEyeProductResult is already one deduped commercial identity
+        # (product_search._identity_key groups by it) - the pair's proven
+        # pricing route(s) are its source_pricing_ids.
+        ids = [tuple(sorted(x.pair_fulfillment.source_pricing_ids)) for x in r]
+        assert len(ids) == len(set(ids)), label                            # deduped
+        # availability-first ordering (V1.0.2 design): tier (stock_egypt <
+        # stock_outside < rx), then a proven single-route price over an
+        # unproven-mixed one, then best match_score, then price.
+        _tier = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}
+        keys = [(_tier[x.pair_fulfillment.status],
+                0 if x.pair_fulfillment.provenance == "single_route" else 1,
+                -x.match_score, x.pair_fulfillment.price_pair) for x in r]
         assert keys == sorted(keys), label                                  # sorted
         for x in r:
-            assert float(x.price_pair) in known_prices                      # retail only
-            assert x.availability in ("stock", "rx")
+            pf = x.pair_fulfillment
+            assert pf.status in ("stock_egypt", "stock_outside", "rx"), label  # never
+                                                                                # split/unavailable/
+                                                                                # eligibility_unknown
+                                                                                # for real HOYA data
+            assert pf.price_pair is not None and float(pf.price_pair) in known_prices  # retail only

@@ -135,6 +135,43 @@ def _alt_scored(r: schemas.LensMatchResult, f: schemas.LensFilters,
     return score, relaxed, reason
 
 
+def _proven_eligible_for_alternatives(
+    db: Session, all_results: List[schemas.LensMatchResult], prescription: models.Prescription,
+) -> List[schemas.LensMatchResult]:
+    """Phase 3C safety gate: alternatives must be prescription-safe too. A
+    candidate is only a USABLE alternative when its underlying VariantPricing
+    row is PROVEN eligible for BOTH eyes - reusing the exact same tri-state
+    `_row_eye_status` the exact per-eye/pair path already uses (no new optical
+    logic, no lens_matcher.py change).
+
+    The frozen matcher's own `match_lenses()` has no concept of
+    power_eligibility: a row with no PowerRange and availability=RX is always
+    returned as "eligible" by its long-standing "made-to-order = any power"
+    rule, even when power_eligibility=UNRESOLVED (e.g. a ZEISS catalog price
+    whose real limits are not yet modeled). Filtering happens HERE, after the
+    frozen matcher runs and before compute_alternatives() ever sees the
+    candidate - "ineligible" and "unknown" are both excluded; only "eligible"
+    passes."""
+    ids = {r.source_pricing_id for r in all_results}
+    if not ids:
+        return all_results
+    rows = {
+        vp.id: vp
+        for vp in db.query(models.VariantPricing)
+        .filter(models.VariantPricing.id.in_(ids))
+        .all()
+    }
+    out = []
+    for r in all_results:
+        vp = rows.get(r.source_pricing_id)
+        if vp is None:
+            continue  # defensive: row vanished between the match and this lookup
+        if (_row_eye_status(vp, prescription, "od") == "eligible"
+                and _row_eye_status(vp, prescription, "os") == "eligible"):
+            out.append(r)
+    return out
+
+
 def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: set,
                          f: schemas.LensFilters, limit: int = 15) -> List[schemas.AlternativeResult]:
     ref_family = ""
@@ -156,28 +193,69 @@ def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: 
 
 
 # ---------------------------------------------------------------- per-eye engine
-def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> bool:
-    """One pricing row covers one eye when any of its OR PowerRanges is valid for
-    that eye, OR it is RX made-to-order (no explicit range) - identical to the
-    frozen matcher's own RX handling."""
+_UNRESOLVED = models.PowerEligibilityStatus.UNRESOLVED
+
+
+def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> str:
+    """Tri-state optical eligibility of ONE pricing row for ONE eye:
+    "eligible" | "ineligible" | "unknown".
+
+    A row WITH explicit PowerRange(s) is always checked normally: any covering
+    OR-range -> eligible, else ineligible - `power_eligibility` is irrelevant
+    once a real range exists. A row with NO PowerRange falls back to the
+    frozen matcher's long-standing "RX made-to-order = any power" rule ONLY
+    when `power_eligibility` is UNRESTRICTED (the catalog genuinely states no
+    restriction, or predates Phase 3 and defaults there). When it is
+    UNRESOLVED - the catalog's real power limits are simply not modeled yet -
+    eligibility is UNKNOWN, never silently True."""
     ranges = list(p.power_ranges)
-    if not ranges:
-        return p.availability == _RX
-    return any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
+    if ranges:
+        ok = any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
+        return "eligible" if ok else "ineligible"
+    if p.availability != _RX:
+        return "ineligible"       # STOCK with no range is not a real commercial row
+    if getattr(p, "power_eligibility", None) == _UNRESOLVED:
+        return "unknown"
+    return "eligible"              # genuinely unrestricted RX made-to-order
+
+
+def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str) -> bool:
+    """Backward-compatible boolean view: True only for a PROVEN-eligible row."""
+    return _row_eye_status(p, prescription, eye) == "eligible"
+
+
+def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Prescription,
+                      eye: str) -> str:
+    """Tri-state aggregation across every row of one route for one eye:
+    "eligible" if ANY row is proven eligible (an eligible row always wins over
+    an unknown one elsewhere in the same route); else "unknown" if ANY row is
+    unresolved; else "ineligible"."""
+    statuses = [_row_eye_status(p, prescription, eye) for p in rows]
+    if any(s == "eligible" for s in statuses):
+        return "eligible"
+    if any(s == "unknown" for s in statuses):
+        return "unknown"
+    return "ineligible"
 
 
 def _route_covers_eye(rows: List[models.VariantPricing], prescription: models.Prescription,
                       eye: str) -> bool:
-    return any(_row_covers_eye(p, prescription, eye) for p in rows)
+    return _route_eye_status(rows, prescription, eye) == "eligible"
 
 
 def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
                       prescription: models.Prescription, eye: str) -> schemas.EyeAvailability:
-    se = _route_covers_eye(routes["stock_egypt"], prescription, eye)
-    so = _route_covers_eye(routes["stock_outside"], prescription, eye)
-    rx = _route_covers_eye(routes["rx"], prescription, eye)
-    best = "stock_egypt" if se else "stock_outside" if so else "rx" if rx else "none"
-    return schemas.EyeAvailability(stock_egypt=se, stock_outside=so, rx=rx, best=best)
+    se = _route_eye_status(routes["stock_egypt"], prescription, eye)
+    so = _route_eye_status(routes["stock_outside"], prescription, eye)
+    rx = _route_eye_status(routes["rx"], prescription, eye)
+    best = ("stock_egypt" if se == "eligible" else
+            "stock_outside" if so == "eligible" else
+            "rx" if rx == "eligible" else
+            "unknown" if "unknown" in (se, so, rx) else "none")
+    return schemas.EyeAvailability(
+        stock_egypt=(se == "eligible"), stock_outside=(so == "eligible"), rx=(rx == "eligible"),
+        stock_egypt_unknown=(se == "unknown"), stock_outside_unknown=(so == "unknown"),
+        rx_unknown=(rx == "unknown"), best=best)
 
 
 def _same_pricing_offer(a: models.VariantPricing, b: models.VariantPricing) -> bool:
@@ -249,9 +327,27 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                     f"لنفس المنتج؛ لا يمكن إثبات أنها نفس عرض السعر الواحد — سعر الزوج غير "
                     f"مثبت (unproven mixed pricing provenance). يحتاج مراجعة."))
 
-    # no single tier covers both eyes
-    od_any = od.best != "none"
-    os_any = os_.best != "none"
+    # No tier has BOTH eyes PROVEN eligible. If either eye's optical eligibility
+    # is itself unresolved (not proven ineligible - simply unproven, e.g. a
+    # ZEISS grid price whose real catalog power limits are not modeled yet),
+    # the pair must NEVER be reported as a proven STOCK/RX route just because
+    # nothing was disproven either. Checked BEFORE the split/unavailable
+    # fallback, which must stay based on PROVEN eligibility only.
+    if od.best == "unknown" or os_.best == "unknown":
+        unresolved_ids = sorted({
+            p.id for tier in _TIERS for p in routes[tier]
+            if _row_eye_status(p, prescription, "od") == "unknown"
+            or _row_eye_status(p, prescription, "os") == "unknown"
+        })
+        return schemas.PairFulfillment(
+            status="eligibility_unknown", price_pair=None, currency=None,
+            source_pricing_ids=unresolved_ids, provenance="none", needs_review=True,
+            reason="المنتج موجود في الكتالوج، لكن توافقه مع هذه الوصفة غير مؤكد بسبب نطاق القوة.")
+
+    # no single tier covers both eyes, and neither eye is unresolved -> the
+    # existing proven split/unavailable logic, unchanged.
+    od_any = od.stock_egypt or od.stock_outside or od.rx
+    os_any = os_.stock_egypt or os_.stock_outside or os_.rx
     if od_any and os_any:
         return schemas.PairFulfillment(
             status="split", price_pair=None, currency=None, source_pricing_ids=[],
@@ -268,7 +364,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
 
 
 # --------------------------------------------------- commercial-option gathering
-_IDENTITY_EXTRA = ("lens_model_id", "design_variant", "color_variant")
+_IDENTITY_EXTRA = ("lens_model_id", "design_variant", "color_variant",
+                   "design_tier", "treatment_band")
 
 
 def _probe_filters(f: Optional[schemas.LensFilters]) -> Optional[schemas.LensFilters]:
@@ -291,6 +388,10 @@ def _passes_extra_identity(variant: models.LensVariant, f: schemas.LensFilters) 
         return False
     if f.color_variant and _norm(f.color_variant) not in _norm(variant.color_variant):
         return False
+    if f.design_tier and _norm(f.design_tier) not in _norm(variant.design_tier):
+        return False
+    if f.treatment_band and _norm(f.treatment_band) not in _norm(variant.treatment_band):
+        return False
     return True
 
 
@@ -301,6 +402,7 @@ def _identity_key(p: models.VariantPricing):
             getattr(v.material, "value", v.material),
             getattr(m.category, "value", m.category),
             _norm(v.design_variant), _norm(v.color_variant),
+            _norm(v.design_tier), _norm(v.treatment_band),
             p.coating_id, p.currency)
 
 
@@ -368,6 +470,7 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
             variant_id=v.id, index_value=v.index_value,
             material=getattr(v.material, "value", v.material),
             design_variant=v.design_variant, color_variant=v.color_variant,
+            design_tier=v.design_tier, treatment_band=v.treatment_band,
             coating_id=sample.coating_id,
             coating_code=(sample.coating.code if sample.coating else None),
             coating_name=(sample.coating.name if sample.coating else None),
@@ -376,11 +479,14 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
     return out
 
 
-_STATUS_ORDER = {"stock_egypt": 0, "stock_outside": 1, "rx": 2, "split": 3, "unavailable": 3}
+_STATUS_ORDER = {"stock_egypt": 0, "stock_outside": 1, "rx": 2, "split": 3,
+                 "eligibility_unknown": 4, "unavailable": 4}
 _STATUS_AR = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر",
-              "rx": "RX / تصنيع", "split": "مصدر مقسّم (غير موحد)", "unavailable": "غير متوفر"}
+              "rx": "RX / تصنيع", "split": "مصدر مقسّم (غير موحد)",
+              "eligibility_unknown": "التوافق مع الوصفة غير مؤكد (نطاق القوة)",
+              "unavailable": "غير متوفر"}
 _EYEBEST_AR = {"stock_egypt": "STOCK مصر", "stock_outside": "STOCK خارج مصر",
-               "rx": "RX / تصنيع", "none": "غير متوفر"}
+               "rx": "RX / تصنيع", "unknown": "غير مؤكد (نطاق القوة)", "none": "غير متوفر"}
 
 
 def _order_key(r: schemas.PerEyeProductResult):
@@ -397,14 +503,17 @@ _GROUP_DEFS = [
     ("stock_out_of_egypt", "🌍 زوج STOCK خارج مصر", "stock", "out_of_egypt"),
     ("rx", "🏭 زوج RX / تصنيع", "rx", None),
     ("split", "⚠️ مصدر غير موحد / غير متوفر للزوج", "mixed", None),
+    ("eligibility_unknown", "❓ التوافق مع الوصفة غير مؤكد (نطاق القوة)", "unknown", None),
 ]
 _STATUS_TO_GROUP = {"stock_egypt": "stock_egypt", "stock_outside": "stock_out_of_egypt",
-                    "rx": "rx", "split": "split", "unavailable": "split"}
+                    "rx": "rx", "split": "split", "unavailable": "split",
+                    "eligibility_unknown": "eligibility_unknown"}
 
 
 def _build_groups(ordered: List[schemas.PerEyeProductResult]) -> List[schemas.LensSearchGroup]:
     buckets: Dict[str, List[schemas.PerEyeProductResult]] = {
-        "stock_egypt": [], "stock_out_of_egypt": [], "rx": [], "split": []}
+        "stock_egypt": [], "stock_out_of_egypt": [], "rx": [], "split": [],
+        "eligibility_unknown": []}
     for r in ordered:
         buckets[_STATUS_TO_GROUP[r.pair_fulfillment.status]].append(r)
     groups = []
@@ -414,6 +523,7 @@ def _build_groups(ordered: List[schemas.PerEyeProductResult]) -> List[schemas.Le
             key=key, label=label, availability=avail, market=market,
             catalog_note=("حسب الكتالوج" if avail == "stock"
                           else "تصنيع حسب الطلب" if avail == "rx"
+                          else "التوافق مع الوصفة غير مؤكد بسبب نطاق القوة" if avail == "unknown"
                           else "سعر الزوج غير مثبت"),
             count=len(rows), results=rows))
     return groups
@@ -435,6 +545,13 @@ def _answer(ordered: List[schemas.PerEyeProductResult]) -> schemas.AvailabilityA
         return schemas.AvailabilityAnswer(code="split",
             title="⚠️ لا يوجد مصدر موحد مؤكد للزوج بهذه المواصفات",
             detail="يمكن توفير كل عين على حدة؛ سعر الزوج المختلط غير مثبت في الكتالوج.")
+    if "eligibility_unknown" in statuses:
+        # Phase 3 REQUIRED wording - never "متاح RX" or any other proven-
+        # availability claim while optical eligibility is unresolved.
+        return schemas.AvailabilityAnswer(code="power_eligibility_unknown",
+            title="المنتج موجود في الكتالوج، لكن توافقه مع هذه الوصفة غير مؤكد بسبب نطاق القوة.",
+            detail="نطاق القوة الحقيقي لهذا المنتج غير مُمثَّل بعد في النظام؛ يحتاج مراجعة "
+                   "قبل اعتباره متوافقاً مع أي وصفة.")
     return schemas.AvailabilityAnswer(code="none",
         title="❌ لا توجد عدسة بهذه المواصفات متوافقة مع الوصفة في الكتالوج الحالي",
         detail="جرّب البحث التلقائي أو راجع أقرب البدائل.")
@@ -485,34 +602,52 @@ def search(db: Session, prescription: models.Prescription,
     intel: List[schemas.PerEyeProductResult] = []
     intel_note = None
 
+    # "eligibility_unknown" is never a proven automatic/exact match (Phase 3):
+    # excluded exactly like "unavailable", UNLESS a specific product is pinned
+    # with no availability/market/price gate - then it must surface so the
+    # employee sees the "compatibility unresolved" answer instead of nothing.
+    _UNPROVEN = ("unavailable", "eligibility_unknown")
+
     if not targeted or filters is None:
-        exact = [r for r in options if r.pair_fulfillment.status != "unavailable"]
+        exact = [r for r in options if r.pair_fulfillment.status not in _UNPROVEN]
     else:
         # ALL requested targeted filters stay strict AND - availability / market /
         # max_price gate the pair fulfillment and are NEVER relaxed, not even for
         # a pinned product.
         gated = bool(filters.availability is not None or filters.market_scope or filters.max_price is not None)
         # a pinned product with no availability/market/price gate may surface even
-        # when an eye is impossible, so §7's per-eye matrix + warning can show.
-        keep_unavailable = filters.lens_model_id is not None and not gated
+        # when an eye is impossible or unresolved, so §7's per-eye matrix + the
+        # power-eligibility warning can show.
+        keep_unresolved = filters.lens_model_id is not None and not gated
         exact = [r for r in options
                  if _passes_targeted_gate(r, filters)
-                 and (keep_unavailable or r.pair_fulfillment.status != "unavailable")]
+                 and (keep_unresolved or r.pair_fulfillment.status not in _UNPROVEN)]
 
         if not exact and gated:
             # same requested commercial option(s), just outside the requested
-            # availability / market / price - shown SEPARATELY as availability
-            # intelligence, never counted as exact, never relaxing the filters.
+            # availability / market / price - OR the same option with
+            # unresolved power eligibility (Phase 3C item 4: this is
+            # informational catalog evidence, never an alternative, never an
+            # actionable pair price - each item's own pair_fulfillment.reason
+            # still carries the precise "غير مؤكد بسبب نطاق القوة" wording for
+            # an eligibility_unknown entry). Shown SEPARATELY, never counted
+            # as exact, never relaxing the filters.
             intel = sorted(
                 [r for r in options if r.pair_fulfillment.status != "unavailable"],
                 key=_order_key)
             if intel:
-                intel_note = ("المطلوب غير متوفر بهذه المواصفات؛ هذا توفر نفس المنتج المطلوب "
-                              "خارج التوفر/السوق/السعر المطلوب — ليس نتيجة مطابقة.")
+                intel_note = ("المطلوب غير متوفر بالتوفر/السوق/السعر المطلوب؛ هذا نفس المنتج "
+                              "المطلوب بحالة أخرى (خارج المطلوب، أو توافقه مع الوصفة غير مؤكد "
+                              "بسبب نطاق القوة) — ليس نتيجة مطابقة.")
 
         if not exact and not intel and req.include_alternatives:
             all_results, *_ = lens_matcher.match_lenses(
                 db, prescription, None, req.prefer_stock, req.prefer_aspherical)
+            # Phase 3C: an alternative must be prescription-safe too - a
+            # candidate whose power_eligibility is UNRESOLVED (or genuinely
+            # ineligible) is never a usable fallback, never offered as a
+            # priced recommendation.
+            all_results = _proven_eligible_for_alternatives(db, all_results, prescription)
             alternatives = compute_alternatives(all_results, set(), filters)
             if alternatives:
                 alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "
@@ -534,7 +669,8 @@ def search(db: Session, prescription: models.Prescription,
             title=f"❌ غير متوفر بهذه المواصفات ({want})",
             detail="راجع «توفر نفس المنتج» أدناه — نفس المنتج متاح خارج المطلوب.")
 
-    counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "rx": 0, "split": 0}
+    counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "rx": 0, "split": 0,
+              "eligibility_unknown": 0}
     for r in ordered:
         counts[_STATUS_TO_GROUP[r.pair_fulfillment.status]] += 1
 
@@ -547,6 +683,7 @@ def search(db: Session, prescription: models.Prescription,
         best_match=ordered[0] if ordered else None, groups=groups,
         stock_egypt_count=counts["stock_egypt"],
         stock_out_of_egypt_count=counts["stock_out_of_egypt"],
+        eligibility_unknown_count=counts["eligibility_unknown"],
         rx_count=counts["rx"], split_count=counts["split"],
         alternatives=alternatives, alternatives_note=alt_note,
         availability_intelligence=intel, availability_intelligence_note=intel_note)

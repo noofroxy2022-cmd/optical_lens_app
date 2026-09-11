@@ -8,7 +8,7 @@ from app.database import get_db
 from app import crud, schemas
 from app import product_search as product_search_service
 from app.ocr_service import ocr_service
-from app.lens_matcher import lens_matcher, TranspositionEngine, OpticsRecommender
+from app.lens_matcher import TranspositionEngine, OpticsRecommender
 import os
 import shutil
 from datetime import datetime
@@ -69,7 +69,8 @@ def get_prescription(prescription_id: int, db: Session = Depends(get_db)):
     return prescription
 
 
-@router.post("/{prescription_id}/match", response_model=schemas.MatchResponse)
+@router.post("/{prescription_id}/match", response_model=schemas.ProductSearchResponse,
+            deprecated=True)
 def match_lenses(
     prescription_id: int,
     filters: Optional[schemas.LensFilters] = None,
@@ -77,25 +78,36 @@ def match_lenses(
     prefer_aspherical: bool = True,
     db: Session = Depends(get_db)
 ):
-    """مطابقة الوصفة مع العدسات - مع جميع التوصيات"""
+    """DEPRECATED - compatibility alias for POST /prescriptions/{id}/search.
+
+    There must be exactly ONE prescription-eligibility decision path. This
+    endpoint used to call the frozen lens_matcher.match_lenses() directly,
+    which has no concept of VariantPricing.power_eligibility and could report
+    a row whose real power limits are not yet modeled (power_eligibility =
+    UNRESOLVED - e.g. a ZEISS catalog price with an unmodeled graphical/
+    footnote range) as a proven compatible RX lens for ANY prescription.
+
+    Audited callers: the dashboard never calls this route (Prescriptions.js
+    uses prescriptionAPI.search / POST .../search exclusively) and no test
+    exercises it at the HTTP layer - only lens_matcher.match_lenses() itself
+    is unit-tested directly, which is untouched. There is therefore no live
+    caller depending on the old MatchResponse shape, so this is a clean
+    deprecation: it now delegates to the SAME tri-state-safe
+    product_search.search() as /search and returns its ProductSearchResponse
+    - targeted mode (honouring `filters`, exactly like the old endpoint always
+    applied a supplied filter set) when `filters` is given, automatic mode
+    otherwise. The frozen matcher is never called from here again."""
     prescription = crud.get_prescription(db, prescription_id)
     if not prescription:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
 
-    results, stock_count, rx_count, index_rec, aspherical_rec = lens_matcher.match_lenses(
-        db, prescription, filters, prefer_stock, prefer_aspherical
+    req = schemas.ProductSearchRequest(
+        mode="targeted" if filters is not None else "automatic",
+        filters=filters,
+        prefer_stock=prefer_stock,
+        prefer_aspherical=prefer_aspherical,
     )
-
-    return schemas.MatchResponse(
-        prescription=schemas.PrescriptionResponse.model_validate(prescription),
-        results=results,
-        total_matches=len(results),
-        stock_count=stock_count,
-        rx_count=rx_count,
-        transposition_applied=prescription.transposition_applied,
-        index_recommendation=index_rec,
-        aspherical_recommendation=aspherical_rec
-    )
+    return product_search_service.search(db, prescription, req)
 
 
 @router.post("/{prescription_id}/search", response_model=schemas.ProductSearchResponse)

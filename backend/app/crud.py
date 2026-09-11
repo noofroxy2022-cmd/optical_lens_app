@@ -709,6 +709,19 @@ def _prepare_extraction_row(ext) -> dict:
     design_variant = md.get("design_variant") or ext.extracted_design or None
     color_variant = md.get("color_variant") or ext.extracted_color_variant or None
     market_scope = md.get("market_scope") or ext.extracted_market_scope or None
+    # Phase 2 (ZEISS): two more independent commercial axes, same overlay rule.
+    design_tier = md.get("design_tier") or ext.extracted_design_tier or None
+    treatment_band = md.get("treatment_band") or ext.extracted_treatment_band or None
+
+    # Phase 3 (ZEISS): power-eligibility provenance for a row with no explicit
+    # range. NOT human-overridable via modified_data - the only legitimate fix
+    # for "unresolved" is a real PowerRange, never a manual flip to
+    # "unrestricted". Missing on every pre-Phase-3 row -> "unrestricted"
+    # (existing RX-made-to-order behaviour, completely unchanged).
+    power_eligibility_raw = ext.extracted_power_eligibility or "unrestricted"
+    power_eligibility_enum = _coerce_enum(models.PowerEligibilityStatus, power_eligibility_raw)
+    if power_eligibility_enum is None:
+        errors.append(f"{tag}: invalid power_eligibility {power_eligibility_raw!r}")
 
     if errors:
         return {"errors": errors}
@@ -724,6 +737,9 @@ def _prepare_extraction_row(ext) -> dict:
             "is_asph": is_asph,
             "design_variant": design_variant,
             "color_variant": color_variant,
+            "design_tier": design_tier,
+            "treatment_band": treatment_band,
+            "power_eligibility": power_eligibility_enum,
             "market_scope": market_scope,
             "coating_ref": coating_ref,
             "availability": availability,
@@ -741,6 +757,7 @@ def _prepare_extraction_row(ext) -> dict:
                 material_enum.value, idx,
                 design_type_enum.value, is_asph,
                 _norm(design_variant), _norm(color_variant),
+                _norm(design_tier), _norm(treatment_band),
                 coating_ref or ("none",), availability.value,
                 power_scope or "", _norm(market_scope),
             ),
@@ -751,6 +768,8 @@ def _prepare_extraction_row(ext) -> dict:
 def _resolve_or_create_variant(db: Session, model, row) -> models.LensVariant:
     dv_n = _norm(row["design_variant"])
     cv_n = _norm(row["color_variant"])
+    dt_n = _norm(row["design_tier"])
+    tr_n = _norm(row["treatment_band"])
     existing = (
         db.query(models.LensVariant)
         .filter(
@@ -761,6 +780,8 @@ def _resolve_or_create_variant(db: Session, model, row) -> models.LensVariant:
             models.LensVariant.is_aspherical == row["is_asph"],
             func.lower(func.trim(func.coalesce(models.LensVariant.design_variant, ""))) == dv_n,
             func.lower(func.trim(func.coalesce(models.LensVariant.color_variant, ""))) == cv_n,
+            func.lower(func.trim(func.coalesce(models.LensVariant.design_tier, ""))) == dt_n,
+            func.lower(func.trim(func.coalesce(models.LensVariant.treatment_band, ""))) == tr_n,
         )
         .first()
     )
@@ -774,6 +795,8 @@ def _resolve_or_create_variant(db: Session, model, row) -> models.LensVariant:
         is_aspherical=row["is_asph"],
         design_variant=row["design_variant"],
         color_variant=row["color_variant"],
+        design_tier=row["design_tier"],
+        treatment_band=row["treatment_band"],
         # legacy / NON-AUTHORITATIVE mirror; commercial availability is on VariantPricing
         availability=(
             models.LensAvailability.RX
@@ -957,6 +980,7 @@ def confirm_catalog_commercial(
                 variant_id=variant.id,
                 coating_id=coating_id,
                 availability=row["availability"],
+                power_eligibility=row["power_eligibility"],
                 price_pair=row["price"],
                 currency="EGP",
                 source_catalog_id=catalog.id,

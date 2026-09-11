@@ -31,6 +31,24 @@ except Exception:  # pragma: no cover
     cv2 = None
     np = None
 
+try:  # generic index-column price-grid strategy (structural, no brand literals)
+    from app.index_grid_strategy import (
+        detect_index_grid as _detect_index_grid,
+        parse_index_grid as _parse_index_grid,
+        GridPolicy as _GridPolicy,
+    )
+except Exception:  # pragma: no cover
+    try:
+        from .index_grid_strategy import (
+            detect_index_grid as _detect_index_grid,
+            parse_index_grid as _parse_index_grid,
+            GridPolicy as _GridPolicy,
+        )
+    except Exception:
+        _detect_index_grid = None
+        _parse_index_grid = None
+        _GridPolicy = None
+
 
 # ===========================================================================
 # Generic commercial vocabulary. NO manufacturer names, page numbers or prices.
@@ -159,6 +177,31 @@ class ExtractedPowerRange:
     # ----- Phase 4 commercial identity -----
     design_variant: Optional[str] = None    # Free Form / High Definition / Core / ...
     color_variant: Optional[str] = None     # Clear / Transmatic/G/B / Polz/G/B / DWEAR ...
+    # ----- Phase 2 (ZEISS): two more independent commercial axes -----
+    design_tier: Optional[str] = None        # tier within design_variant's family
+                                             # (e.g. "Individual 3" / "Superb"), ONLY
+                                             # when the document proves a shared-
+                                             # family split - never invented.
+    treatment_band: Optional[str] = None          # raw catalog treatment/technology band evidence
+                                             # (e.g. "Clear" / "BlueGuard" / "Tinted");
+                                             # distinct from design_variant/color_variant.
+    # ----- Phase 3 (ZEISS): power-eligibility provenance for a row with NO
+    # explicit SPH/CYL/ADD range (has_range stays False for these).
+    #
+    # DELIBERATELY REQUIRED, NO DEFAULT (Phase 3B fail-open audit): every
+    # ExtractedPowerRange construction site must make an EXPLICIT choice.
+    # "unrestricted" means the source genuinely states no range restriction -
+    # the existing "RX made-to-order, no range printed -> any power"
+    # behaviour every prior (HOYA-shaped) strategy relies on, still applied
+    # via an explicit `power_eligibility="unrestricted"` at each of those call
+    # sites. "unresolved" means the source's real range/applicability rule is
+    # NOT yet modeled (numeric bound, sign-dependent CYL cap, ADD exclusion,
+    # graphical/zoned map, or external/deferred reference all count) - a
+    # strategy must set this so eligibility is never silently assumed true. A
+    # NEW strategy that forgets to set this raises TypeError immediately
+    # (fail loud) instead of silently defaulting to eligible-everywhere
+    # (fail open).
+    power_eligibility: str = field(kw_only=True)  # "unrestricted" | "unresolved"
     market_scope: Optional[str] = None      # generic: Egypt / Out Of Egypt / ...
     coating: Optional[str] = None
     coating_status: str = "not_found"       # resolved / explicit_none / not_found
@@ -307,6 +350,7 @@ class PDFHybridParser:
                             context.availability = avail
 
                     # ---- multi-strategy table discovery ----
+                    _pre_models = len(self.extracted_models)
                     for overrides, header, matrix in self._extract_page_tables(page):
                         sect = self._section_context(context, overrides)
                         rows = self._rows_from_section(header, matrix, sect)
@@ -347,6 +391,23 @@ class PDFHybridParser:
                             m = ExtractedLensModel(name=fam, category=sect.category)
                             m.power_ranges.extend(brs)
                             self.extracted_models.append(m)
+
+                    # ---- fallback: generic index-column price grid ----
+                    # Only when the existing strategies priced nothing on this
+                    # page AND the page geometrically carries an index-as-column
+                    # price grid. Purely additive; never rewrites a HOYA row.
+                    if _detect_index_grid is not None:
+                        priced_here = any(
+                            pr.price is not None
+                            for mdl in self.extracted_models[_pre_models:]
+                            for pr in mdl.power_ranges
+                        )
+                        if not priced_here:
+                            try:
+                                for m in self._reconstruct_index_grid(page, context):
+                                    self.extracted_models.append(m)
+                            except Exception as e:
+                                self.errors.append(f"index-grid strategy: {e}")
                     current_model = None
 
                 if current_model and current_model not in self.extracted_models:
@@ -709,6 +770,112 @@ class PDFHybridParser:
             if sig not in best or score > best[sig][0]:
                 best[sig] = (score, ov, hdr, mat)
         return [(ov, hdr, mat) for _, ov, hdr, mat in best.values()]
+
+    # ------------------------------------------------------------------------
+    # Generic index-column price-grid strategy (fallback).
+    # ------------------------------------------------------------------------
+    _CURRENCY_RE = re.compile(
+        r"\b(EGP|AED|USD|EUR|GBP|SAR|QAR|KWD|BHD|OMR|JOD|LBP|TRY|MAD|TND|DZD|LYD)\b",
+        re.I,
+    )
+
+    def _grid_currency(self, page) -> Optional[str]:
+        """Currency for a grid page - ONLY if the page text states exactly one
+        ISO code. No locale default, no inference from company / price size."""
+        try:
+            txt = page.extract_text() or ""
+        except Exception:
+            return None
+        hits = {m.group(1).upper() for m in self._CURRENCY_RE.finditer(txt)}
+        return next(iter(hits)) if len(hits) == 1 else None
+
+    def _reconstruct_index_grid(self, page, context: "ParserContext"):
+        """Parse an index-as-column price grid (index headers repeated once per
+        side-by-side family block; rows = treatment band -> coating label; cells =
+        one retail pair price). Structural + manufacturer-agnostic. Returns
+        [ExtractedLensModel]; [] when the grid signature is not clearly present.
+
+        This proves production RECOGNITION of the layout. Because a grid cell
+        price is a *pair* price whose per-eye split is not proven here (and
+        because power-range eligibility for these rows is not yet modeled -
+        see Phase 3), EVERY row it emits is flagged needs_review - it must
+        never auto-confirm."""
+        if _parse_index_grid is None or _GridPolicy is None:
+            return []
+        if _detect_index_grid is not None and not _detect_index_grid(page):
+            return []
+
+        avail = context.availability if getattr(context, "availability_explicit", False) else None
+        policy = _GridPolicy(
+            category=getattr(context, "category", None),
+            availability=avail,
+            market=getattr(context, "market", None),
+            currency=self._grid_currency(page),
+        )
+        try:
+            grid_rows = _parse_index_grid(page, policy)
+        except Exception as e:
+            self.errors.append(f"index-grid parse: {e}")
+            return []
+        if not grid_rows:
+            return []
+
+        PHASE = ("index-column price-grid strategy (structural): verify "
+                 "family / treatment band / coating / index / pair-price")
+        buckets: Dict[str, list] = {}
+        for gr in grid_rows:
+            pr = ExtractedPowerRange(
+                sph_min=0.0, sph_max=0.0, has_range=False,
+                index_value=gr.index_value,
+                availability=(gr.availability or "stock"),
+                price=(float(gr.price_pair) if gr.price_pair is not None else None),
+                coating=(gr.coating or None),
+                coating_status=("resolved" if gr.coating else "not_found"),
+                market_scope=(gr.market or None),
+                # canonical axes proven by THIS page's own structure - never a
+                # generic "technology" bucket. color_variant is deliberately left
+                # unset: no colour evidence exists on the SV-RX grid, and it must
+                # never be guessed or reused for the treatment band.
+                design_tier=(gr.tier or None),
+                treatment_band=(gr.treatment_band or None),
+                # Phase 3 SAFETY: this strategy has NO power-range model at all
+                # (has_range is always False here) and the ZEISS SV-RX pages it
+                # targets are PROVEN (visual audit) to carry real graphical /
+                # footnote power limits that are simply not captured yet. RX
+                # "no range printed" must therefore NEVER be read as
+                # "no range exists" for these rows - eligibility stays UNKNOWN
+                # until a real range model is built (see PowerEligibilityStatus).
+                power_eligibility="unresolved",
+            )
+            # canonical fields above are the searchable business meaning; the raw
+            # grid geometry stays here too, for provenance/debugging only.
+            ev = gr.evidence or {}
+            pr.notes = (
+                f"index-grid evidence | family={gr.family!r} tier={gr.tier!r} "
+                f"treatment_band={gr.treatment_band!r} | currency={gr.currency!r} | "
+                f"page={ev.get('page')} y={ev.get('y')} price_x={ev.get('price_x')} "
+                f"col_x={ev.get('col_x')} | raw={ev.get('raw_row')!r}"
+            )
+            pr.flag_review(PHASE)
+            pr.flag_review("power applicability not yet modeled for this catalog page - "
+                           "matching eligibility must be treated as UNKNOWN, never assumed")
+            for reason in gr.review_reasons:
+                pr.flag_review(reason)
+            if gr.availability is None:
+                pr.flag_review("availability not stated in an explicit section heading")
+
+            fam = gr.family or self.UNRESOLVED_FAMILY
+            if gr.family is None:
+                pr.flag_review("ambiguous/unresolved product family")
+            buckets.setdefault(fam, []).append(pr)
+
+        out = []
+        cat = getattr(context, "category", None) or "single_vision"
+        for fam, prs in buckets.items():
+            m = ExtractedLensModel(name=fam, category=cat)
+            m.power_ranges.extend(prs)
+            out.append(m)
+        return out
 
     def _sig(self, matrix):
         return tuple(tuple(_clean(c).lower() for c in r if _clean(c)) for r in (matrix or []))
@@ -1370,6 +1537,11 @@ class PDFHybridParser:
                     sph_min=0.0, sph_max=0.0, index_value=index_value,
                     availability=ctx.availability if ctx.availability in ("stock", "rx") else "stock",
                     market_scope=ctx.market or None,
+                    # this catalog section states no separate range restriction
+                    # beyond what sph/cyl/add columns (if any) already capture -
+                    # the existing, long-validated "RX made-to-order = any
+                    # power" assumption for a source with no such column.
+                    power_eligibility="unrestricted",
                 )
                 if geo:
                     r.design_type = geo
@@ -1919,6 +2091,9 @@ class PDFHybridParser:
                 index_value=context.index,
                 availability=self._infer_availability(context, row_text),
                 market_scope=(cell(market_col) or context.market or None),
+                # same existing "RX made-to-order = any power" assumption as
+                # base_row() above - explicit, not an implicit default.
+                power_eligibility="unrestricted",
             )
 
             # SPH / CYL / ADD
@@ -2344,6 +2519,9 @@ class PDFHybridParser:
                     extracted_design=pr.design_variant,
                     extracted_color_variant=pr.color_variant,
                     extracted_market_scope=pr.market_scope,
+                    extracted_design_tier=pr.design_tier,
+                    extracted_treatment_band=pr.treatment_band,
+                    extracted_power_eligibility=pr.power_eligibility,
                     extracted_coating=pr.coating,
                     coating_extraction_status=cstatus,
                     coating_confidence=pr.coating_confidence,
@@ -2364,8 +2542,11 @@ class PDFHybridParser:
                             "design_variant": pr.design_variant,
                             "color_variant": pr.color_variant,
                             "market_scope": pr.market_scope,
+                            "design_tier": pr.design_tier,
+                            "treatment_band": pr.treatment_band,
                         }
-                        if (pr.design_variant or pr.color_variant or pr.market_scope)
+                        if (pr.design_variant or pr.color_variant or pr.market_scope
+                            or pr.design_tier or pr.treatment_band)
                         else None
                     ),
                     status=pr.review_status,   # "pending" (review-ready) or "needs_review"
