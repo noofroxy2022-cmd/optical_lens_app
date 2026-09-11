@@ -242,7 +242,10 @@ class LensMatcherFinal:
         # notation normalizes to the same pair and matches identically.
         # total_power_min bounds the LOW meridian; total_power_max bounds the
         # HIGH meridian. The sph/cyl box checks above are only a coarse prefilter
-        # for G3 rows.
+        # for G3 rows. This is a manufacturer HARD limit, not a fuzzy-matching
+        # box - unlike the coarse checks above, it is evaluated with NO
+        # tolerance: the boundary itself is inclusive, but nothing beyond it
+        # passes, by even 0.01D.
         tp_min = getattr(power_range, "total_power_min", None)
         tp_max = getattr(power_range, "total_power_max", None)
         mca = getattr(power_range, "max_cyl_abs", None)
@@ -252,14 +255,14 @@ class LensMatcherFinal:
             # (cyl <= 0) and correct for a plus form (cyl >= 0).
             m1, m2 = sph, sph + cyl_needed
             low_meridian, high_meridian = min(m1, m2), max(m1, m2)
-            if tp_min is not None and low_meridian < tp_min - self.tolerance_sph:
+            if tp_min is not None and low_meridian < tp_min:
                 issues.append(
                     f"low meridian {round(low_meridian, 2)} < total_power_min {tp_min}")
-            if tp_max is not None and high_meridian > tp_max + self.tolerance_sph:
+            if tp_max is not None and high_meridian > tp_max:
                 issues.append(
                     f"high meridian {round(high_meridian, 2)} > total_power_max {tp_max}")
         if mca is not None:
-            if abs(cyl_needed) > mca + self.tolerance_cyl:
+            if abs(cyl_needed) > mca:
                 issues.append(f"CYL magnitude {abs(cyl_needed)} > {mca}")
         return issues
 

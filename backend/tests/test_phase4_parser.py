@@ -2596,6 +2596,167 @@ def test_g3_Y_boundaries_inclusive_and_cap_unchanged():
 
 
 # ============================================================
+#  PHASE 4G - G3 zero-tolerance hard boundaries (permanent)
+#  total_power_min/total_power_max/max_cyl_abs are manufacturer HARD
+#  limits: the boundary itself is inclusive, but nothing beyond it by
+#  even 0.25D passes any more. This is deliberately narrower than the
+#  legacy coarse sph/cyl/add box, which keeps its +-0.25 tolerance
+#  unchanged (see test_g3_ZA_coarse_tolerance_still_applies below).
+# ============================================================
+
+# -- ZA. hypothetical range -20.00..+14.00, max_cyl_abs 10.00 --------
+_ZA_RANGE = dict(total_power_min=-20.0, total_power_max=14.0, max_cyl_abs=10.0)
+
+
+def test_g3_ZA_sph_exact_lower_boundary_eligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    assert _g3_chk(pr, -20.0, 0.0) == []
+
+
+def test_g3_ZA_sph_quarter_past_lower_boundary_ineligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    issues = _g3_chk(pr, -20.25, 0.0)
+    assert issues and any("low meridian" in i for i in issues)
+
+
+def test_g3_ZA_sph_exact_upper_boundary_eligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    assert _g3_chk(pr, 14.0, 0.0) == []
+
+
+def test_g3_ZA_sph_quarter_past_upper_boundary_ineligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    issues = _g3_chk(pr, 14.25, 0.0)
+    assert issues and any("high meridian" in i for i in issues)
+
+
+def test_g3_ZA_cyl_exact_cap_eligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    assert _g3_chk(pr, 0.0, -10.0) == []
+
+
+def test_g3_ZA_cyl_quarter_past_cap_ineligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    issues = _g3_chk(pr, 0.0, -10.25)
+    assert issues and any("magnitude" in i for i in issues)
+
+
+# -- A. both principal meridians enforced: SPH -16 / CYL -10 -> M2=-26 --
+def test_g3_ZB_A_both_meridians_enforced_m2_out_of_range():
+    pr = _g3_pr(**_ZA_RANGE)
+    issues = _g3_chk(pr, -16.0, -10.0)           # M1=-16 (in range), M2=-26
+    assert issues and any("low meridian" in i for i in issues)
+    assert not any(i.startswith("SPH ") for i in issues)  # coarse box (-40..40) doesn't fire
+
+
+# -- B/C. exact lower boundary via SPH+CYL, then 0.25D beyond it --------
+def test_g3_ZB_B_exact_lower_boundary_via_sph_plus_cyl_eligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    # M1=-10, M2=-10+-10=-20 == total_power_min exactly
+    assert _g3_chk(pr, -10.0, -10.0) == []
+
+
+def test_g3_ZB_C_quarter_past_lower_boundary_via_sph_plus_cyl_ineligible():
+    pr = _g3_pr(**_ZA_RANGE)
+    # M1=-10, M2=-10.25+... use M2=-20.25 by SPH=-10.25, CYL=-10.0
+    issues = _g3_chk(pr, -10.25, -10.0)
+    assert issues and any("low meridian" in i for i in issues)
+
+
+# -- D. transposed-equivalent plus-cylinder input -> same verdict -------
+def test_g3_ZB_D_transposition_invariant_at_hard_boundary():
+    pr = _g3_pr(**_ZA_RANGE)
+    minus_form = _g3_norm(-10.0, -10.0, 90)          # already minus: unchanged
+    plus_equiv_entry = _g3_norm(-20.0, 10.0, 180)    # same Rx, entered plus-cyl
+    assert minus_form == plus_equiv_entry == (-10.0, -10.0)
+    assert _g3_chk(pr, *minus_form) == _g3_chk(pr, *plus_equiv_entry) == []
+
+
+# -- E. asymmetric Total Power range (real HOYA shape, see ZC below) ----
+def test_g3_ZB_E_asymmetric_range_each_side_enforced_independently():
+    pr = _g3_pr(total_power_min=-26.0, total_power_max=15.0, max_cyl_abs=4.0)
+    assert _g3_chk(pr, -26.0, 0.0) == []              # low boundary
+    assert _g3_chk(pr, 15.0, 0.0) == []               # high boundary (different magnitude)
+    assert _g3_chk(pr, -26.25, 0.0) != []
+    assert _g3_chk(pr, 15.25, 0.0) != []
+
+
+# -- F. one-sided G3 bounds -> only the supplied bound is enforced ------
+def test_g3_ZB_F_one_sided_upper_only_lower_side_unconstrained():
+    pr = _g3_pr(total_power_max=6.0)                 # no total_power_min, no max_cyl_abs
+    assert _g3_chk(pr, -35.0, 0.0) == []              # deep minus: no low bound to violate
+    issues = _g3_chk(pr, 6.25, 0.0)
+    assert issues and any("high meridian" in i for i in issues)
+
+
+def test_g3_ZB_F_one_sided_lower_only_upper_side_unconstrained():
+    pr = _g3_pr(total_power_min=-8.0)                # no total_power_max, no max_cyl_abs
+    assert _g3_chk(pr, 35.0, 0.0) == []               # deep plus: no high bound to violate
+    issues = _g3_chk(pr, -8.25, 0.0)
+    assert issues and any("low meridian" in i for i in issues)
+
+
+# -- G. max_cyl_abs nullable -> do not invent a cylinder limit ----------
+def test_g3_ZB_G_null_max_cyl_abs_never_invents_a_cap():
+    pr = _g3_pr(total_power_min=-20.0, total_power_max=14.0, max_cyl_abs=None,
+                cyl_min=-40.0, cyl_max=0.0)
+    # a huge cylinder magnitude must not be rejected by a fabricated cap -
+    # only the (absent) total_power / (wide) coarse box govern here
+    issues = _g3_chk(pr, 0.0, -8.0)
+    assert not any("magnitude" in i for i in issues)
+
+
+# -- ZC. real confirmed HOYA G3 row: Total Power -26.00..+15.00, Max.Cyl 4.00
+_ZC_HOYA_RANGE = dict(total_power_min=-26.0, total_power_max=15.0, max_cyl_abs=4.0)
+
+
+def test_g3_ZC_real_hoya_row_exact_lower_boundary_eligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    assert _g3_chk(pr, -26.0, 0.0) == []
+
+
+def test_g3_ZC_real_hoya_row_quarter_past_lower_boundary_ineligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    issues = _g3_chk(pr, -26.25, 0.0)
+    assert issues and any("low meridian" in i for i in issues)
+
+
+def test_g3_ZC_real_hoya_row_exact_upper_boundary_eligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    assert _g3_chk(pr, 15.0, 0.0) == []
+
+
+def test_g3_ZC_real_hoya_row_quarter_past_upper_boundary_ineligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    issues = _g3_chk(pr, 15.25, 0.0)
+    assert issues and any("high meridian" in i for i in issues)
+
+
+def test_g3_ZC_real_hoya_row_cyl_exact_cap_eligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    assert _g3_chk(pr, 0.0, -4.0) == []
+
+
+def test_g3_ZC_real_hoya_row_cyl_quarter_past_cap_ineligible():
+    pr = _g3_pr(**_ZC_HOYA_RANGE)
+    issues = _g3_chk(pr, 0.0, -4.25)
+    assert issues and any("magnitude" in i for i in issues)
+
+
+# -- ZD. coarse sph/cyl/add tolerance is UNCHANGED by the G3 fix --------
+def test_g3_ZD_coarse_tolerance_still_applies_untouched():
+    from app.lens_matcher import LensMatcherFinal
+    m = LensMatcherFinal()
+    pr = _g3_pr(total_power_min=None, total_power_max=None, max_cyl_abs=None,
+                sph_min=-10.0, sph_max=10.0, cyl_min=-4.0, cyl_max=0.0)
+    # 0.25D past the coarse SPH box still passes - that tolerance is untouched
+    assert m._check_form_against_range(pr, (10.25, 0.0, 0, 0.0)) == []
+    # 0.26D past it still fails, exactly as before
+    issues = m._check_form_against_range(pr, (10.26, 0.0, 0, 0.0))
+    assert issues and any(i.startswith("SPH ") for i in issues)
+
+
+# ============================================================
 #  G3 slice 2 - UNSIGNED single-total "Total Sph+Cyl (+P|-N) Cyl (n)"
 #    +P  -> total_power_min=0.0  total_power_max=+P  (PLUS side)
 #    -N  -> total_power_min=-N   total_power_max=0.0 (MINUS side)
