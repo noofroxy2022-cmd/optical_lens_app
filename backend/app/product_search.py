@@ -185,11 +185,28 @@ def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: 
     for r in all_results:
         if r.source_pricing_id in exact_ids:
             continue
+        # V1: company is never a "relaxable" dimension for alternatives - a
+        # shop user who explicitly asked for one manufacturer must never be
+        # shown another manufacturer's lens as a same-request alternative.
+        # Every other supplied filter (index, design, coating, ...) may still
+        # be relaxed and merely lowers proximity_score/relaxed_filters below.
+        if f.company_id is not None and r.lens_model.company_id != f.company_id:
+            continue
+        # V1: max_price is a hard budget ceiling, never a relaxable dimension
+        # (matches the exact-match gate's own "never relaxed" rule in
+        # _passes_targeted_gate) - an alternative over budget must never be
+        # shown merely for being otherwise relevant.
+        if f.max_price is not None and r.price_pair > Decimal(str(f.max_price)):
+            continue
         score, relaxed, reason = _alt_scored(r, f, ref_family)
         alts.append(schemas.AlternativeResult(
             result=r, relaxed_filters=relaxed, proximity_reason=reason, proximity_score=score))
-    alts.sort(key=lambda a: (-a.proximity_score, result_tier(a.result),
-                             -float(a.result.match_score), Decimal(str(a.result.price_pair))))
+    # V1: alternatives must be sorted by retail pair price (ascending) first -
+    # a shop user comparing options needs the cheapest proven-eligible option
+    # first. Proximity/tier/match-score remain as tiebreakers only for equal
+    # prices, never overriding price order.
+    alts.sort(key=lambda a: (Decimal(str(a.result.price_pair)), -a.proximity_score,
+                             result_tier(a.result), -float(a.result.match_score)))
     return alts[:limit]
 
 
@@ -768,10 +785,27 @@ def search(db: Session, prescription: models.Prescription,
         if filters and filters.market_scope:
             want_bits.append(filters.market_scope)
         want = " / ".join(want_bits) if want_bits else "المواصفات المطلوبة"
-        answer = schemas.AvailabilityAnswer(
-            code="none",
-            title=f"❌ غير متوفر بهذه المواصفات ({want})",
-            detail="راجع «توفر نفس المنتج» أدناه — نفس المنتج متاح خارج المطلوب.")
+        # V1: when the user explicitly asked for STOCK and none exists, but the
+        # SAME requested product (identity-filtered `intel`, never a different
+        # company/product) is PROVEN available as RX, say so directly as the
+        # primary answer instead of a generic "not available" - the employee
+        # should not have to open "same product availability" to learn this.
+        # A merely UNRESOLVED intel row (eligibility_unknown) never qualifies -
+        # only a genuinely proven "rx" status does. This changes which message
+        # is chosen, never which rows are proven/matched/priced.
+        requested_stock = (filters is not None and filters.availability is not None
+                           and getattr(filters.availability, "value", filters.availability) == "stock")
+        rx_proven = requested_stock and any(r.pair_fulfillment.status == "rx" for r in intel)
+        if rx_proven:
+            answer = schemas.AvailabilityAnswer(
+                code="rx_only",
+                title="🏭 غير متوفر STOCK — متاح RX / تصنيع",
+                detail="راجع «توفر نفس المنتج» أدناه لتفاصيل السعر والطلاء.")
+        else:
+            answer = schemas.AvailabilityAnswer(
+                code="none",
+                title=f"❌ غير متوفر بهذه المواصفات ({want})",
+                detail="راجع «توفر نفس المنتج» أدناه — نفس المنتج متاح خارج المطلوب.")
 
     counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "rx": 0, "split": 0,
               "eligibility_unknown": 0}
