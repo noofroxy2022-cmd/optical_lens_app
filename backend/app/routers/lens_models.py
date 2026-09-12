@@ -3,7 +3,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from app.database import get_db
 from app import crud, schemas
 
@@ -32,6 +32,37 @@ def list_lens_models(
     return crud.get_lens_models(db, skip=skip, limit=limit, 
                                 company_id=company_id, category=category,
                                 include_inactive=include_inactive)
+
+
+@router.get("/filter-options", response_model=schemas.FilterOptionsResponse)
+def list_filter_options(
+    company_id: Optional[int] = None,
+    lens_model_id: Optional[int] = None,
+    index_value: Optional[float] = None,
+    category: Optional[str] = None,
+    design_variant: Optional[str] = None,
+    color_variant: Optional[str] = None,
+    treatment_band: Optional[str] = None,
+    coating: Optional[str] = None,
+    availability: Optional[str] = None,
+    market_scope: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """خيارات كتالوج البحث المحدد (بيانات فعلية للفلاتر فقط، لا تمس منطق المطابقة).
+
+    Generic distinct-options facets for the targeted-search filter panel. Every
+    parameter is optional and independent (no fixed selection order); each
+    dimension's OWN current value is excluded from its own facet's constraints
+    so that facet's list always shows every value still reachable given the
+    OTHER currently-active filters (true AND intersection, no manufacturer-
+    specific branching, read-only aggregate query).
+    """
+    return crud.get_filter_facets(
+        db, company_id=company_id, lens_model_id=lens_model_id, index_value=index_value,
+        category=category, design_variant=design_variant, color_variant=color_variant,
+        treatment_band=treatment_band, coating=coating, availability=availability,
+        market_scope=market_scope,
+    )
 
 
 @router.get("/{model_id}", response_model=schemas.LensModelResponse)

@@ -30,6 +30,11 @@ export const lensModelAPI = {
   update: (id, data) => api.put(`/lens-models/${id}`, data),
   toggleActive: (id) => api.post(`/lens-models/${id}/toggle-active`),
   delete: (id) => api.delete(`/lens-models/${id}`),
+  // Generic catalog-driven distinct-options facets for the targeted-search filter
+  // panel (V1.0.1 UX hotfix). `params` is any subset of {company_id, lens_model_id,
+  // index_value, category, design_variant, coating, color_variant, treatment_band,
+  // availability, market_scope} - every field optional, no fixed order.
+  getFilterOptions: (params) => api.get('/lens-models/filter-options', { params }),
 };
 
 // Back-compat alias: some pages import `lensAPI`; the real surface is lensModelAPI.

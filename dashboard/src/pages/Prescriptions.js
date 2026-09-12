@@ -106,15 +106,19 @@ const PairAnswer = ({ pf }) => {
   );
 };
 
-const CATEGORIES = [
-  { value: 'single_vision', label: 'Single Vision' },
-  { value: 'progressive', label: 'Progressive' },
-  { value: 'bifocal', label: 'Bifocal' },
-  { value: 'office', label: 'Office' },
-  { value: 'digital', label: 'Digital' },
-];
+// display-only labels for the fixed LensCategory enum; the canonical value sent
+// to the backend always stays the raw catalog string (never one of these labels)
+const CATEGORY_LABELS = {
+  single_vision: 'Single Vision',
+  progressive: 'Progressive',
+  bifocal: 'Bifocal',
+  office: 'Office',
+  digital: 'Digital',
+};
 
 const ANSWER_TYPE = { stock_egypt: 'success', stock_out_of_egypt: 'warning', rx_only: 'warning', split: 'warning', none: 'error' };
+
+const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
 
 const Prescriptions = () => {
   const [prescriptions, setPrescriptions] = useState([]);
@@ -133,8 +137,18 @@ const Prescriptions = () => {
   const [searchData, setSearchData] = useState(null);
   const [mode, setMode] = useState('automatic');
   const [companies, setCompanies] = useState([]);
-  const [models, setModels] = useState([]);
   const [filters, setFilters] = useState({});
+  // Catalog-driven distinct-options facets for every targeted-search dimension
+  // (V1.0.1 UX hotfix). Populated from GET /lens-models/filter-options, which is
+  // recomputed on every filter change against whichever OTHER filters are
+  // currently active - a true cascading AND intersection with no fixed order and
+  // no manufacturer-specific branching. Product/company are NOT required for any
+  // of these to be populated.
+  const [facets, setFacets] = useState(EMPTY_FACETS);
+  // remembers product names seen in any earlier facets response, so a selected
+  // Product can still show its real name even if it drops out of a later,
+  // narrower options list (it must stay selected regardless - see withSelected)
+  const [modelNameById, setModelNameById] = useState({});
 
   useEffect(() => {
     loadPrescriptions();
@@ -197,22 +211,109 @@ const Prescriptions = () => {
     setSearchData(null);
     setMode('automatic');
     setFilters({});
-    setModels([]);
+    setFacets(EMPTY_FACETS);
+    setModelNameById({});
     setSearchVisible(true);
     runSearch(record, 'automatic', {});
+    refreshFacetOptions({});
+  };
+
+  // params accepted by GET /lens-models/filter-options; company_id/lens_model_id
+  // are NOT required - every dimension is independently optional (V1.0.1 UX hotfix)
+  const buildFacetParams = (f) => {
+    const p = {};
+    if (f.company_id) p.company_id = f.company_id;
+    if (f.lens_model_id) p.lens_model_id = f.lens_model_id;
+    if (f.index_value != null && f.index_value !== '') p.index_value = f.index_value;
+    if (f.category) p.category = f.category;
+    if (f.design_variant) p.design_variant = f.design_variant;
+    if (f.coating) p.coating = f.coating;
+    if (f.color_variant) p.color_variant = f.color_variant;
+    if (f.treatment_band) p.treatment_band = f.treatment_band;
+    if (f.availability && f.availability !== 'both') p.availability = f.availability;
+    if (f.market_scope && f.market_scope !== 'all') p.market_scope = f.market_scope;
+    return p;
+  };
+
+  // Recomputes every facet's distinct-OPTIONS-TO-OFFER list against whichever
+  // OTHER filters are currently active (true cascading AND intersection, no
+  // fixed selection order). This ONLY changes what the dropdowns show next -
+  // it must NEVER clear a filter the user already picked. A user-selected value
+  // is part of the requested specification and stays selected even if the fresh
+  // intersection no longer contains it (search may then legitimately return 0).
+  const refreshFacetOptions = async (nextFilters) => {
+    try {
+      const r = await lensModelAPI.getFilterOptions(buildFacetParams(nextFilters));
+      const d = r.data || EMPTY_FACETS;
+      setFacets(d);
+      if (d.lens_models.length) {
+        setModelNameById((m) => {
+          const next = { ...m };
+          d.lens_models.forEach((mm) => { next[mm.id] = mm.name; });
+          return next;
+        });
+      }
+    } catch (e) { /* non-fatal - filters stay optional, options just don't refresh */ }
+  };
+
+  // TRUE parent-identity check, used ONLY when Company or Product itself
+  // changes. Scoped to ONLY that entity (company_id, or company_id+lens_model_id)
+  // with none of the sibling commercial filters applied, so it answers "does
+  // this value exist AT ALL under the new entity" - not "is it still compatible
+  // with whatever else happens to be selected right now". Only a value that
+  // fails THIS identity check may be explicitly cleared (spec section 2/5D/5E);
+  // no other filter change is ever allowed to clear a sibling filter.
+  const clearIdentityInvalidChildren = async (scopeParams, next, { checkProduct }) => {
+    try {
+      const r = await lensModelAPI.getFilterOptions(scopeParams);
+      const d = r.data || EMPTY_FACETS;
+      const out = { ...next };
+      if (checkProduct && out.lens_model_id != null && !d.lens_models.some((m) => m.id === out.lens_model_id)) out.lens_model_id = undefined;
+      if (out.category && !d.category.includes(out.category)) out.category = undefined;
+      if (out.index_value != null && !d.index_value.includes(out.index_value)) out.index_value = undefined;
+      if (out.design_variant && !d.design_variant.includes(out.design_variant)) out.design_variant = undefined;
+      if (out.color_variant && !d.color_variant.includes(out.color_variant)) out.color_variant = undefined;
+      if (out.treatment_band && !d.treatment_band.includes(out.treatment_band)) out.treatment_band = undefined;
+      if (out.coating && !d.coating.some((c) => c.code === out.coating)) out.coating = undefined;
+      return out;
+    } catch (e) {
+      return next; // non-fatal - never clear a user selection just because this check failed
+    }
   };
 
   const onCompanyChange = async (companyId) => {
-    setFilters((f) => ({ ...f, company_id: companyId, lens_model_id: undefined }));
-    setModels([]);
+    let next = { ...filters, company_id: companyId };
     if (companyId) {
-      try {
-        // fetch all active models and narrow client-side (avoids the query-param
-        // path on GET /lens-models/); backend is not touched.
-        const r = await lensModelAPI.getAll();
-        setModels((r.data || []).filter((m) => m.company_id === companyId));
-      } catch (e) { /* non-fatal - product filter stays optional */ }
+      next = await clearIdentityInvalidChildren({ company_id: companyId }, next, { checkProduct: true });
     }
+    setFilters(next);
+    refreshFacetOptions(next);
+  };
+
+  const onModelChange = async (modelId) => {
+    let next = { ...filters, lens_model_id: modelId };
+    if (modelId) {
+      next = await clearIdentityInvalidChildren({ company_id: filters.company_id, lens_model_id: modelId }, next, { checkProduct: false });
+    }
+    setFilters(next);
+    refreshFacetOptions(next);
+  };
+
+  // Every other catalog-driven field: set the value and refresh what the OTHER
+  // dropdowns offer next - never clear any sibling filter. No fixed order.
+  const onFilterFieldChange = (key) => (value) => {
+    const next = { ...filters, [key]: value };
+    setFilters(next);
+    refreshFacetOptions(next);
+  };
+
+  // Keeps a user-selected value visible/selected in its Select even when the
+  // freshly computed options no longer contain it (spec: never silently drop a
+  // selected filter). Injects it back in, visually flagged as currently
+  // unreachable with the rest of the selection, instead of vanishing.
+  const withSelected = (options, selectedValue, fallbackLabel) => {
+    if (selectedValue == null || options.some((o) => o.value === selectedValue)) return options;
+    return [...options, { value: selectedValue, label: `${fallbackLabel} ⚠️ غير متاح بهذه المرشحات` }];
   };
 
   const buildFilterPayload = () => {
@@ -225,6 +326,7 @@ const Prescriptions = () => {
     if (f.design_variant) out.design_variant = f.design_variant;
     if (f.coating) out.coating = f.coating;
     if (f.color_variant) out.color_variant = f.color_variant;
+    if (f.treatment_band) out.treatment_band = f.treatment_band;
     if (f.availability && f.availability !== 'both') out.availability = f.availability;
     if (f.market_scope && f.market_scope !== 'all') out.market_scope = f.market_scope;
     if (f.max_price != null && f.max_price !== '') out.max_price = Number(f.max_price);
@@ -421,19 +523,29 @@ const Prescriptions = () => {
               <Col span={6}>
                 <div>المنتج / الموديل</div>
                 <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%' }} placeholder="الكل"
-                  value={filters.lens_model_id} disabled={!filters.company_id}
-                  onChange={(v) => setFilters((f) => ({ ...f, lens_model_id: v }))}
-                  options={models.map((m) => ({ value: m.id, label: m.name }))} />
+                  value={filters.lens_model_id}
+                  onChange={onModelChange}
+                  options={withSelected(
+                    facets.lens_models.map((m) => ({ value: m.id, label: m.name })),
+                    filters.lens_model_id,
+                    modelNameById[filters.lens_model_id] || `#${filters.lens_model_id}`,
+                  )} />
               </Col>
               <Col span={3}>
                 <div>Index</div>
-                <InputNumber style={{ width: '100%' }} step={0.01} placeholder="الكل"
-                  value={filters.index_value} onChange={(v) => setFilters((f) => ({ ...f, index_value: v }))} />
+                <Select allowClear showSearch style={{ width: '100%' }} placeholder="الكل"
+                  value={filters.index_value}
+                  onChange={onFilterFieldChange('index_value')}
+                  options={withSelected(facets.index_value.map((v) => ({ value: v, label: String(v) })), filters.index_value, String(filters.index_value))} />
               </Col>
               <Col span={5}>
                 <div>الفئة</div>
                 <Select allowClear style={{ width: '100%' }} placeholder="الكل" value={filters.category}
-                  onChange={(v) => setFilters((f) => ({ ...f, category: v }))} options={CATEGORIES} />
+                  onChange={onFilterFieldChange('category')}
+                  options={withSelected(
+                    facets.category.map((v) => ({ value: v, label: CATEGORY_LABELS[v] || v })),
+                    filters.category, CATEGORY_LABELS[filters.category] || filters.category,
+                  )} />
               </Col>
               <Col span={4}>
                 <div>السعر الأقصى</div>
@@ -442,34 +554,47 @@ const Prescriptions = () => {
               </Col>
               <Col span={6}>
                 <div>التصميم / design_variant</div>
-                <Input allowClear placeholder="مثال: Flat Top S28" value={filters.design_variant}
-                  onChange={(e) => setFilters((f) => ({ ...f, design_variant: e.target.value }))} />
+                <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%' }} placeholder="الكل"
+                  value={filters.design_variant}
+                  onChange={onFilterFieldChange('design_variant')}
+                  options={withSelected(facets.design_variant.map((v) => ({ value: v, label: v })), filters.design_variant, filters.design_variant)} />
               </Col>
               <Col span={6}>
                 <div>الطلاء</div>
-                <Input allowClear placeholder="مثال: Hi Vision Aqua" value={filters.coating}
-                  onChange={(e) => setFilters((f) => ({ ...f, coating: e.target.value }))} />
+                <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%' }} placeholder="الكل"
+                  value={filters.coating}
+                  onChange={onFilterFieldChange('coating')}
+                  options={withSelected(facets.coating.map((c) => ({ value: c.code, label: c.name_ar || c.name })), filters.coating, filters.coating)} />
               </Col>
               <Col span={6}>
-                <div>التقنية / اللون (color_variant)</div>
-                <Input allowClear placeholder="مثال: Sensity 2" value={filters.color_variant}
-                  onChange={(e) => setFilters((f) => ({ ...f, color_variant: e.target.value }))} />
+                <div>اللون / color_variant</div>
+                <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%' }} placeholder="الكل"
+                  value={filters.color_variant}
+                  onChange={onFilterFieldChange('color_variant')}
+                  options={withSelected(facets.color_variant.map((v) => ({ value: v, label: v })), filters.color_variant, filters.color_variant)} />
+              </Col>
+              <Col span={6}>
+                <div>التقنية / treatment_band</div>
+                <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%' }} placeholder="الكل"
+                  value={filters.treatment_band}
+                  onChange={onFilterFieldChange('treatment_band')}
+                  options={withSelected(facets.treatment_band.map((v) => ({ value: v, label: v })), filters.treatment_band, filters.treatment_band)} />
               </Col>
               <Col span={3}>
                 <div>التوفر</div>
                 <Select style={{ width: '100%' }} value={filters.availability || 'both'}
-                  onChange={(v) => setFilters((f) => ({ ...f, availability: v }))}
+                  onChange={onFilterFieldChange('availability')}
                   options={[{ value: 'both', label: 'الكل' }, { value: 'stock', label: 'STOCK' }, { value: 'rx', label: 'RX' }]} />
               </Col>
               <Col span={3}>
                 <div>السوق</div>
                 <Select style={{ width: '100%' }} value={filters.market_scope || 'all'}
-                  onChange={(v) => setFilters((f) => ({ ...f, market_scope: v }))}
+                  onChange={onFilterFieldChange('market_scope')}
                   options={[{ value: 'all', label: 'الكل' }, { value: 'Egypt', label: 'Egypt' }, { value: 'Out Of Egypt', label: 'Out Of Egypt' }]} />
               </Col>
             </Row>
             <div style={{ marginTop: 8, color: '#888', fontSize: 12 }}>
-              كل المرشحات تُطبَّق معاً (AND) ولا يتم تجاوز أي منها تلقائياً.
+              كل المرشحات تُطبَّق معاً (AND) ولا يتم تجاوز أي منها تلقائياً. كل حقل اختياري ومستقل — لا يلزم اختيار المنتج أولاً. اختيار أي حقل يُحدّث خيارات باقي الحقول فقط، ولا يحذف أي اختيار سابق تلقائياً؛ حتى لو أصبح المزيج غير متاح، يبقى اختيارك ظاهراً (⚠️) والبحث سيُظهر بدقة أنه غير متاح بهذه المواصفات. لا يُحذف اختيار تلقائياً إلا عند تغيير الشركة أو المنتج نفسه إن كانت القيمة السابقة لا تنتمي إطلاقاً للكيان الجديد.
             </div>
           </Card>
         )}

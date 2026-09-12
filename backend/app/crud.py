@@ -239,6 +239,110 @@ def get_variants_by_model(db: Session, model_id: int) -> List[models.LensVariant
         models.LensVariant.is_active == True
     ).all()
 
+def get_filter_facets(
+    db: Session,
+    company_id: Optional[int] = None,
+    lens_model_id: Optional[int] = None,
+    index_value: Optional[float] = None,
+    category: Optional[str] = None,
+    design_variant: Optional[str] = None,
+    color_variant: Optional[str] = None,
+    treatment_band: Optional[str] = None,
+    coating: Optional[str] = None,
+    availability: Optional[str] = None,
+    market_scope: Optional[str] = None,
+) -> dict:
+    """Distinct valid values for every targeted-search dimension, restricted to
+    variants with at least one CURRENT (effective_to IS NULL) priced offer.
+
+    Generic faceted-search read: for each dimension, every OTHER currently-active
+    filter is applied (that dimension's own filter is excluded from its own facet
+    so its list still shows every value reachable from the remaining selection),
+    giving a true cascading AND intersection with no fixed selection order and no
+    manufacturer-specific branching. Read-only; never touches matching/pricing.
+    """
+    base = (
+        db.query(models.LensVariant, models.LensModel, models.VariantPricing, models.Coating)
+        .join(models.LensModel, models.LensVariant.lens_model_id == models.LensModel.id)
+        .join(models.VariantPricing, models.VariantPricing.variant_id == models.LensVariant.id)
+        .outerjoin(models.Coating, models.Coating.id == models.VariantPricing.coating_id)
+        .filter(
+            models.LensModel.is_active == True,
+            models.LensModel.is_deleted == False,
+            models.LensVariant.is_active == True,
+            models.VariantPricing.effective_to.is_(None),
+        )
+    )
+
+    def scoped(exclude: str):
+        q = base
+        if company_id and exclude != "company_id":
+            q = q.filter(models.LensModel.company_id == company_id)
+        if lens_model_id and exclude != "lens_model_id":
+            q = q.filter(models.LensVariant.lens_model_id == lens_model_id)
+        if index_value is not None and exclude != "index_value":
+            q = q.filter(models.LensVariant.index_value == index_value)
+        if category and exclude != "category":
+            q = q.filter(models.LensModel.category == category)
+        if design_variant and exclude != "design_variant":
+            q = q.filter(models.LensVariant.design_variant == design_variant)
+        if color_variant and exclude != "color_variant":
+            q = q.filter(models.LensVariant.color_variant == color_variant)
+        if treatment_band and exclude != "treatment_band":
+            q = q.filter(models.LensVariant.treatment_band == treatment_band)
+        if coating and exclude != "coating":
+            q = q.filter(models.Coating.code == coating)
+        if availability and exclude != "availability":
+            q = q.filter(models.VariantPricing.availability == availability)
+        if market_scope and exclude != "market_scope":
+            q = q.filter(models.VariantPricing.market_scope == market_scope)
+        return q
+
+    lens_model_rows = (
+        scoped("lens_model_id")
+        .with_entities(models.LensModel.id, models.LensModel.name)
+        .distinct().all()
+    )
+    index_rows = (
+        scoped("index_value").with_entities(models.LensVariant.index_value).distinct().all()
+    )
+    category_rows = (
+        scoped("category").with_entities(models.LensModel.category).distinct().all()
+    )
+    design_rows = (
+        scoped("design_variant")
+        .filter(models.LensVariant.design_variant.isnot(None))
+        .with_entities(models.LensVariant.design_variant).distinct().all()
+    )
+    color_rows = (
+        scoped("color_variant")
+        .filter(models.LensVariant.color_variant.isnot(None))
+        .with_entities(models.LensVariant.color_variant).distinct().all()
+    )
+    treatment_rows = (
+        scoped("treatment_band")
+        .filter(models.LensVariant.treatment_band.isnot(None))
+        .with_entities(models.LensVariant.treatment_band).distinct().all()
+    )
+    coating_rows = (
+        scoped("coating")
+        .filter(models.Coating.id.isnot(None))
+        .with_entities(models.Coating.id, models.Coating.code, models.Coating.name, models.Coating.name_ar)
+        .distinct().all()
+    )
+
+    _val = lambda v: getattr(v, "value", v)
+
+    return {
+        "lens_models": [{"id": r[0], "name": r[1]} for r in lens_model_rows],
+        "index_value": [r[0] for r in index_rows],
+        "category": [_val(r[0]) for r in category_rows],
+        "design_variant": [r[0] for r in design_rows],
+        "color_variant": [r[0] for r in color_rows],
+        "treatment_band": [r[0] for r in treatment_rows],
+        "coating": [{"id": r[0], "code": r[1], "name": r[2], "name_ar": r[3]} for r in coating_rows],
+    }
+
 def update_lens_variant(db: Session, variant_id: int, **kwargs) -> Optional[models.LensVariant]:
     variant = get_lens_variant(db, variant_id)
     if not variant:

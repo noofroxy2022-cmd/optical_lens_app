@@ -349,6 +349,37 @@ class VariantPricingResponse(BaseModel):
     updated_at: datetime
 
 
+# ===== Catalog option lists (read-only, for search-form filters) =====
+class CoatingOption(BaseModel):
+    """Distinct coating catalog entry, for populating a targeted-search Select.
+    Carries the canonical `code` (what LensFilters.coating actually matches on)
+    alongside display-only `name`/`name_ar`."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str
+    name: str
+    name_ar: Optional[str] = None
+
+class LensModelOption(BaseModel):
+    """Distinct product/model catalog entry, for populating the Product Select
+    without requiring the full LensModelResponse (variants/power_ranges)."""
+    id: int
+    name: str
+
+class FilterOptionsResponse(BaseModel):
+    """Distinct valid values for every targeted-search dimension, given whichever
+    OTHER filters are currently selected (see GET /lens-models/filter-options).
+    Every list already reflects strict AND against the caller's other filters;
+    the frontend must not additionally narrow or relax them client-side."""
+    lens_models: List[LensModelOption] = []
+    index_value: List[float] = []
+    category: List[str] = []
+    design_variant: List[str] = []
+    coating: List[CoatingOption] = []
+    color_variant: List[str] = []
+    treatment_band: List[str] = []
+
+
 # ===== Prescription =====
 class EyePrescription(BaseModel):
     sph: float = Field(..., ge=-30.0, le=30.0)
