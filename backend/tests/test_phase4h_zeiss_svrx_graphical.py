@@ -252,16 +252,20 @@ def test_4h_idempotent_reattach_no_duplicate_powerrange(db):
 
 
 def test_4h_review_row_cannot_be_attached_fail_closed(db):
-    # "AdaptiveSun POL" (the distinct 3rd band, never remapped by the Phase
-    # 4K POL/AdaptiveSun merge - see _POL_ADAPTIVESUN_REAL_COMBOS) carries
-    # this anomaly and stays literal, unaffected by that remap.
+    # ClearMind 1.5's "AdaptiveSun POL" chart evidence is the anomaly row
+    # (printed -4.00/-4.00). Phase 4N normalizes "AdaptiveSun POL" chart
+    # labels to the distinct real SKU "AdaptiveSun Polarized" at this
+    # (family, index) - the normalization runs on the label regardless of
+    # confidence (same precedent as the Phase 4K POL/AdaptiveSun merge,
+    # which already renamed the ClearMind 1.5 POL anomaly's own band), but
+    # the row's "review" confidence still fail-closes the attachment itself.
     _seed_existing_pricing(
         db, family="ClearMind", index_value=1.5, material="CR39",
-        treatment_band="AdaptiveSun POL", coatings=["DuraVision Plus Gold"],
+        treatment_band="AdaptiveSun Polarized", coatings=["DuraVision Plus Gold"],
     )
     cat, confirmed, held = _build_and_confirm(db)
     assert held, "the ClearMind 1.5 AdaptiveSun POL anomaly row must stay needs_review"
-    flagged = next(e for e in held if e.extracted_treatment_band == "AdaptiveSun POL"
+    flagged = next(e for e in held if e.extracted_treatment_band == "AdaptiveSun Polarized"
                    and e.extracted_name == "ClearMind" and e.extracted_index == 1.5)
     result = _crud.attach_range_to_existing_pricing(db, flagged.id)
     assert "error" in result and "not review-approved" in result["error"]
