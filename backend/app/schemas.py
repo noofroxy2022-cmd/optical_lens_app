@@ -195,6 +195,12 @@ class CatalogExtractionUpdate(BaseModel):
     coating_extraction_status: Optional[CoatingExtractionStatus] = None
     coating_confidence: Optional[float] = None
     coating_review_notes: Optional[str] = None
+    # Power-eligibility provenance for a reviewer to mark explicitly (see
+    # PowerEligibilityStatus) - was previously settable only by the parser
+    # itself. A reviewer may only ever move a row TOWARD "unresolved" (the
+    # safe, no-power-claim state); the frozen matcher's "unrestricted" default
+    # for a no-range RX row is untouched for every row the reviewer leaves alone.
+    extracted_power_eligibility: Optional[str] = None
     status: Optional[str] = None
     review_notes: Optional[str] = None
     modified_data: Optional[Dict[str, Any]] = None

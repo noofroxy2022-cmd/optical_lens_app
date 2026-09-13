@@ -118,6 +118,18 @@ const CATEGORY_LABELS = {
 
 const ANSWER_TYPE = { stock_egypt: 'success', stock_out_of_egypt: 'warning', rx_only: 'warning', split: 'warning', none: 'error' };
 
+// Canonical proven-pair statuses (backend PairFulfillment.status) - the ONLY
+// statuses that represent a verified, priced route for BOTH eyes together.
+// "unavailable" / "eligibility_unknown" / "split" must never be treated as a
+// proven "best choice", no matter how informative the surfaced candidate is.
+const ACTIONABLE_PAIR_STATUSES = ['stock_egypt', 'stock_outside', 'rx'];
+const isActionableBestMatch = (best) => (
+  !!best
+  && !!best.pair_fulfillment
+  && ACTIONABLE_PAIR_STATUSES.includes(best.pair_fulfillment.status)
+  && best.pair_fulfillment.price_pair != null
+);
+
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
 
 const Prescriptions = () => {
@@ -435,6 +447,7 @@ const Prescriptions = () => {
 
   const sd = searchData;
   const best = sd?.best_match;
+  const bestIsActionable = isActionableBestMatch(best);
 
   return (
     <div>
@@ -624,7 +637,7 @@ const Prescriptions = () => {
               <Descriptions.Item label="توصية Aspherical" span={2}>{sd.aspherical_recommendation}</Descriptions.Item>
             </Descriptions>
 
-            {best && (
+            {bestIsActionable && (
               <Card size="small" title="⭐ أفضل خيار للزوج" style={{ marginBottom: 12, borderColor: '#52c41a', borderWidth: 2 }}>
                 {renderResultCard(best)}
               </Card>

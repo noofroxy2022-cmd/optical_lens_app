@@ -192,6 +192,13 @@ def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: 
         # be relaxed and merely lowers proximity_score/relaxed_filters below.
         if f.company_id is not None and r.lens_model.company_id != f.company_id:
             continue
+        # V1.0.1: category is a HARD boundary, never a relaxable dimension - a
+        # shop user searching Single Vision must never be shown a Progressive
+        # or Bifocal lens as a same-request alternative (different optical
+        # product entirely, not a commercial substitute). Same rule shape as
+        # company_id above.
+        if f.category is not None and r.lens_model.category != f.category:
+            continue
         # V1: max_price is a hard budget ceiling, never a relaxable dimension
         # (matches the exact-match gate's own "never relaxed" rule in
         # _passes_targeted_gate) - an alternative over budget must never be
