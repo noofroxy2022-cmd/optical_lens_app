@@ -336,6 +336,12 @@ class VariantPricingCreate(BaseModel):
     effective_from: Optional[datetime] = None
     power_scope: Optional[str] = Field(None, max_length=50)
     market_scope: Optional[str] = Field(None, max_length=50)
+    # Generic, manufacturer-agnostic catalog-proven caveat: base price/
+    # manufacturing eligibility are unaffected, but the FINAL price may need
+    # separate manual/lab confirmation (e.g. PIXEL's "Hi Power" surcharge,
+    # whose applicability trigger the catalog never states numerically).
+    # NULL (the default) means no caveat. See PairFulfillment.price_confirmation_note.
+    price_confirmation_note: Optional[str] = Field(None, max_length=255)
 
 class VariantPricingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -650,6 +656,15 @@ class PairFulfillment(BaseModel):
     # for every ordinary (undifferentiated) proven pair - ~all HOYA rows and
     # any non-split catalog row - and whenever provenance != "single_route".
     applicability_key: Optional[str] = None
+    # Generic, manufacturer-agnostic catalog-proven caveat carried verbatim
+    # from the proving VariantPricing row(s) (see
+    # VariantPricing.price_confirmation_note) - e.g. PIXEL's "Hi Power"
+    # surcharge, whose applicability the catalog leaves to manual/lab review.
+    # Deliberately independent of `needs_review`: this pair IS proven and
+    # `price_pair` IS the correct base price either way - this field only
+    # says the FINAL price may still be adjusted after confirmation. None
+    # (the default) means no caveat.
+    price_confirmation_note: Optional[str] = None
 
 
 class PerEyeProductResult(BaseModel):

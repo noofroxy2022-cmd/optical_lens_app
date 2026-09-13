@@ -158,11 +158,12 @@ def _proven_eligible_for_alternatives(
     The frozen matcher's own `match_lenses()` has no concept of
     power_eligibility: a row with no PowerRange and availability=RX is always
     returned as "eligible" by its long-standing "made-to-order = any power"
-    rule, even when power_eligibility=UNRESOLVED (e.g. a ZEISS catalog price
-    whose real limits are not yet modeled). Filtering happens HERE, after the
-    frozen matcher runs and before compute_alternatives() ever sees the
-    candidate - "ineligible" and "unknown" are both excluded; only "eligible"
-    passes."""
+    rule (per the permanent domain rule, RX manufacturing eligibility is not
+    dependent on a printed range by default). Filtering happens HERE, after
+    the frozen matcher runs and before compute_alternatives() ever sees the
+    candidate - a row that IS split into optical sub-options but doesn't
+    offer the one requested is still correctly excluded ("ineligible"/
+    "unknown" from `_row_eye_status`); only "eligible" passes."""
     ids = {r.source_pricing_id for r in all_results}
     if not ids:
         return all_results
@@ -228,9 +229,6 @@ def compute_alternatives(all_results: List[schemas.LensMatchResult], exact_ids: 
 
 
 # ---------------------------------------------------------------- per-eye engine
-_UNRESOLVED = models.PowerEligibilityStatus.UNRESOLVED
-
-
 def _applicable_ranges(p: models.VariantPricing, applicability_key: Optional[str]):
     """The PowerRange rows of `p` that an explicit subtype filter leaves in
     play. `applicability_key=None` (the default, and the ONLY case for every
@@ -265,16 +263,34 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
     "eligible" | "ineligible" | "unknown".
 
     A row WITH explicit PowerRange(s) is always checked normally: any covering
-    OR-range -> eligible, else ineligible - `power_eligibility` is irrelevant
-    once a real range exists. A row with NO PowerRange falls back to the
-    frozen matcher's long-standing "RX made-to-order = any power" rule ONLY
-    when `power_eligibility` is UNRESTRICTED (the catalog genuinely states no
-    restriction, or predates Phase 3 and defaults there). When it is
-    UNRESOLVED - the catalog's real power limits are simply not modeled yet -
-    eligibility is UNKNOWN, never silently True.
+    OR-range -> eligible, else ineligible - this is the ONLY way a row's
+    eligibility is ever restricted; `power_eligibility` plays no part in it.
+
+    A row with NO PowerRange at all:
+      - RX / Manufacturing: made-to-order, ALWAYS "eligible" - a manufacturing
+        lens is not dependent on a printed range by default (permanent domain
+        rule). Absence of a manufacturer-published range means "no
+        restriction supplied", never "compatibility unknown" and never
+        "incompatible" - so `power_eligibility` (UNRESTRICTED vs UNRESOLVED)
+        is NOT consulted here either; only an explicit PowerRange (checked
+        above) ever narrows an RX row's eligibility. `power_eligibility` is
+        kept only as historical catalog provenance on the row - it no longer
+        drives eligibility once a row has zero ranges.
+      - STOCK: "ineligible" - a STOCK row proves a lens is commercially priced
+        and stocked, never that a specific prescription's power is physically
+        in inventory; that requires a printed Stock PowerRange, which this
+        row does not have.
 
     `applicability_key`, when given, restricts evaluation to that one optical
-    sub-option's range(s) only - see _applicable_ranges."""
+    sub-option's range(s) only - see _applicable_ranges.
+
+    "unknown" is never returned by this function any more (permanent domain
+    rule change): every shape this schema can represent resolves to a
+    definite "eligible" or "ineligible". The tri-state name and the
+    "unknown"/"eligibility_unknown" plumbing downstream (EyeAvailability.
+    *_unknown, PairFulfillment.status="eligibility_unknown",
+    AvailabilityAnswer.code="power_eligibility_unknown") are kept as-is
+    (harmless, unreachable from here) rather than removed in this pass."""
     ranges = _applicable_ranges(p, applicability_key)
     if ranges:
         ok = any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
@@ -282,10 +298,8 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
     if list(p.power_ranges):
         return "ineligible"       # split row that doesn't offer the requested subtype at all
     if p.availability != _RX:
-        return "ineligible"       # STOCK with no range is not a real commercial row
-    if getattr(p, "power_eligibility", None) == _UNRESOLVED:
-        return "unknown"
-    return "eligible"              # genuinely unrestricted RX made-to-order
+        return "ineligible"       # STOCK with no range: commercially priced, stock compatibility unproven
+    return "eligible"              # RX made-to-order: no printed range = no restriction, not "unknown"
 
 
 def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str,
@@ -447,7 +461,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                 status=tier, price_pair=both.price_pair, currency=both.currency,
                 source_pricing_ids=[both.id], provenance="single_route", needs_review=False,
                 reason=f"مسار تسعير واحد يغطي العينين ({tier_label[tier]}){subtype_note} — سعر الزوج من الكتالوج.",
-                applicability_key=proving_key)
+                applicability_key=proving_key,
+                price_confirmation_note=both.price_confirmation_note)
 
         # (a2) OD and OS covered by DIFFERENT rows, but a proven OR-clause pair of
         #      ONE catalog pricing offer (same source_extraction_id + facets) -
@@ -475,7 +490,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                 needs_review=False,
                 reason=(f"عرض تسعير واحد بعدة مدى قوة (OR) يغطي العينين ({tier_label[tier]})"
                         f"{subtype_note} — سعر الزوج من الكتالوج."),
-                applicability_key=proving_key)
+                applicability_key=proving_key,
+                price_confirmation_note=a.price_confirmation_note)
 
         # (b) both eyes at this tier, but via SEPARATE VariantPricing rows whose
         #     belonging to one catalog offer cannot be proven -> NO pair price.

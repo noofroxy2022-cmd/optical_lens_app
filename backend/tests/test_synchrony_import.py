@@ -182,31 +182,36 @@ def test_D_1_67_AS_stepped_tail_exact(db, synchrony_setup):
         assert (resp.exact_total > 0) == expect, (sph, cyl)
 
 
-# E. RX Single Vision with no range: pinned-product search surfaces it as
-# unresolved (never a proven quote); un-pinned search shows no proven match.
+# E. RX Single Vision with no range: per the permanent domain rule (RX
+# manufacturing eligibility is NOT dependent on a printed range by default),
+# a made-to-order RX row with zero PowerRange is now ALWAYS eligible and its
+# catalog price is shown directly - never "unresolved", regardless of the
+# power_eligibility flag on the row.
 def test_E_rx_single_vision_unresolved(db, synchrony_setup):
     sv = synchrony_setup["sv"]
     v_ff = synchrony_setup["v_ff"]
+    p_ff = synchrony_setup["p_ff"]
     presc = _mk_presc(db, -2.0, name="e-pinned")
     resp = _targeted(db, presc, lens_model_id=sv.id, index_value=1.50, design_variant="Free Form")
-    assert resp.availability_answer.code == "power_eligibility_unknown"
-    assert resp.eligibility_unknown_count > 0
-    assert resp.best_match.pair_fulfillment.price_pair is None
+    assert resp.availability_answer.code == "rx_only"
+    assert resp.best_match.pair_fulfillment.status == "rx"
+    assert resp.best_match.pair_fulfillment.price_pair == p_ff.price_pair
 
     presc2 = _mk_presc(db, -2.0, name="e-unpinned")
     resp2 = _targeted(db, presc2, company_id=sv.company_id,
                       category=models.LensCategory.SINGLE_VISION, index_value=1.50)
-    assert resp2.exact_total == 0
+    assert resp2.exact_total > 0
 
 
-# F. Progressive with no ADD range: same unresolved behavior, never a
-# fabricated ADD-eligible quote.
+# F. Progressive with no ADD range: same made-to-order RX rule - eligible,
+# priced directly, never a fabricated ADD range and never "unresolved".
 def test_F_progressive_unresolved(db, synchrony_setup):
     prog = synchrony_setup["prog"]
     presc = _mk_presc(db, -2.0, cyl=0.0, name="f-pinned")
     resp = _targeted(db, presc, lens_model_id=prog.id, index_value=1.50, design_variant="Easy")
-    assert resp.availability_answer.code == "power_eligibility_unknown"
-    assert resp.best_match.pair_fulfillment.price_pair is None
+    assert resp.availability_answer.code == "rx_only"
+    assert resp.best_match.pair_fulfillment.status == "rx"
+    assert resp.best_match.pair_fulfillment.price_pair is not None
 
 
 # G. Category is a hard boundary for Synchrony too - a single_vision search

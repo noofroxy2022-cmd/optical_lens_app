@@ -221,21 +221,33 @@ def test_DEF_category_availability_market(db, pixel_sv_setup):
 # is allowed to surface it as "exists but unresolved" (never as a confirmed
 # quote); an un-pinned, company/category-scoped search must show nothing
 # proven either.
-def test_G_unresolved_never_proven_eligible(db, pixel_sv_setup):
+def test_G_rx_no_range_always_proven_eligible(db, pixel_sv_setup):
+    """Permanent domain rule (superseding the earlier Phase 5 "unresolved"
+    design): page 16's Free Form / High Definition rows print no RX
+    manufacturing range at all - a manufacturing lens is made to order, so
+    absence of a printed range means "no restriction supplied", never
+    "unknown". These rows are therefore ALWAYS eligible with their catalog
+    price shown, for any prescription, regardless of the UNRESOLVED
+    power_eligibility flag still recorded on them as historical provenance."""
     model = pixel_sv_setup["model"]
     for sph in (-2.0, 8.0):
         presc = _mk_presc(db, sph, name=f"g-pinned-{sph}")
         resp = _targeted(db, presc, lens_model_id=model.id, index_value=1.5)
-        assert resp.availability_answer.code == "power_eligibility_unknown", sph
-        assert resp.eligibility_unknown_count > 0, sph
+        assert resp.availability_answer.code == "rx_only", sph
+        assert resp.exact_total > 0, sph
         for grp in resp.groups:
+            if grp.key == "rx":
+                assert grp.count > 0, (sph, grp.key)
+                for r in grp.results:
+                    assert r.pair_fulfillment.status == "rx", (sph, r.variant_id)
+                    assert r.pair_fulfillment.price_pair is not None, (sph, r.variant_id)
             if grp.key in ("stock_egypt", "stock_out_of_egypt"):
                 assert grp.count == 0, (sph, grp.key, grp.count)
 
         presc2 = _mk_presc(db, sph, name=f"g-unpinned-{sph}")
         resp2 = _targeted(db, presc2, company_id=model.company_id,
                           category=models.LensCategory.SINGLE_VISION, index_value=1.5)
-        assert resp2.exact_total == 0, sph
+        assert resp2.exact_total > 0, sph
         assert resp2.availability_answer.code != "stock_egypt", sph
 
 

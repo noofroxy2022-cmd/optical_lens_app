@@ -104,6 +104,17 @@ const PairAnswer = ({ pf }) => {
           مصادر التسعير: {pf.source_pricing_ids.join(', ')}
         </div>
       )}
+      {/* Generic, catalog-driven caveat: base price/eligibility above are
+          already proven either way - this never hides the price, never
+          marks the lens unavailable, and never touches RX eligibility. Text
+          comes entirely from the backend (VariantPricing.price_confirmation_note);
+          this component has no manufacturer-specific wording of its own. */}
+      {pf.price_confirmation_note && (
+        <div style={{ marginTop: 4, color: '#ad6800', fontSize: 12, background: '#fffbe6',
+                     border: '1px solid #ffe58f', borderRadius: 4, padding: '4px 8px' }}>
+          ⚠️ {pf.price_confirmation_note}
+        </div>
+      )}
       <div style={{ marginTop: 4, color: '#666', fontSize: 12 }}>{pf.reason}</div>
     </div>
   );

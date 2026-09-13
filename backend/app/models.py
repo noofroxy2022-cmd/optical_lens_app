@@ -435,6 +435,18 @@ class VariantPricing(Base):
         server_default=PowerEligibilityStatus.UNRESTRICTED.name,
     )
 
+    # Generic, manufacturer-agnostic catalog-proven caveat: this row's printed
+    # price is commercially usable and manufacturing eligibility is NOT
+    # affected by it, but the FINAL price may need a separate manual/lab
+    # confirmation (e.g. an add-on surcharge whose applicability trigger the
+    # catalog itself never states numerically - PIXEL's "Hi Power" is the
+    # first case, but any manufacturer's row may carry one). Deliberately
+    # SEPARATE from `needs_review` (which is about unproven pair PROVENANCE,
+    # e.g. unproven_mixed / eligibility_unknown) - this is about proven
+    # eligibility whose LAST-MILE price completeness is still pending human
+    # judgement. NULL (the overwhelming majority of rows) means no caveat.
+    price_confirmation_note = Column(String(255), nullable=True)
+
     # Catalog price for exactly ONE pair (both lenses). Exact fixed-point money -
     # PostgreSQL NUMERIC(12,2); SQLite round-trips 2dp Decimals exactly via the
     # scale-aware result processor. Never Float (binary rounding drift on sums,

@@ -1,14 +1,31 @@
-"""Phase 5 - permanent regression coverage for the ZEISS Phase 3/3B/3C power-
-eligibility safety invariants.
+"""Phase 5 - permanent regression coverage for RX/STOCK power-eligibility
+safety invariants.
 
 Deliberately synthetic and minimal: builds Company -> LensModel -> LensVariant
 -> VariantPricing (+ PowerRange where needed) directly via the ORM, with no
-PDF parsing and no large E2E fixture, so this suite stays fast and focused on
-ONE thing - that an UNRESOLVED (or genuinely ineligible) commercial option can
-never be reported, anywhere in the prescription-matching surface, as a proven
-compatible lens; and that the pre-existing UNRESTRICTED ("RX made-to-order")
-behaviour a real catalog like HOYA relies on is completely unaffected.
-"""
+PDF parsing and no large E2E fixture, so this suite stays fast.
+
+SUPERSEDED DESIGN (kept here only as history, not as current behavior): the
+original Phase 3/3B/3C ZEISS work made an RX row's power_eligibility flag
+(UNRESTRICTED vs UNRESOLVED) decide whether a no-range RX row showed as
+"eligible" or "eligibility_unknown". That has since been overridden by a
+later, permanent, authoritative domain rule (the BBGR import phase): a
+manufacturing (RX) lens is made to order and is NOT dependent on a printed
+PowerRange by default. Absence of a manufacturer-published range means "no
+restriction supplied", never "unknown" and never "incompatible". Only an
+EXPLICIT manufacturer-printed range (SPH/CYL limits, Total Sph+Cyl, Max Cyl,
+ADD range, etc.) narrows an RX row's eligibility now - `power_eligibility`
+plays no part in that decision any more (kept on the row only as historical
+catalog provenance).
+
+STOCK is unaffected by this change: a STOCK row still requires a proven
+Stock PowerRange to be reported as prescription-compatible; a STOCK row with
+zero PowerRange still proves only that the lens is commercially priced and
+stocked, never that a specific prescription's power is physically available.
+
+This file's tests were rewritten in place (not just deleted) to document the
+new invariant precisely, alongside the STOCK invariant and the "explicit
+range still enforced" invariant that were never in question."""
 import os
 import sys
 
@@ -99,9 +116,10 @@ def _targeted(db, presc, model, **extra_filters):
 
 
 # ===========================================================================
-# A. power_eligibility=UNRESOLVED never becomes proven eligible in /search
+# A. RX + zero PowerRange is ALWAYS proven eligible in /search, regardless of
+#    power_eligibility (permanent domain rule)
 # ===========================================================================
-def test_A_unresolved_never_proven_in_search(db):
+def test_A_rx_no_range_always_proven_in_search(db):
     co = _mk_company(db, "ZeissLike")
     cat = _mk_catalog(db, co)
     model = models.LensModel(company_id=co.id, name="UnresolvedModel",
@@ -116,13 +134,11 @@ def test_A_unresolved_never_proven_in_search(db):
         resp = _targeted(db, presc, model)
         bm = resp.best_match
         assert bm is not None, label
-        assert bm.pair_fulfillment.status == "eligibility_unknown", label
-        assert bm.pair_fulfillment.price_pair is None, label
-        assert bm.od.rx is False and bm.od.rx_unknown is True, label
-        assert bm.os.rx is False and bm.os.rx_unknown is True, label
-        assert resp.availability_answer.title == (
-            "المنتج موجود في الكتالوج، لكن توافقه مع هذه الوصفة غير مؤكد بسبب نطاق القوة."), label
-        assert "متاح RX" not in resp.availability_answer.title, label
+        assert bm.pair_fulfillment.status == "rx", label
+        assert bm.pair_fulfillment.price_pair == Decimal("17400.00"), label
+        assert bm.od.rx is True and bm.od.rx_unknown is False, label
+        assert bm.os.rx is True and bm.os.rx_unknown is False, label
+        assert resp.availability_answer.code == "rx_only", label
 
 
 # ===========================================================================
@@ -149,8 +165,8 @@ def test_B_match_endpoint_matches_search_endpoint_safety(db):
     for tag, resp in (("search", search_resp), ("match", match_resp)):
         bm = resp.best_match
         assert bm is not None, tag
-        assert bm.pair_fulfillment.status == "eligibility_unknown", tag
-        assert bm.pair_fulfillment.price_pair is None, tag
+        assert bm.pair_fulfillment.status == "rx", tag
+        assert bm.pair_fulfillment.price_pair == Decimal("9999.00"), tag
 
     assert search_resp.availability_answer.code == match_resp.availability_answer.code
     assert search_resp.exact_total == match_resp.exact_total
@@ -158,19 +174,21 @@ def test_B_match_endpoint_matches_search_endpoint_safety(db):
 
 
 # ===========================================================================
-# C/D. alternatives pool: unresolved excluded, proven-eligible allowed
+# C/D. alternatives pool: a no-range made-to-order RX candidate is included
+#      just like a range-proven one; a STOCK row with no proven Stock range
+#      is still excluded (STOCK semantics are unaffected by this rule)
 # ===========================================================================
-def test_CD_alternatives_exclude_unresolved_but_allow_proven_eligible(db):
+def test_CD_alternatives_include_no_range_rx_but_exclude_unproven_stock(db):
     co_z = _mk_company(db, "ZeissLike")
     cat_z = _mk_catalog(db, co_z)
-    unresolved_model = models.LensModel(company_id=co_z.id, name="UnresolvedAlt",
-                                        category=models.LensCategory.SINGLE_VISION)
-    db.add(unresolved_model); db.commit(); db.refresh(unresolved_model)
-    unresolved_variant = _mk_variant(db, unresolved_model, index_value=1.6)
-    unresolved_vp = _mk_pricing(db, unresolved_variant, cat_z,
-                               availability=models.PricingAvailability.RX,
-                               power_eligibility=models.PowerEligibilityStatus.UNRESOLVED,
-                               price=8800)
+    no_range_model = models.LensModel(company_id=co_z.id, name="NoRangeRxAlt",
+                                      category=models.LensCategory.SINGLE_VISION)
+    db.add(no_range_model); db.commit(); db.refresh(no_range_model)
+    no_range_variant = _mk_variant(db, no_range_model, index_value=1.6)
+    no_range_vp = _mk_pricing(db, no_range_variant, cat_z,
+                              availability=models.PricingAvailability.RX,
+                              power_eligibility=models.PowerEligibilityStatus.UNRESOLVED,
+                              price=8800)   # no printed range - made-to-order, eligible
 
     co_h = _mk_company(db, "HoyaLike")
     cat_h = _mk_catalog(db, co_h)
@@ -183,9 +201,20 @@ def test_CD_alternatives_exclude_unresolved_but_allow_proven_eligible(db):
                            power_eligibility=models.PowerEligibilityStatus.UNRESTRICTED,
                            price=4200)   # genuinely unrestricted RX, no range needed
 
+    co_s = _mk_company(db, "StockNoRangeCo")
+    cat_s = _mk_catalog(db, co_s)
+    stock_model = models.LensModel(company_id=co_s.id, name="StockNoRangeAlt",
+                                   category=models.LensCategory.SINGLE_VISION)
+    db.add(stock_model); db.commit(); db.refresh(stock_model)
+    stock_variant = _mk_variant(db, stock_model, index_value=1.6)
+    stock_vp = _mk_pricing(db, stock_variant, cat_s,
+                          availability=models.PricingAvailability.STOCK,
+                          power_eligibility=models.PowerEligibilityStatus.UNRESTRICTED,
+                          price=3000)   # no Stock PowerRange - unproven
+
     presc = _mk_presc(db, -2.0, -0.5)
 
-    # targeted search for a THIRD, nonexistent product -> 0 exact identity
+    # targeted search for a FOURTH, nonexistent product -> 0 exact identity
     # matches, no availability/market/price gate -> alternatives path fires
     # against the whole catalog.
     f = schemas.LensFilters(lens_model_id=999999)
@@ -193,14 +222,17 @@ def test_CD_alternatives_exclude_unresolved_but_allow_proven_eligible(db):
         mode="targeted", filters=f, include_alternatives=True))
 
     alt_ids = {a.result.source_pricing_id for a in resp.alternatives}
-    assert unresolved_vp.id not in alt_ids, "unresolved candidate leaked into alternatives"
+    assert no_range_vp.id in alt_ids, "made-to-order RX candidate with no range was wrongly excluded"
     assert proven_vp.id in alt_ids, "proven-eligible candidate was wrongly excluded"
+    assert stock_vp.id not in alt_ids, "STOCK candidate with no proven Stock range wrongly included"
 
 
 # ===========================================================================
-# E. eligibility_unknown pair_fulfillment.price_pair is None / non-actionable
+# E. the OLD "eligibility_unknown" outcome is no longer reachable from a
+#    no-range RX row - this exact scenario now resolves to a proven, priced
+#    "rx" pair_fulfillment (permanent domain rule)
 # ===========================================================================
-def test_E_eligibility_unknown_never_actionable(db):
+def test_E_no_range_rx_is_proven_not_unknown(db):
     co = _mk_company(db, "ZeissLike")
     cat = _mk_catalog(db, co)
     model = models.LensModel(company_id=co.id, name="UnknownActionable",
@@ -213,13 +245,12 @@ def test_E_eligibility_unknown_never_actionable(db):
 
     resp = _targeted(db, presc, model)
     pf = resp.best_match.pair_fulfillment
-    assert pf.status == "eligibility_unknown"
-    assert pf.price_pair is None
-    assert pf.currency is None
-    assert pf.provenance == "none"
-    assert pf.needs_review is True
-    # never one of the tiers that a caller could treat as a proven, orderable route
-    assert pf.status not in ("stock_egypt", "stock_outside", "rx")
+    assert pf.status == "rx"
+    assert pf.price_pair == Decimal("12345.00")
+    assert pf.currency == "EGP"
+    assert pf.provenance == "single_route"
+    assert pf.needs_review is False
+    assert pf.status != "eligibility_unknown"
 
 
 # ===========================================================================

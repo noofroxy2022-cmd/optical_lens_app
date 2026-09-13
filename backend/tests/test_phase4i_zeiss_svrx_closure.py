@@ -217,7 +217,11 @@ def test_4i_D_C_per_eye_independence_on_proven_zeiss_row(db):
 
 
 # -- D. both eyes UNKNOWN -> eligibility_unknown -----------------------------
-def test_4i_D_D_both_eyes_unknown(db):
+def test_4i_D_D_no_range_always_eligible(db):
+    """Permanent domain rule (supersedes the earlier "both eyes unknown"
+    design): an RX row with zero PowerRange is made-to-order and ALWAYS
+    eligible, regardless of its power_eligibility flag - absence of a
+    printed range means "no restriction supplied", never "unknown"."""
     co = _mk_company(db, "ZeissLike")
     cat = _mk_catalog(db, co)
     model = models.LensModel(company_id=co.id, name="UnresolvedZeissModel",
@@ -237,20 +241,23 @@ def test_4i_D_D_both_eyes_unknown(db):
     resp = _targeted(db, presc, model)
     bm = resp.best_match
     assert bm is not None
-    assert bm.pair_fulfillment.status == "eligibility_unknown"
-    assert bm.pair_fulfillment.price_pair is None
-    assert bm.od.rx is False and bm.od.rx_unknown is True
-    assert bm.os.rx is False and bm.os.rx_unknown is True
+    assert bm.pair_fulfillment.status == "rx"
+    assert bm.pair_fulfillment.price_pair == Decimal("9999.00")
+    assert bm.od.rx is True and bm.od.rx_unknown is False
+    assert bm.os.rx is True and bm.os.rx_unknown is False
 
 
-# -- E. treatment A proven, B unresolved -> no cross-leak --------------------
+# -- E. treatment A proven via its own range, B proven via the made-to-order
+#      RX-no-range rule - neither ever inherits the other's proof -----------
 def test_4i_D_E_treatment_isolation_at_search_layer(db):
     co, model, variant_cb, vp_cb = _seed_cv174(db)
     price_cat = db.query(models.Catalog).filter(
         models.Catalog.company_id == co.id, models.Catalog.status == models.CatalogStatus.CONFIRMED,
     ).first()
     # a second, POL-treatment variant/pricing that is NEVER attached (stays
-    # power_eligibility=UNRESOLVED, no PowerRange)
+    # power_eligibility=UNRESOLVED, no PowerRange) - under the permanent
+    # domain rule this is independently eligible as made-to-order RX, never
+    # by borrowing Clear/BlueGuard's range proof.
     _model2, variant_pol, vp_pol = _seed_zeisslike_pricing(
         db, co, price_cat, family="ClearView RX", index_value=1.74,
         material="high_index_1.74", treatment_band="POL",
@@ -259,8 +266,16 @@ def test_4i_D_E_treatment_isolation_at_search_layer(db):
     presc = _mk_presc(db, -14.0, -6.0, -14.0, -6.0)
     cb_status = product_search._row_eye_status(vp_cb, presc, "od")
     pol_status = product_search._row_eye_status(vp_pol, presc, "od")
-    assert cb_status == "eligible"
-    assert pol_status == "unknown"   # never inherits Clear/BlueGuard's proof
+    assert cb_status == "eligible"     # proven via its OWN attached PowerRange
+    assert pol_status == "eligible"    # proven via the made-to-order rule, not via vp_cb's range
+
+    # isolation still holds: a prescription OUTSIDE vp_cb's own attached
+    # range makes vp_cb ineligible on its own terms, while vp_pol (no range
+    # at all) remains eligible regardless - proving the two are never
+    # cross-contaminated in either direction.
+    presc_outside_cb = _mk_presc(db, -25.0, -9.0, -25.0, -9.0)
+    assert product_search._row_eye_status(vp_cb, presc_outside_cb, "od") == "ineligible"
+    assert product_search._row_eye_status(vp_pol, presc_outside_cb, "od") == "eligible"
 
 
 # -- F. multiple diameter PowerRange rows -> one commercial result only -----
@@ -287,23 +302,26 @@ def test_4i_D_F_multi_diameter_one_result(db):
     assert resp.best_match is not None
 
 
-# -- G/H. alternatives: unresolved excluded, proven-eligible ZEISS included --
-def test_4i_D_GH_alternatives_unresolved_excluded_proven_included(db):
+# -- G/H. alternatives: both a range-proven ZEISS row and a made-to-order
+#    (no-range) RX row are proven-eligible alternatives under the permanent
+#    domain rule - neither is excluded merely for lacking a printed range --
+def test_4i_D_GH_alternatives_no_range_rx_included(db):
     co, model, variant, vp = _seed_cv174(db)
     price_cat = db.query(models.Catalog).filter(
         models.Catalog.company_id == co.id, models.Catalog.status == models.CatalogStatus.CONFIRMED,
     ).first()
-    _m2, _v2, vp_unresolved = _seed_zeisslike_pricing(
+    _m2, _v2, vp_no_range = _seed_zeisslike_pricing(
         db, co, price_cat, family="ClearView RX", index_value=1.6,
         material="high_index_1.60", treatment_band="POL",
         coating_code="Sun Tint", price=9000,
-    )  # never attached - stays UNRESOLVED
+    )  # never attached - stays power_eligibility=UNRESOLVED, zero PowerRange
     presc = _mk_presc(db, -14.0, -6.0, -14.0, -6.0)
     f = schemas.LensFilters(lens_model_id=999999)   # force alternatives path
     resp = product_search.search(db, presc, schemas.ProductSearchRequest(
         mode="targeted", filters=f, include_alternatives=True))
     alt_ids = {a.result.source_pricing_id for a in resp.alternatives}
-    assert vp_unresolved.id not in alt_ids, "unresolved ZEISS candidate leaked into alternatives"
+    assert vp_no_range.id in alt_ids, (
+        "made-to-order RX candidate with no printed range was wrongly excluded")
     assert vp.id in alt_ids, "proven-eligible ZEISS candidate was wrongly excluded"
 
 
