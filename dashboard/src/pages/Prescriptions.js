@@ -39,13 +39,15 @@ const indexMaterialText = (material, indexValue) => {
 const PAIR_STATUS_AR = {
   stock_egypt: '🇪🇬 STOCK داخل مصر',
   stock_outside: '🌍 STOCK خارج مصر',
+  stock_market_unknown: '❔ STOCK — مكان التوفر غير محدد',
   rx: '🏭 RX / تصنيع',
   split: '⚠️ مصدر غير موحد',
   unavailable: '❌ غير متوفر',
   eligibility_unknown: '❓ توافق الوصفة غير مؤكد',
 };
 const PAIR_STATUS_COLOR = {
-  stock_egypt: 'green', stock_outside: 'gold', rx: 'orange', split: 'volcano', unavailable: 'red',
+  stock_egypt: 'green', stock_outside: 'gold', stock_market_unknown: 'cyan',
+  rx: 'orange', split: 'volcano', unavailable: 'red',
   eligibility_unknown: 'default',
 };
 const yn = (b) => (b ? <span style={{ color: '#52c41a' }}>✅</span> : <span style={{ color: '#cf1322' }}>❌</span>);
@@ -63,6 +65,7 @@ const PairMatrix = ({ od, os }) => (
     <tbody>
       <tr><td style={{ padding: '2px 10px' }}>STOCK داخل مصر</td><td align="center">{yn(od.stock_egypt)}</td><td align="center">{yn(os.stock_egypt)}</td></tr>
       <tr><td style={{ padding: '2px 10px' }}>STOCK خارج مصر</td><td align="center">{yn(od.stock_outside)}</td><td align="center">{yn(os.stock_outside)}</td></tr>
+      <tr><td style={{ padding: '2px 10px' }}>STOCK — سوق غير محدد</td><td align="center">{yn(od.stock_market_unknown)}</td><td align="center">{yn(os.stock_market_unknown)}</td></tr>
       <tr><td style={{ padding: '2px 10px' }}>RX / تصنيع</td><td align="center">{yn(od.rx)}</td><td align="center">{yn(os.rx)}</td></tr>
     </tbody>
   </table>
@@ -78,7 +81,7 @@ const PairAnswer = ({ pf }) => {
       <div>
         <b>أفضل حل موحد للزوج: </b>
         <Tag color={PAIR_STATUS_COLOR[pf.status]}>{PAIR_STATUS_AR[pf.status] || pf.status}</Tag>
-        {(pf.status === 'stock_egypt' || pf.status === 'stock_outside') &&
+        {(pf.status === 'stock_egypt' || pf.status === 'stock_outside' || pf.status === 'stock_market_unknown') &&
           <span style={{ color: '#888', fontSize: 12 }}>— حسب الكتالوج</span>}
         {pf.needs_review && <Tag color="volcano" style={{ marginRight: 6 }}>بحاجة لمراجعة</Tag>}
       </div>
@@ -116,12 +119,23 @@ const CATEGORY_LABELS = {
   digital: 'Digital',
 };
 
-const ANSWER_TYPE = { stock_egypt: 'success', stock_out_of_egypt: 'warning', rx_only: 'warning', split: 'warning', none: 'error' };
+const ANSWER_TYPE = {
+  stock_egypt: 'success', stock_out_of_egypt: 'warning', stock_market_unknown: 'warning',
+  rx_only: 'warning', split: 'warning', none: 'error',
+};
 
-// Canonical proven-pair statuses (backend PairFulfillment.status) - the ONLY
-// statuses that represent a verified, priced route for BOTH eyes together.
+// Canonical proven-pair statuses (backend PairFulfillment.status) that may
+// render as the green "⭐ أفضل خيار للزوج" Best Choice card - the ONLY
+// statuses that represent a verified, priced route for BOTH eyes together
+// WITH a proven availability route/location.
 // "unavailable" / "eligibility_unknown" / "split" must never be treated as a
 // proven "best choice", no matter how informative the surfaced candidate is.
+// "stock_market_unknown" (Phase 3C) is deliberately EXCLUDED here (Phase 3C
+// final micro-fix): it IS a proven STOCK price/eligibility for both eyes,
+// and still renders as a normal, priced, optically-compatible result in its
+// own group - but its stock LOCATION (Egypt / Out Of Egypt) is unproven, so
+// it must never wear the same green "verified location" Best Choice badge
+// as stock_egypt/stock_outside/rx.
 const ACTIONABLE_PAIR_STATUSES = ['stock_egypt', 'stock_outside', 'rx'];
 const isActionableBestMatch = (best) => (
   !!best
@@ -393,8 +407,8 @@ const Prescriptions = () => {
     { title: 'التصميم', key: 'design', width: 120, render: (_, r) => r.design_variant || '—' },
     { title: 'الطلاء', key: 'coating', width: 120, render: (_, r) => r.coating_name || r.coating_code || '—' },
     { title: 'التقنية / اللون', key: 'tech', width: 120, render: (_, r) => r.color_variant || '—' },
-    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', unknown: '؟', none: '—' })[r.od.best]}</Tag> },
-    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', rx: 'RX', unknown: '؟', none: '—' })[r.os.best]}</Tag> },
+    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.od.best]}</Tag> },
+    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.os.best]}</Tag> },
     { title: 'حل الزوج', key: 'pair', width: 130, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
     { title: 'سعر الزوج', key: 'price', width: 130, render: (_, r) => (r.pair_fulfillment.price_pair != null
       ? `${r.pair_fulfillment.price_pair} ${r.pair_fulfillment.currency || ''} / Pair`
@@ -631,6 +645,7 @@ const Prescriptions = () => {
               <Descriptions.Item label="خيارات الزوج">{sd.exact_total}</Descriptions.Item>
               <Descriptions.Item label="زوج STOCK مصر">{sd.stock_egypt_count}</Descriptions.Item>
               <Descriptions.Item label="زوج STOCK خارج مصر">{sd.stock_out_of_egypt_count}</Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK — سوق غير محدد">{sd.stock_market_unknown_count}</Descriptions.Item>
               <Descriptions.Item label="زوج RX">{sd.rx_count}</Descriptions.Item>
               <Descriptions.Item label="مقسّم / غير متوفر">{sd.split_count}</Descriptions.Item>
               <Descriptions.Item label="توصية Index" span={3}>{sd.index_recommendation}</Descriptions.Item>
@@ -645,7 +660,7 @@ const Prescriptions = () => {
 
             {sd.exact_total === 0 && <Empty description="لا توجد نتيجة مطابقة تماماً" />}
 
-            <Collapse defaultActiveKey={['stock_egypt', 'stock_out_of_egypt', 'rx', 'split']}>
+            <Collapse defaultActiveKey={['stock_egypt', 'stock_out_of_egypt', 'stock_market_unknown', 'rx', 'split']}>
               {sd.groups.map((grp) => (
                 <Panel
                   key={grp.key}

@@ -577,8 +577,11 @@ class ProductSearchRequest(BaseModel):
 
 
 class AvailabilityAnswer(BaseModel):
-    # code: "stock_egypt" | "stock_out_of_egypt" | "rx_only" | "split" |
-    #       "power_eligibility_unknown" | "none"
+    # code: "stock_egypt" | "stock_out_of_egypt" | "stock_market_unknown" |
+    #       "rx_only" | "split" | "power_eligibility_unknown" | "none"
+    # "stock_market_unknown" (Phase 3C): a proven STOCK price/eligibility whose
+    # catalog market_scope is NULL/unspecified - never claims Egypt, never
+    # claims Out Of Egypt.
     code: str
     title: str
     detail: Optional[str] = None
@@ -595,14 +598,23 @@ class EyeAvailability(BaseModel):
     matches, or the row is genuinely unrestricted). The matching
     `*_unknown` flag is True when that route's real power applicability is not
     yet modeled (see PowerEligibilityStatus) - NEVER folded into the proven
-    bool, and NEVER silently treated as ineligible either."""
+    bool, and NEVER silently treated as ineligible either.
+
+    Phase 3C: `stock_market_unknown` is a FOURTH, distinct route - a STOCK row
+    whose catalog market_scope is genuinely unspecified (NULL). It is never
+    folded into `stock_outside` (that would falsely claim a proven non-Egypt
+    market) and never folded into `stock_egypt` either. Its own
+    `stock_market_unknown_unknown` flag carries the same optical-eligibility-
+    unresolved meaning as the other routes' `*_unknown` flags."""
     stock_egypt: bool = False
     stock_outside: bool = False
+    stock_market_unknown: bool = False
     rx: bool = False
     stock_egypt_unknown: bool = False
     stock_outside_unknown: bool = False
+    stock_market_unknown_unknown: bool = False
     rx_unknown: bool = False
-    best: str = "none"          # stock_egypt | stock_outside | rx | unknown | none
+    best: str = "none"          # stock_egypt | stock_outside | stock_market_unknown | rx | unknown | none
 
 
 class PairFulfillment(BaseModel):
@@ -626,7 +638,7 @@ class PairFulfillment(BaseModel):
     power limits are not yet modeled). The pair is NEVER reported as a proven
     STOCK/RX route in this case; `price_pair` stays null and `needs_review` is
     true, exactly like `unproven_mixed`."""
-    status: str  # stock_egypt|stock_outside|rx|split|unavailable|eligibility_unknown
+    status: str  # stock_egypt|stock_outside|stock_market_unknown|rx|split|unavailable|eligibility_unknown
     price_pair: Optional[Decimal] = None
     currency: Optional[str] = None
     source_pricing_ids: List[int] = []
@@ -667,11 +679,12 @@ class PerEyeProductResult(BaseModel):
 
 
 class LensSearchGroup(BaseModel):
-    # key: "stock_egypt" | "stock_out_of_egypt" | "rx" | "split" | "eligibility_unknown"
+    # key: "stock_egypt" | "stock_out_of_egypt" | "stock_market_unknown" | "rx" |
+    #      "split" | "eligibility_unknown"
     key: str
     label: str
     availability: str                            # "stock" | "rx" | "mixed" | "unknown"
-    market: Optional[str] = None                 # "egypt" | "out_of_egypt" | None
+    market: Optional[str] = None                 # "egypt" | "out_of_egypt" | "unknown" | None
     catalog_note: str = "حسب الكتالوج"           # STOCK label accuracy - not real-time inventory
     count: int
     results: List[PerEyeProductResult]
@@ -700,6 +713,7 @@ class ProductSearchResponse(BaseModel):
     groups: List[LensSearchGroup] = []
     stock_egypt_count: int = 0                   # full-pair STOCK Egypt
     stock_out_of_egypt_count: int = 0            # full-pair STOCK Out Of Egypt
+    stock_market_unknown_count: int = 0          # full-pair STOCK, catalog market unspecified
     rx_count: int = 0                            # full-pair RX
     split_count: int = 0                         # split / no unified route
     eligibility_unknown_count: int = 0            # power applicability unresolved

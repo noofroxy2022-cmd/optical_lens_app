@@ -32,7 +32,12 @@ from app.lens_matcher import lens_matcher
 
 _RX = models.PricingAvailability.RX
 _STOCK = models.PricingAvailability.STOCK
-_TIERS = ("stock_egypt", "stock_outside", "rx")
+# "stock_market_unknown": a STOCK row whose market_scope is genuinely
+# unspecified in the catalog (market_is_egypt() -> None). Distinct from BOTH
+# stock_egypt and stock_outside - never proven Egypt, never proven Out Of
+# Egypt. Kept as its own tier (not folded into stock_outside) so a NULL-market
+# STOCK row is never mislabeled as a confirmed non-Egypt market (Phase 3C).
+_TIERS = ("stock_egypt", "stock_outside", "stock_market_unknown", "rx")
 
 
 # ---------------------------------------------------------------- market / tier
@@ -56,7 +61,12 @@ def market_is_egypt(market_scope: Optional[str]) -> Optional[bool]:
 
 def _row_route(p: models.VariantPricing) -> str:
     if p.availability == _STOCK:
-        return "stock_egypt" if market_is_egypt(p.market_scope) is True else "stock_outside"
+        eg = market_is_egypt(p.market_scope)
+        if eg is True:
+            return "stock_egypt"
+        if eg is False:
+            return "stock_outside"
+        return "stock_market_unknown"   # market_scope is NULL/unspecified - never assumed Out Of Egypt
     return "rx"
 
 
@@ -340,16 +350,27 @@ def _route_covers_eye(rows: List[models.VariantPricing], prescription: models.Pr
 def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
                       prescription: models.Prescription, eye: str,
                       applicability_key: Optional[str] = None) -> schemas.EyeAvailability:
-    se = _route_eye_status(routes["stock_egypt"], prescription, eye, applicability_key)
-    so = _route_eye_status(routes["stock_outside"], prescription, eye, applicability_key)
-    rx = _route_eye_status(routes["rx"], prescription, eye, applicability_key)
+    # .get(..., []) - Phase 3C added the "stock_market_unknown" tier after
+    # several existing callers (and their tests) already built a `routes`
+    # dict with only the original 3 keys; treating an absent tier as "no
+    # rows at that tier" keeps this function backward-compatible with any
+    # caller that has not been updated to the 4-tier shape, without ever
+    # hiding a real row (every REAL row still lands in some route bucket
+    # wherever `routes` is actually built from `_row_route`, e.g. _per_eye_results).
+    se = _route_eye_status(routes.get("stock_egypt", []), prescription, eye, applicability_key)
+    so = _route_eye_status(routes.get("stock_outside", []), prescription, eye, applicability_key)
+    su = _route_eye_status(routes.get("stock_market_unknown", []), prescription, eye, applicability_key)
+    rx = _route_eye_status(routes.get("rx", []), prescription, eye, applicability_key)
     best = ("stock_egypt" if se == "eligible" else
             "stock_outside" if so == "eligible" else
+            "stock_market_unknown" if su == "eligible" else
             "rx" if rx == "eligible" else
-            "unknown" if "unknown" in (se, so, rx) else "none")
+            "unknown" if "unknown" in (se, so, su, rx) else "none")
     return schemas.EyeAvailability(
-        stock_egypt=(se == "eligible"), stock_outside=(so == "eligible"), rx=(rx == "eligible"),
+        stock_egypt=(se == "eligible"), stock_outside=(so == "eligible"),
+        stock_market_unknown=(su == "eligible"), rx=(rx == "eligible"),
         stock_egypt_unknown=(se == "unknown"), stock_outside_unknown=(so == "unknown"),
+        stock_market_unknown_unknown=(su == "unknown"),
         rx_unknown=(rx == "unknown"), best=best)
 
 
@@ -375,14 +396,17 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                       od: schemas.EyeAvailability, os_: schemas.EyeAvailability,
                       prescription: models.Prescription,
                       applicability_key: Optional[str] = None) -> schemas.PairFulfillment:
-    od_ok = {"stock_egypt": od.stock_egypt, "stock_outside": od.stock_outside, "rx": od.rx}
-    os_ok = {"stock_egypt": os_.stock_egypt, "stock_outside": os_.stock_outside, "rx": os_.rx}
-    tier_label = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر", "rx": "RX / تصنيع"}
+    od_ok = {"stock_egypt": od.stock_egypt, "stock_outside": od.stock_outside,
+             "stock_market_unknown": od.stock_market_unknown, "rx": od.rx}
+    os_ok = {"stock_egypt": os_.stock_egypt, "stock_outside": os_.stock_outside,
+             "stock_market_unknown": os_.stock_market_unknown, "rx": os_.rx}
+    tier_label = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر",
+                  "stock_market_unknown": "STOCK — مكان التوفر غير محدد", "rx": "RX / تصنيع"}
 
     for tier in _TIERS:
         if not (od_ok[tier] and os_ok[tier]):
             continue
-        rows = routes[tier]
+        rows = routes.get(tier, [])
         od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od", applicability_key)]
         os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os", applicability_key)]
 
@@ -461,7 +485,7 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
     # fallback, which must stay based on PROVEN eligibility only.
     if od.best == "unknown" or os_.best == "unknown":
         unresolved_ids = sorted({
-            p.id for tier in _TIERS for p in routes[tier]
+            p.id for tier in _TIERS for p in routes.get(tier, [])
             if _row_eye_status(p, prescription, "od", applicability_key) == "unknown"
             or _row_eye_status(p, prescription, "os", applicability_key) == "unknown"
         })
@@ -472,8 +496,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
 
     # no single tier covers both eyes, and neither eye is unresolved -> the
     # existing proven split/unavailable logic, unchanged.
-    od_any = od.stock_egypt or od.stock_outside or od.rx
-    os_any = os_.stock_egypt or os_.stock_outside or os_.rx
+    od_any = od.stock_egypt or od.stock_outside or od.stock_market_unknown or od.rx
+    os_any = os_.stock_egypt or os_.stock_outside or os_.stock_market_unknown or os_.rx
     if od_any and os_any:
         return schemas.PairFulfillment(
             status="split", price_pair=None, currency=None, source_pricing_ids=[],
@@ -557,6 +581,7 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
         routes = {
             "stock_egypt": [p for p in opt_rows if _row_route(p) == "stock_egypt"],
             "stock_outside": [p for p in opt_rows if _row_route(p) == "stock_outside"],
+            "stock_market_unknown": [p for p in opt_rows if _row_route(p) == "stock_market_unknown"],
             "rx": [p for p in opt_rows if _row_route(p) == "rx"],
         }
         applicability_key = filters.applicability_key if filters else None
@@ -577,7 +602,7 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
             score_row = next((p for p in opt_rows if p.id in pf.source_pricing_ids), None)
         if score_row is None:
             score_row = (routes["stock_egypt"] or routes["stock_outside"]
-                         or routes["rx"] or opt_rows)[0]
+                         or routes["stock_market_unknown"] or routes["rx"] or opt_rows)[0]
         score_range = lens_matcher._best_matching_range(list(score_row.power_ranges), prescription)
         score = lens_matcher.calculate_match_score(
             m, v, score_row, score_range, prescription, filters,
@@ -606,13 +631,15 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
     return out
 
 
-_STATUS_ORDER = {"stock_egypt": 0, "stock_outside": 1, "rx": 2, "split": 3,
-                 "eligibility_unknown": 4, "unavailable": 4}
+_STATUS_ORDER = {"stock_egypt": 0, "stock_outside": 1, "stock_market_unknown": 2, "rx": 3,
+                 "split": 4, "eligibility_unknown": 5, "unavailable": 5}
 _STATUS_AR = {"stock_egypt": "STOCK داخل مصر", "stock_outside": "STOCK خارج مصر",
+              "stock_market_unknown": "STOCK — مكان التوفر غير محدد في الكتالوج",
               "rx": "RX / تصنيع", "split": "مصدر مقسّم (غير موحد)",
               "eligibility_unknown": "التوافق مع الوصفة غير مؤكد (نطاق القوة)",
               "unavailable": "غير متوفر"}
 _EYEBEST_AR = {"stock_egypt": "STOCK مصر", "stock_outside": "STOCK خارج مصر",
+               "stock_market_unknown": "STOCK — سوق غير محدد",
                "rx": "RX / تصنيع", "unknown": "غير مؤكد (نطاق القوة)", "none": "غير متوفر"}
 
 
@@ -628,19 +655,21 @@ def _order_key(r: schemas.PerEyeProductResult):
 _GROUP_DEFS = [
     ("stock_egypt", "🇪🇬 زوج STOCK داخل مصر", "stock", "egypt"),
     ("stock_out_of_egypt", "🌍 زوج STOCK خارج مصر", "stock", "out_of_egypt"),
+    ("stock_market_unknown", "❔ زوج STOCK — مكان التوفر غير محدد بالكتالوج", "stock", "unknown"),
     ("rx", "🏭 زوج RX / تصنيع", "rx", None),
     ("split", "⚠️ مصدر غير موحد / غير متوفر للزوج", "mixed", None),
     ("eligibility_unknown", "❓ التوافق مع الوصفة غير مؤكد (نطاق القوة)", "unknown", None),
 ]
 _STATUS_TO_GROUP = {"stock_egypt": "stock_egypt", "stock_outside": "stock_out_of_egypt",
+                    "stock_market_unknown": "stock_market_unknown",
                     "rx": "rx", "split": "split", "unavailable": "split",
                     "eligibility_unknown": "eligibility_unknown"}
 
 
 def _build_groups(ordered: List[schemas.PerEyeProductResult]) -> List[schemas.LensSearchGroup]:
     buckets: Dict[str, List[schemas.PerEyeProductResult]] = {
-        "stock_egypt": [], "stock_out_of_egypt": [], "rx": [], "split": [],
-        "eligibility_unknown": []}
+        "stock_egypt": [], "stock_out_of_egypt": [], "stock_market_unknown": [],
+        "rx": [], "split": [], "eligibility_unknown": []}
     for r in ordered:
         buckets[_STATUS_TO_GROUP[r.pair_fulfillment.status]].append(r)
     groups = []
@@ -648,7 +677,8 @@ def _build_groups(ordered: List[schemas.PerEyeProductResult]) -> List[schemas.Le
         rows = buckets[key]
         groups.append(schemas.LensSearchGroup(
             key=key, label=label, availability=avail, market=market,
-            catalog_note=("حسب الكتالوج" if avail == "stock"
+            catalog_note=("حسب الكتالوج — مكان التوفر غير محدد" if market == "unknown"
+                          else "حسب الكتالوج" if avail == "stock"
                           else "تصنيع حسب الطلب" if avail == "rx"
                           else "التوافق مع الوصفة غير مؤكد بسبب نطاق القوة" if avail == "unknown"
                           else "سعر الزوج غير مثبت"),
@@ -665,6 +695,14 @@ def _answer(ordered: List[schemas.PerEyeProductResult]) -> schemas.AvailabilityA
     if "stock_outside" in statuses:
         return schemas.AvailabilityAnswer(code="stock_out_of_egypt",
             title="🌍 الزوج غير متوفر داخل مصر — متوفر STOCK خارج مصر", detail="حسب الكتالوج الحالي.")
+    if "stock_market_unknown" in statuses:
+        # Phase 3C REQUIRED wording: a proven STOCK price/eligibility whose
+        # market_scope is NULL in the catalog. Must never claim Egypt, and
+        # must never claim Out Of Egypt / "not available inside Egypt" -
+        # neither is proven.
+        return schemas.AvailabilityAnswer(code="stock_market_unknown",
+            title="📦 الزوج متوفر STOCK — مكان التوفر (داخل/خارج مصر) غير محدد في الكتالوج",
+            detail="السعر والتوفر STOCK مؤكدان من الكتالوج، لكن السوق غير مذكور في مصدر البيانات.")
     if "rx" in statuses:
         return schemas.AvailabilityAnswer(code="rx_only",
             title="🏭 الزوج غير متوفر STOCK — متاح RX / تصنيع", detail="يُصنع حسب الطلب.")
@@ -695,11 +733,14 @@ def _passes_targeted_gate(r: schemas.PerEyeProductResult, f: schemas.LensFilters
             return False
     if f.availability is not None:
         want = getattr(f.availability, "value", f.availability)
-        if want == "stock" and st not in ("stock_egypt", "stock_outside"):
+        if want == "stock" and st not in ("stock_egypt", "stock_outside", "stock_market_unknown"):
             return False
         if want == "rx" and st != "rx":
             return False
     if f.market_scope:
+        # An explicit Egypt / Out Of Egypt market filter is a claim about a
+        # PROVEN market - "stock_market_unknown" satisfies neither (Phase 3C):
+        # it must never pass as if it were the requested market.
         want_eg = market_is_egypt(f.market_scope)
         if want_eg is True and st != "stock_egypt":
             return False
@@ -814,8 +855,8 @@ def search(db: Session, prescription: models.Prescription,
                 title=f"❌ غير متوفر بهذه المواصفات ({want})",
                 detail="راجع «توفر نفس المنتج» أدناه — نفس المنتج متاح خارج المطلوب.")
 
-    counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "rx": 0, "split": 0,
-              "eligibility_unknown": 0}
+    counts = {"stock_egypt": 0, "stock_out_of_egypt": 0, "stock_market_unknown": 0,
+              "rx": 0, "split": 0, "eligibility_unknown": 0}
     for r in ordered:
         counts[_STATUS_TO_GROUP[r.pair_fulfillment.status]] += 1
 
@@ -828,6 +869,7 @@ def search(db: Session, prescription: models.Prescription,
         best_match=ordered[0] if ordered else None, groups=groups,
         stock_egypt_count=counts["stock_egypt"],
         stock_out_of_egypt_count=counts["stock_out_of_egypt"],
+        stock_market_unknown_count=counts["stock_market_unknown"],
         eligibility_unknown_count=counts["eligibility_unknown"],
         rx_count=counts["rx"], split_count=counts["split"],
         alternatives=alternatives, alternatives_note=alt_note,
