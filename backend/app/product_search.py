@@ -422,16 +422,25 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
         #     explicit applicability_key filter narrows BOTH eyes to that one
         #     sub-option from the start (via od_rows/os_rows above), so the
         #     intersection here is naturally restricted to it already.
+        # Multiple proven single-route rows can cover the SAME prescription
+        # when a manufacturer prints overlapping power-dependent price bands
+        # (e.g. a cheaper band with a tighter CYL limit alongside a pricier
+        # band with a wider one, both spanning a shared SPH/CYL zone). The
+        # catalog never says "pick arbitrarily" in that overlap - the only
+        # non-arbitrary, generic rule is to always quote the CHEAPEST proven
+        # price, never whichever row happens to come first in DB row order.
         both = None
         proving_key = None
+        candidates = []
         for p in od_rows:
             if not _row_covers_eye(p, prescription, "os", applicability_key):
                 continue
             common = (_row_eye_proving_keys(p, prescription, "od", applicability_key)
                      & _row_eye_proving_keys(p, prescription, "os", applicability_key))
             if common:
-                both, proving_key = p, next(iter(common - {None}), None)
-                break
+                candidates.append((p, next(iter(common - {None}), None)))
+        if candidates:
+            both, proving_key = min(candidates, key=lambda c: c[0].price_pair)
         if both is not None:
             subtype_note = f" (subtype: {proving_key})" if proving_key else ""
             return schemas.PairFulfillment(
@@ -445,6 +454,7 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
         #      same same-sub-option discipline as (a).
         proven = None
         proving_key = None
+        or_candidates = []
         for a in od_rows:
             for b in os_rows:
                 if a.id == b.id or not _same_pricing_offer(a, b):
@@ -452,10 +462,10 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                 common = (_row_eye_proving_keys(a, prescription, "od", applicability_key)
                          & _row_eye_proving_keys(b, prescription, "os", applicability_key))
                 if common:
-                    proven, proving_key = (a, b), next(iter(common - {None}), None)
-                    break
-            if proven:
-                break
+                    or_candidates.append(((a, b), next(iter(common - {None}), None)))
+        if or_candidates:
+            # same cheapest-wins tie-break as (a) above, for the OR-clause-pair case.
+            proven, proving_key = min(or_candidates, key=lambda c: c[0][0].price_pair)
         if proven is not None:
             a, b = proven
             subtype_note = f" (subtype: {proving_key})" if proving_key else ""
