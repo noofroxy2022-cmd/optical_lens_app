@@ -22,6 +22,7 @@ never modified and whose eligibility maths / match_score are reused verbatim:
   eye)` directly - the existing G1/G2/G3 / transposition / principal-meridian /
   RX-range logic, one eye at a time. Nothing optical is re-implemented here.
 """
+import re
 from typing import List, Optional, Tuple, Dict
 from decimal import Decimal
 
@@ -342,6 +343,31 @@ def _row_eye_proving_keys(p: models.VariantPricing, prescription: models.Prescri
     )
 
 
+_DIAMETER_NOTE_RE = re.compile(r"(?:Ø|diameter_mm=)\s*(\d+)")
+
+
+def _row_matching_ranges(p: models.VariantPricing, prescription: models.Prescription,
+                         eye: str, applicability_key: Optional[str] = None) -> List["models.PowerRange"]:
+    """Every PowerRange of `p` that actually proves ONE eye eligible for this
+    prescription (never just a pass/fail bool) - used only to inspect what
+    catalog EVIDENCE (e.g. a printed diameter) backed the proof, never to
+    change eligibility itself."""
+    ranges = _applicable_ranges(p, applicability_key)
+    return [pr for pr in ranges if lens_matcher.check_power_range(pr, prescription, eye)[0]]
+
+
+def _extract_diameter_mm(notes: Optional[str]) -> Optional[int]:
+    """Best-effort diameter (mm) recorded as catalog evidence in a
+    PowerRange.notes string - e.g. this project's own "Ø65" convention
+    (Maxxee/BBGR/DIVEL) or the pre-existing ZEISS "diameter_mm=70" evidence
+    format. Returns None when no diameter marker is present - NEVER inferred
+    or guessed from anything else."""
+    if not notes:
+        return None
+    m = _DIAMETER_NOTE_RE.search(notes)
+    return int(m.group(1)) if m else None
+
+
 def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Prescription,
                       eye: str, applicability_key: Optional[str] = None) -> str:
     """Tri-state aggregation across every row of one route for one eye:
@@ -386,6 +412,37 @@ def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
         stock_egypt_unknown=(se == "unknown"), stock_outside_unknown=(so == "unknown"),
         stock_market_unknown_unknown=(su == "unknown"),
         rx_unknown=(rx == "unknown"), best=best)
+
+
+def _diameter_confirmation_note(candidates: List[Tuple[models.VariantPricing, Optional[str]]],
+                                prescription: models.Prescription,
+                                applicability_key: Optional[str]) -> Optional[str]:
+    """When 2+ same-identity/same-tier candidate rows all prove eligible for
+    the SAME prescription at DIFFERENT prices, and their proving PowerRange
+    evidence records DIFFERENT diameters, the cheaper price is not
+    unconditionally final - which one applies depends on a real commercial
+    dimension (diameter) this matcher does not evaluate (D1 scalar-diameter
+    work remains separately deferred; this is a display-only caveat, never a
+    matching change). Returns None in the ordinary, unambiguous case - equal
+    prices, or every candidate's proven diameter evidence agrees, or none
+    records a diameter at all (e.g. Maxxee's own overlapping bands, whose
+    competing ranges always share one printed diameter)."""
+    if len(candidates) < 2:
+        return None
+    if len({c[0].price_pair for c in candidates}) < 2:
+        return None
+    diameters = set()
+    for p, _ in candidates:
+        for eye in ("od", "os"):
+            for pr in _row_matching_ranges(p, prescription, eye, applicability_key):
+                d = _extract_diameter_mm(pr.notes)
+                if d is not None:
+                    diameters.add(d)
+    if len(diameters) < 2:
+        return None
+    dia_list = "/".join(str(d) for d in sorted(diameters))
+    return (f"السعر يعتمد على قطر العدسة المطلوب ({dia_list} مم)، "
+            f"ويجب تأكيد القطر قبل اعتماد السعر النهائي.")
 
 
 def _same_pricing_offer(a: models.VariantPricing, b: models.VariantPricing) -> bool:
@@ -457,12 +514,23 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
             both, proving_key = min(candidates, key=lambda c: c[0].price_pair)
         if both is not None:
             subtype_note = f" (subtype: {proving_key})" if proving_key else ""
+            # Overlapping same-identity/same-tier bands normally resolve
+            # cleanly by price alone (e.g. Maxxee's own bands, which always
+            # share one printed diameter) - but when the competing bands
+            # carry DIFFERENT catalog-proven diameter evidence, the cheapest
+            # price is not unconditionally final: which one applies depends
+            # on a real commercial dimension (diameter) this matcher cannot
+            # evaluate. Never silently hidden behind the cheaper price.
+            diameter_note = _diameter_confirmation_note(candidates, prescription, applicability_key)
+            combined_note = both.price_confirmation_note
+            if diameter_note:
+                combined_note = f"{combined_note} | {diameter_note}" if combined_note else diameter_note
             return schemas.PairFulfillment(
                 status=tier, price_pair=both.price_pair, currency=both.currency,
                 source_pricing_ids=[both.id], provenance="single_route", needs_review=False,
                 reason=f"مسار تسعير واحد يغطي العينين ({tier_label[tier]}){subtype_note} — سعر الزوج من الكتالوج.",
                 applicability_key=proving_key,
-                price_confirmation_note=both.price_confirmation_note)
+                price_confirmation_note=combined_note)
 
         # (a2) OD and OS covered by DIFFERENT rows, but a proven OR-clause pair of
         #      ONE catalog pricing offer (same source_extraction_id + facets) -
