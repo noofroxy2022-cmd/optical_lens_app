@@ -1,7 +1,8 @@
 backend/*.db
+optical_lens.db
 backend/backups/
 backend/uploads/
 __pycache__/
-*.pyc
+*.py[cod]
 dashboard/node_modules/
 dashboard/build/
