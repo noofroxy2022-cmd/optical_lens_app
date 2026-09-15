@@ -584,6 +584,16 @@ class ProductSearchRequest(BaseModel):
     prefer_stock: bool = True
     prefer_aspherical: bool = True
     include_alternatives: bool = True             # only computed when targeted + zero exact
+    # V1.2 core-workflow: what the customer is actually being fitted for.
+    # None preserves every prior caller's exact existing behaviour untouched
+    # (no category restriction, original stored Rx used as-is - the deprecated
+    # /match alias and any other caller that never sends this field are
+    # unaffected). "distance"|"reading"|"bifocal"|"progressive" when set.
+    use_mode: Optional[str] = None
+    # V1.2 core-workflow: canonical, manufacturer-agnostic technology need.
+    # "none"/None = no technology requirement. See app.technology_evidence
+    # for the full evidence-backed capability registry.
+    technology_intent: Optional[str] = None
 
 
 class AvailabilityAnswer(BaseModel):
@@ -625,6 +635,14 @@ class EyeAvailability(BaseModel):
     stock_market_unknown_unknown: bool = False
     rx_unknown: bool = False
     best: str = "none"          # stock_egypt | stock_outside | stock_market_unknown | rx | unknown | none
+
+
+class TechnologyAddonInfo(BaseModel):
+    """Seller-facing breakdown for a Type-B (base + catalog-proven add-on)
+    technology fulfillment. See PairFulfillment.technology_addon below."""
+    label: str              # catalog-printed add-on name(s), e.g. "Blue HMC+"
+    base_price: Decimal     # the base row's own proven pair price
+    addon_price: Decimal    # the proven add-on surcharge (pair-level, added once)
 
 
 class PairFulfillment(BaseModel):
@@ -669,6 +687,15 @@ class PairFulfillment(BaseModel):
     # says the FINAL price may still be adjusted after confirmation. None
     # (the default) means no caveat.
     price_confirmation_note: Optional[str] = None
+    # V1.2 technology-fulfillment completeness: set ONLY when this pair's
+    # price/status were adjusted to include a catalog-proven optional add-on
+    # needed to satisfy the requested technology_intent (Type B fulfillment -
+    # see app.technology_evidence.addon_completion). None means either no
+    # technology_intent was requested, or the base row already included the
+    # requested technology on its own (Type A - the ordinary, unmodified
+    # case). `price_pair` above is ALWAYS the final sellable total either way
+    # (base + addon when this is set) - never the base-only price.
+    technology_addon: Optional[TechnologyAddonInfo] = None
 
 
 class PerEyeProductResult(BaseModel):
@@ -719,9 +746,29 @@ class AlternativeResult(BaseModel):
     proximity_score: int = 0
 
 
+class DerivedSearchRx(BaseModel):
+    """The SEARCH-ONLY power actually evaluated for this request when it
+    differs from the stored prescription (currently: the derived Reading
+    Rx = Distance SPH + ADD per eye, CYL/AXIS unchanged). Never persisted -
+    the stored prescription (see `prescription` above) is never mutated.
+    Shown so the seller can verify what the application calculated, per the
+    V1.2 core-workflow requirement that nobody manually computes a Reading Rx."""
+    od_sph: float
+    od_cyl: float
+    od_axis: int
+    os_sph: float
+    os_cyl: float
+    os_axis: int
+
+
 class ProductSearchResponse(BaseModel):
     prescription: PrescriptionResponse
     mode: str
+    # V1.2 core-workflow: echoes the request's use_mode/technology_intent so
+    # the frontend can render the right labels without re-deriving them.
+    use_mode: Optional[str] = None
+    technology_intent: Optional[str] = None
+    derived_search_rx: Optional[DerivedSearchRx] = None
     transposition_applied: bool
     index_recommendation: str
     aspherical_recommendation: str

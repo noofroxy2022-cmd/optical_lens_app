@@ -99,6 +99,18 @@ const PairAnswer = ({ pf }) => {
               ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
               : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
       </div>
+      {/* V1.2 technology-fulfillment completeness: the displayed price above
+          is ALWAYS the final sellable total already - this box only explains
+          the base+add-on breakdown behind it when the requested technology
+          was fulfilled via a catalog-proven add-on rather than being already
+          included in the base row (Type B, see technology_evidence.py). */}
+      {pf.technology_addon && (
+        <div style={{ marginTop: 4, color: '#0958d9', fontSize: 12, background: '#e6f4ff',
+                     border: '1px solid #91caff', borderRadius: 4, padding: '4px 8px' }}>
+          ℹ️ يشمل السعر إضافة مثبتة من الكتالوج لتوفير التكنولوجيا المطلوبة —
+          الأساس {pf.technology_addon.base_price} + {pf.technology_addon.label} {pf.technology_addon.addon_price} = {pf.price_pair} {pf.currency}
+        </div>
+      )}
       {/* Generic, catalog-driven caveat: base price/eligibility above are
           already proven either way - this never hides the price, never
           marks the lens unavailable, and never touches RX eligibility. Text
@@ -127,8 +139,26 @@ const CATEGORY_LABELS = {
 
 const ANSWER_TYPE = {
   stock_egypt: 'success', stock_out_of_egypt: 'warning', stock_market_unknown: 'warning',
-  rx_only: 'warning', split: 'warning', none: 'error',
+  rx_only: 'warning', split: 'warning', none: 'error', validation_error: 'error',
 };
+
+// V1.2 core-workflow: customer-facing use-mode / technology-intent labels.
+// Values sent to the backend are the canonical English tokens (see
+// backend/app/technology_evidence.py); labels are Arabic display text only.
+const USE_MODE_OPTIONS = [
+  { value: 'distance', label: 'مسافات' },
+  { value: 'reading', label: 'قراءة' },
+  { value: 'bifocal', label: 'Bifocal' },
+  { value: 'progressive', label: 'Progressive' },
+];
+const TECHNOLOGY_OPTIONS = [
+  { value: 'none', label: 'عادي' },
+  { value: 'blue_light', label: 'حماية من الضوء الأزرق' },
+  { value: 'photo_gray', label: 'Photo Gray' },
+  { value: 'photo_brown', label: 'Photo Brown' },
+  { value: 'blue_photo_gray', label: 'Blue + Photo Gray' },
+  { value: 'blue_photo_brown', label: 'Blue + Photo Brown' },
+];
 
 // Canonical proven-pair statuses (backend PairFulfillment.status) that may
 // render as the green "⭐ أفضل خيار للزوج" Best Choice card - the ONLY
@@ -202,6 +232,13 @@ const Prescriptions = () => {
   // across repeated searches within one session (see the effect below) -
   // defaultActiveKey would only apply once, on first mount.
   const [activePanelKeys, setActivePanelKeys] = useState([]);
+  // V1.2 core-workflow: what the customer wants made (distance/reading/
+  // bifocal/progressive) and a manufacturer-agnostic technology need. Both
+  // are independent of `mode` (automatic vs targeted) below - the employee
+  // still enters the doctor's prescription only once and never computes a
+  // Reading power or a manufacturer's own technology naming by hand.
+  const [usageMode, setUsageMode] = useState(null);
+  const [technologyIntent, setTechnologyIntent] = useState('none');
   const [mode, setMode] = useState('automatic');
   const [companies, setCompanies] = useState([]);
   const [filters, setFilters] = useState({});
@@ -286,11 +323,17 @@ const Prescriptions = () => {
     setSearchFor(record);
     setSearchData(null);
     setMode('automatic');
+    setUsageMode(null);
+    setTechnologyIntent('none');
     setFilters({});
     setFacets(EMPTY_FACETS);
     setModelNameById({});
     setSearchVisible(true);
-    runSearch(record, 'automatic', {});
+    // explicit null/'none' overrides - never rely on possibly-stale usageMode/
+    // technologyIntent state left over from a previous prescription's session
+    // (same lesson as the P1 Collapse fix: this Modal instance persists across
+    // openSearch calls, so a closure-read of current state here could be stale).
+    runSearch(record, 'automatic', {}, null, 'none');
     refreshFacetOptions({});
   };
 
@@ -409,13 +452,17 @@ const Prescriptions = () => {
     return out;
   };
 
-  const runSearch = async (record, useMode, rawFilters) => {
+  const runSearch = async (record, useMode, rawFilters, usageModeOverride, technologyIntentOverride) => {
     const m = useMode ?? mode;
+    const um = usageModeOverride !== undefined ? usageModeOverride : usageMode;
+    const ti = technologyIntentOverride !== undefined ? technologyIntentOverride : technologyIntent;
     setSearching(true);
     setSearchData(null);
     try {
       const payload = { mode: m };
       if (m === 'targeted') payload.filters = rawFilters ?? buildFilterPayload();
+      if (um) payload.use_mode = um;
+      if (ti && ti !== 'none') payload.technology_intent = ti;
       const res = await prescriptionAPI.search(record.id, payload);
       setSearchData(res.data);
     } catch (error) {
@@ -584,6 +631,26 @@ const Prescriptions = () => {
         footer={null}
         width={1180}
       >
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>نوع الاستخدام</div>
+          <Radio.Group
+            optionType="button"
+            value={usageMode}
+            onChange={(e) => setUsageMode(e.target.value)}
+            options={USE_MODE_OPTIONS}
+          />
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>التكنولوجيا المطلوبة</div>
+          <Radio.Group
+            optionType="button"
+            value={technologyIntent}
+            onChange={(e) => setTechnologyIntent(e.target.value)}
+            options={TECHNOLOGY_OPTIONS}
+          />
+        </div>
+
         <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} style={{ marginBottom: 12 }}>
           <Radio value="automatic">بحث تلقائي</Radio>
           <Radio value="targeted">بحث بمواصفات محددة</Radio>
@@ -691,6 +758,22 @@ const Prescriptions = () => {
               description={sd.availability_answer.detail}
               style={{ marginBottom: 12 }}
             />
+            {sd.derived_search_rx && (
+              <Card size="small" title="قوة القراءة المستخدمة في البحث" style={{ marginBottom: 12, borderColor: '#1677ff' }}>
+                <div style={{ display: 'flex', gap: 24 }}>
+                  <div>OD: {sd.derived_search_rx.od_sph} / {sd.derived_search_rx.od_cyl} x {sd.derived_search_rx.od_axis}</div>
+                  <div>OS: {sd.derived_search_rx.os_sph} / {sd.derived_search_rx.os_cyl} x {sd.derived_search_rx.os_axis}</div>
+                </div>
+                <div style={{ color: '#888', fontSize: 12, marginTop: 4 }}>
+                  محسوبة تلقائياً من وصفة الأبعد + ADD — الوصفة الأصلية المحفوظة لم تتغيّر.
+                </div>
+              </Card>
+            )}
+            {sd.use_mode === 'bifocal' || sd.use_mode === 'progressive' ? (
+              <div style={{ color: '#888', fontSize: 12, marginBottom: 12 }}>
+                البحث يستخدم وصفة الأبعد (Distance) + ADD كما هي، بدون تحويل لقوة قراءة.
+              </div>
+            ) : null}
             <Descriptions size="small" column={5} bordered style={{ marginBottom: 12 }}>
               <Descriptions.Item label="خيارات الزوج">{sd.exact_total}</Descriptions.Item>
               <Descriptions.Item label="زوج STOCK مصر">{sd.stock_egypt_count}</Descriptions.Item>

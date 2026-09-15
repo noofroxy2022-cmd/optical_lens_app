@@ -59,13 +59,19 @@ export const prescriptionAPI = {
       params: { prefer_stock: preferStock, prefer_aspherical: preferAspherical },
     }),
   // V1.0.1 availability-first product search. mode "automatic" | "targeted".
-  search: (id, { mode = 'automatic', filters = null, preferStock = true, preferAspherical = true, includeAlternatives = true } = {}) =>
+  // V1.2 core-workflow: use_mode (distance/reading/bifocal/progressive) and
+  // technology_intent are passed straight through when present - the caller
+  // (Prescriptions.js) already omits them entirely when not selected.
+  search: (id, { mode = 'automatic', filters = null, preferStock = true, preferAspherical = true,
+                 includeAlternatives = true, use_mode, technology_intent } = {}) =>
     api.post(`/prescriptions/${id}/search`, {
       mode,
       filters,
       prefer_stock: preferStock,
       prefer_aspherical: preferAspherical,
       include_alternatives: includeAlternatives,
+      ...(use_mode !== undefined ? { use_mode } : {}),
+      ...(technology_intent !== undefined ? { technology_intent } : {}),
     }),
   delete: (id) => api.delete(`/prescriptions/${id}`),
 };

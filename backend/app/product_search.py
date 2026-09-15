@@ -29,6 +29,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app import schemas, models
+from app import technology_evidence
 from app.lens_matcher import lens_matcher
 
 _RX = models.PricingAvailability.RX
@@ -653,6 +654,8 @@ def _identity_key(p: models.VariantPricing):
 def _per_eye_results(db: Session, prescription: models.Prescription,
                      filters: Optional[schemas.LensFilters], req: schemas.ProductSearchRequest,
                      rec_index: float, need_asph: bool,
+                     derived_category: Optional[str] = None,
+                     technology_intent: Optional[str] = None,
                      ) -> List[schemas.PerEyeProductResult]:
     probe = _probe_filters(filters)
     rows = lens_matcher._current_pricing_candidates(db, probe)
@@ -663,6 +666,18 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
         if v is None or not v.is_active:
             continue
         m = v.lens_model
+        # V1.2 use_mode: independent hard category boundary, applied even in
+        # automatic mode (which has no `filters` object to carry it). Only
+        # active when targeted mode did NOT already fold it into `filters`
+        # (see search()) - never a duplicate/conflicting check.
+        if derived_category is not None and getattr(m.category, "value", m.category) != derived_category:
+            continue
+        # NOTE: technology_intent is NOT gated here. `_identity_key` already
+        # groups by coating_id/treatment_band/color_variant, so every row in
+        # one identity group shares identical technology evidence - the
+        # Type-A/Type-B decision is made ONCE per identity group below
+        # (needed to attempt Type-B add-on completion, which is scoped to a
+        # row's own availability route, not to the raw candidate row here).
         if probe is not None and not lens_matcher._passes_commercial_and_optical_filters(v, m, p, probe):
             continue
         if filters is not None and not _passes_extra_identity(v, filters):
@@ -671,24 +686,68 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
 
     out: List[schemas.PerEyeProductResult] = []
     want_specific_product = bool(filters and filters.lens_model_id is not None)
+    want_tech = bool(technology_intent and technology_intent != "none")
     for _key, opt_rows in groups.items():
+        sample = opt_rows[0]
+        v = sample.variant
+        m = v.lens_model
+        company_name = m.company.name if m.company else None
+
         routes = {
             "stock_egypt": [p for p in opt_rows if _row_route(p) == "stock_egypt"],
             "stock_outside": [p for p in opt_rows if _row_route(p) == "stock_outside"],
             "stock_market_unknown": [p for p in opt_rows if _row_route(p) == "stock_market_unknown"],
             "rx": [p for p in opt_rows if _row_route(p) == "rx"],
         }
+
+        addon_price: Optional[Decimal] = None
+        addon_label: Optional[str] = None
+        if want_tech:
+            caps = technology_evidence.proven_capabilities(
+                company_name=company_name, coating_name=(sample.coating.name if sample.coating else None),
+                treatment_band=v.treatment_band, color_variant=v.color_variant)
+            if technology_evidence.satisfies(technology_intent, caps):
+                pass  # Type A - base row already proves it; no price change
+            else:
+                # Type B: a proven add-on can ONLY ever complete the "rx"
+                # route (see technology_evidence._ADDON_EVIDENCE) - a Stock
+                # row of this SAME identity never gains the technology this
+                # way, so it must never be offered as if it now qualifies.
+                # Restricting `routes` to rx-only here (rather than filtering
+                # `opt_rows` itself) reuses the exact same _eye_availability/
+                # _pair_fulfillment logic unmodified for every other caller.
+                missing = technology_evidence.missing_capabilities(technology_intent, caps)
+                completion = (technology_evidence.addon_completion(
+                                  company_name, "rx", missing,
+                                  color_variant=v.color_variant, index_value=v.index_value)
+                              if routes["rx"] else None)
+                if completion is None:
+                    continue  # neither the base row nor any proven add-on satisfies it
+                addon_price, addon_label, _ = completion
+                routes = {"stock_egypt": [], "stock_outside": [], "stock_market_unknown": [],
+                          "rx": routes["rx"]}
+
         applicability_key = filters.applicability_key if filters else None
         od = _eye_availability(routes, prescription, "od", applicability_key)
         os_ = _eye_availability(routes, prescription, "os", applicability_key)
         pf = _pair_fulfillment(routes, od, os_, prescription, applicability_key)
 
+        if addon_price is not None:
+            # Only a genuinely proven single-route RX price may be completed
+            # by an add-on - never a split/unproven_mixed/unavailable base,
+            # since there is then no single proven base price to add to.
+            if pf.status != "rx" or pf.price_pair is None:
+                continue
+            pf = pf.model_copy(update={
+                "price_pair": pf.price_pair + addon_price,
+                "technology_addon": schemas.TechnologyAddonInfo(
+                    label=addon_label, base_price=pf.price_pair, addon_price=addon_price),
+                "reason": pf.reason + f" + إضافة مثبتة من الكتالوج: {addon_label} (+{addon_price} EGP) لتحقيق التكنولوجيا المطلوبة.",
+            })
+
         if pf.status == "unavailable" and not want_specific_product:
             continue  # automatic / non-specific: drop options no eye combo can use
 
-        sample = opt_rows[0]
-        v = sample.variant
-        m = v.lens_model
         # score: reuse the frozen calculator on the fulfilling route's row + a
         # covering range (falls back to a representative row for split/unavailable)
         score_row = None
@@ -843,21 +902,132 @@ def _passes_targeted_gate(r: schemas.PerEyeProductResult, f: schemas.LensFilters
     return True
 
 
+# --------------------------------------------------- V1.2 use_mode / technology
+class _SearchRx:
+    """Lightweight, non-persisted stand-in for a prescription's optical
+    values, carrying ONLY the attributes the eligibility/scoring engine reads
+    from a `models.Prescription` (see product_search.py / lens_matcher.py).
+    Used to evaluate a USE-MODE-DERIVED power (e.g. the Reading near Rx)
+    without ever mutating the stored prescription row. The real
+    `models.Prescription` is always used unchanged for the response's own
+    `prescription` field."""
+    __slots__ = ("id", "customer_name", "customer_phone", "notes", "pd",
+                 "transposition_applied", "od_sph", "od_cyl", "od_axis", "od_add",
+                 "os_sph", "os_cyl", "os_axis", "os_add")
+
+    def __init__(self, source: models.Prescription, *,
+                 od_sph=None, os_sph=None, od_add=None, os_add=None):
+        self.id = source.id
+        self.customer_name = source.customer_name
+        self.customer_phone = source.customer_phone
+        self.notes = source.notes
+        self.pd = source.pd
+        self.transposition_applied = source.transposition_applied
+        self.od_sph = source.od_sph if od_sph is None else od_sph
+        self.od_cyl = source.od_cyl
+        self.od_axis = source.od_axis
+        self.od_add = source.od_add if od_add is None else od_add
+        self.os_sph = source.os_sph if os_sph is None else os_sph
+        self.os_cyl = source.os_cyl
+        self.os_axis = source.os_axis
+        self.os_add = source.os_add if os_add is None else os_add
+
+
+# use_mode -> the hard category boundary it implies (Phase 2). use_mode=None
+# (no caller opt-in) leaves category completely unrestricted - the exact
+# pre-V1.2 automatic/targeted behaviour, for full backward compatibility.
+_USE_MODE_CATEGORY = {
+    "distance": "single_vision",
+    "reading": "single_vision",
+    "bifocal": "bifocal",
+    "progressive": "progressive",
+}
+
+
+def _add_missing(value: Optional[float]) -> bool:
+    """A clinically real ADD is always > 0; None/0/0.0 all mean "not entered
+    for this eye" - never invented, per the V1.2 core-workflow requirement."""
+    return value is None or float(value) == 0.0
+
+
+def _validation_response(prescription: models.Prescription, req: schemas.ProductSearchRequest,
+                          use_mode: Optional[str], title: str, detail: str) -> schemas.ProductSearchResponse:
+    """A clear, non-fabricated validation failure (missing ADD / unknown
+    use_mode) - zero results, zero best_match, never a guessed ADD value."""
+    return schemas.ProductSearchResponse(
+        prescription=schemas.PrescriptionResponse.model_validate(prescription),
+        mode="targeted" if (req.mode or "automatic").strip().lower() == "targeted" else "automatic",
+        use_mode=use_mode, technology_intent=req.technology_intent,
+        transposition_applied=prescription.transposition_applied,
+        index_recommendation="", aspherical_recommendation="",
+        availability_answer=schemas.AvailabilityAnswer(code="validation_error", title=title, detail=detail),
+        exact_total=0, best_match=None, groups=[])
+
+
 # ---------------------------------------------------------------- entry point
 def search(db: Session, prescription: models.Prescription,
            req: schemas.ProductSearchRequest) -> schemas.ProductSearchResponse:
     targeted = (req.mode or "automatic").strip().lower() == "targeted"
     filters = req.filters if targeted else None
 
-    max_sph = max(abs(prescription.od_sph), abs(prescription.os_sph))
-    max_cyl = max(abs(prescription.od_cyl or 0), abs(prescription.os_cyl or 0))
+    use_mode = (req.use_mode or "").strip().lower() or None
+    derived_category: Optional[str] = None
+    derived_rx: Optional[schemas.DerivedSearchRx] = None
+    search_prescription: models.Prescription = prescription
+
+    if use_mode is not None:
+        if use_mode not in _USE_MODE_CATEGORY:
+            return _validation_response(prescription, req, use_mode,
+                "نوع استخدام غير معروف",
+                f"القيمة '{use_mode}' غير معروفة. استخدم distance / reading / bifocal / progressive.")
+        derived_category = _USE_MODE_CATEGORY[use_mode]
+
+        if use_mode == "distance":
+            # ADD must NEVER affect Single Vision Distance eligibility.
+            search_prescription = _SearchRx(prescription, od_add=0.0, os_add=0.0)
+        elif use_mode == "reading":
+            if _add_missing(prescription.od_add) or _add_missing(prescription.os_add):
+                return _validation_response(prescription, req, use_mode,
+                    "بيانات القراءة غير مكتملة",
+                    "قوة القراءة (ADD) غير موجودة لكل عين في هذه الوصفة. لا يمكن حساب بحث القراءة بدون ADD - أضِفه في الوصفة الأصلية أولاً.")
+            od_reading_sph = round(prescription.od_sph + prescription.od_add, 2)
+            os_reading_sph = round(prescription.os_sph + prescription.os_add, 2)
+            # Near Rx IS the full search-power already (Distance SPH + ADD) -
+            # it carries no further ADD of its own, so ADD is forced to 0 here
+            # too (same reason as Distance: a single_vision range never checks
+            # add_min/add_max, and forcing 0 keeps that branch inert either way).
+            search_prescription = _SearchRx(prescription, od_sph=od_reading_sph, os_sph=os_reading_sph,
+                                             od_add=0.0, os_add=0.0)
+            derived_rx = schemas.DerivedSearchRx(
+                od_sph=od_reading_sph, od_cyl=prescription.od_cyl or 0.0, od_axis=prescription.od_axis or 0,
+                os_sph=os_reading_sph, os_cyl=prescription.os_cyl or 0.0, os_axis=prescription.os_axis or 0)
+        else:  # bifocal / progressive - ORIGINAL Distance Rx + ADD, unchanged
+            if _add_missing(prescription.od_add) or _add_missing(prescription.os_add):
+                label = "Bifocal" if use_mode == "bifocal" else "Progressive"
+                return _validation_response(prescription, req, use_mode,
+                    f"بيانات {label} غير مكتملة",
+                    f"قوة الـ ADD غير موجودة لكل عين في هذه الوصفة. {label} يحتاج ADD لكل عين - أضِفه في الوصفة الأصلية أولاً.")
+            # no derivation: the stored od_sph/os_sph/od_add/os_add already ARE
+            # "Distance Rx + ADD" - search_prescription stays = prescription.
+
+        # targeted mode: fold the use_mode category into the employee's own
+        # filters so the EXISTING category-hard-boundary machinery (exact-gate
+        # + compute_alternatives) enforces it with no new code path; use_mode
+        # is authoritative over any independently-chosen "الفئة" value.
+        if filters is not None:
+            filters.category = derived_category
+
+    max_sph = max(abs(search_prescription.od_sph), abs(search_prescription.os_sph))
+    max_cyl = max(abs(search_prescription.od_cyl or 0), abs(search_prescription.os_cyl or 0))
     rec_index, index_desc = lens_matcher.recommender.recommend_index(max_sph)
     need_asph, aspherical_desc = lens_matcher.recommender.recommend_aspherical(max_sph, max_cyl)
 
     # per-eye / pair analysis for every commercial option that satisfies the
     # IDENTITY filters (company / product / index / category / design / coating /
     # colour-technology). Availability / market / max_price are NOT applied here.
-    options = _per_eye_results(db, prescription, filters, req, rec_index, need_asph)
+    options = _per_eye_results(db, search_prescription, filters, req, rec_index, need_asph,
+                                derived_category=derived_category if filters is None else None,
+                                technology_intent=req.technology_intent)
 
     alternatives: List[schemas.AlternativeResult] = []
     alt_note = None
@@ -904,13 +1074,13 @@ def search(db: Session, prescription: models.Prescription,
 
         if not exact and not intel and req.include_alternatives:
             all_results, *_ = lens_matcher.match_lenses(
-                db, prescription, None, req.prefer_stock, req.prefer_aspherical)
+                db, search_prescription, None, req.prefer_stock, req.prefer_aspherical)
             # Phase 3C: an alternative must be prescription-safe too - a
             # candidate whose power_eligibility is UNRESOLVED (or genuinely
             # ineligible) is never a usable fallback, never offered as a
             # priced recommendation.
             all_results = _proven_eligible_for_alternatives(
-                db, all_results, prescription, filters.applicability_key if filters else None)
+                db, all_results, search_prescription, filters.applicability_key if filters else None)
             alternatives = compute_alternatives(all_results, set(), filters)
             if alternatives:
                 alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "
@@ -957,6 +1127,7 @@ def search(db: Session, prescription: models.Prescription,
     return schemas.ProductSearchResponse(
         prescription=schemas.PrescriptionResponse.model_validate(prescription),
         mode="targeted" if targeted else "automatic",
+        use_mode=use_mode, technology_intent=req.technology_intent, derived_search_rx=derived_rx,
         transposition_applied=prescription.transposition_applied,
         index_recommendation=index_desc, aspherical_recommendation=aspherical_desc,
         availability_answer=answer, exact_total=len(ordered),
