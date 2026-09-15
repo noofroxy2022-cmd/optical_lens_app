@@ -29,6 +29,10 @@ class MaterialType(str, Enum):
     HIGH_INDEX_161 = "high_index_1.61"
     HIGH_INDEX_167 = "high_index_1.67"
     HIGH_INDEX_174 = "high_index_1.74"
+    # Mineral glass - added for SCOPE's printed "White Glass"/"Photo Glass"
+    # rows (migration c9d8e7f6a5b4). Never a placeholder for any plastic
+    # material; only ever set when the catalog explicitly prints glass.
+    GLASS = "glass"
 
 class DesignType(str, Enum):
     # Optical geometry / type ONLY.
