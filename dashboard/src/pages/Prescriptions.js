@@ -99,11 +99,6 @@ const PairAnswer = ({ pf }) => {
               ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
               : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
       </div>
-      {pf.source_pricing_ids && pf.source_pricing_ids.length > 0 && (
-        <div style={{ marginTop: 2, color: '#999', fontSize: 11 }}>
-          مصادر التسعير: {pf.source_pricing_ids.join(', ')}
-        </div>
-      )}
       {/* Generic, catalog-driven caveat: base price/eligibility above are
           already proven either way - this never hides the price, never
           marks the lens unavailable, and never touches RX eligibility. Text
