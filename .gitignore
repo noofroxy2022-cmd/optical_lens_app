@@ -1,0 +1,7 @@
+backend/*.db
+backend/backups/
+backend/uploads/
+__pycache__/
+*.pyc
+dashboard/node_modules/
+dashboard/build/
