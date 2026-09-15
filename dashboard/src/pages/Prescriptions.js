@@ -157,6 +157,36 @@ const isActionableBestMatch = (best) => (
 
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
 
+// Maps PairFulfillment.status (the proven pair-level route) to the matching
+// LensSearchGroup.key so the decision-relevant group can be opened by default.
+// Note the deliberate naming difference between the two enums for the same
+// concept: pair status "stock_outside" vs. group key "stock_out_of_egypt".
+const STATUS_TO_DEFAULT_GROUP_KEY = {
+  stock_egypt: 'stock_egypt',
+  stock_outside: 'stock_out_of_egypt',
+  stock_market_unknown: 'stock_market_unknown',
+  rx: 'rx',
+  split: 'split',
+  eligibility_unknown: 'eligibility_unknown',
+};
+
+// Computes which result groups should start expanded for a given search
+// response: the group matching the proven best-pair route, plus the
+// eligibility_unknown group (when populated) since it always represents
+// rows that need employee review regardless of the best-pair outcome.
+const defaultOpenGroupKeys = (data) => {
+  if (!data || !Array.isArray(data.groups)) return [];
+  const openKeys = new Set();
+  const status = data.best_match?.pair_fulfillment?.status;
+  const mappedKey = status && STATUS_TO_DEFAULT_GROUP_KEY[status];
+  if (mappedKey && data.groups.some((g) => g.key === mappedKey && g.count > 0)) {
+    openKeys.add(mappedKey);
+  }
+  const reviewGroup = data.groups.find((g) => g.key === 'eligibility_unknown' && g.count > 0);
+  if (reviewGroup) openKeys.add(reviewGroup.key);
+  return Array.from(openKeys);
+};
+
 const Prescriptions = () => {
   const [prescriptions, setPrescriptions] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -172,6 +202,11 @@ const Prescriptions = () => {
   const [searchFor, setSearchFor] = useState(null);
   const [searching, setSearching] = useState(false);
   const [searchData, setSearchData] = useState(null);
+  // Which result-group Collapse panels are open. Controlled (not
+  // defaultActiveKey) because the search Modal/Collapse instance persists
+  // across repeated searches within one session (see the effect below) -
+  // defaultActiveKey would only apply once, on first mount.
+  const [activePanelKeys, setActivePanelKeys] = useState([]);
   const [mode, setMode] = useState('automatic');
   const [companies, setCompanies] = useState([]);
   const [filters, setFilters] = useState({});
@@ -191,6 +226,15 @@ const Prescriptions = () => {
     loadPrescriptions();
     companyAPI.getAll().then((r) => setCompanies(r.data)).catch(() => {});
   }, []);
+
+  // Resets which result groups are open only when a genuinely NEW search
+  // response arrives (a new searchData object, including the null reset at
+  // the start of a search). Manual panel toggles the user makes afterward
+  // only touch activePanelKeys, so they are never overridden until the next
+  // real search response lands.
+  useEffect(() => {
+    setActivePanelKeys(defaultOpenGroupKeys(searchData));
+  }, [searchData]);
 
   const loadPrescriptions = async () => {
     setLoading(true);
@@ -671,7 +715,7 @@ const Prescriptions = () => {
 
             {sd.exact_total === 0 && <Empty description="لا توجد نتيجة مطابقة تماماً" />}
 
-            <Collapse defaultActiveKey={['stock_egypt', 'stock_out_of_egypt', 'stock_market_unknown', 'rx', 'split']}>
+            <Collapse activeKey={activePanelKeys} onChange={setActivePanelKeys}>
               {sd.groups.map((grp) => (
                 <Panel
                   key={grp.key}
