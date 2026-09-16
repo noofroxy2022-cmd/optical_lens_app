@@ -41,7 +41,8 @@ def test_strict_explicit_boundaries(db, route, field, lo, hi, edge, offset, pass
 def test_pixel_proven_scope(design):
     offer = te.addon_completion("Pixel", "rx", frozenset({te.BLUE_LIGHT}),
                                category="single_vision", design_variant=design, index_value=1.5,
-                               market_scope="Out Of Egypt")
+                               market_scope="Out Of Egypt", model_name="Pixel", coating_name="Astro",
+                               color_variant="Clear", design_type="spherical")
     assert offer.label == "Blue Cut Coating"
     assert offer.unit_status == te.UNIT_UNRESOLVED
 
@@ -53,14 +54,15 @@ def test_pixel_proven_scope(design):
 def test_pixel_scope_rejects_unproven_dimensions(patch):
     args = dict(company_name="Pixel", availability_route="rx", missing=frozenset({te.BLUE_LIGHT}),
                 category="single_vision", design_variant="Free Form", market_scope="Out Of Egypt",
-                index_value=1.5)
+                index_value=1.5, model_name="Pixel", coating_name="Astro",
+                color_variant="Clear", design_type="spherical")
     args.update(patch)
     assert te.addon_completion(**args) is None
 
 
 @pytest.mark.parametrize("category", ["progressive", "bifocal", "single_vision"])
 def test_pixel_scope_seller_end_to_end(db, category):
-    _, _, v, vp = _rx_product(db, "Pixel", "Pixel", category, -6, 6)
+    _, _, v, vp = _rx_product(db, "Pixel", "Pixel", category, -6, 6, coating_code="Astro", color_variant="Clear")
     v.design_variant, vp.market_scope = "Free Form", "Out Of Egypt"
     vp.power_ranges[0].add_min, vp.power_ranges[0].add_max = 1, 3
     db.commit()
@@ -119,7 +121,9 @@ def test_ordinary_colour_never_becomes_seller_photo_result(db, company, color, n
 @pytest.mark.parametrize("index,allowed", [(1.5, True), (1.6, True), (1.67, True),
                                            (1.53, False), (1.74, False), (None, False), (1.671, False)])
 def test_hoya_restricted_index(index, allowed):
-    offer = te.addon_completion("HOYA", "rx", frozenset({te.BLUE_LIGHT}), "Sensity 2", index)
+    offer = te.addon_completion("HOYA", "rx", frozenset({te.BLUE_LIGHT}), "Sensity 2", index,
+                                model_name="Nulux iDENTITY", coating_name="Long Life UV Control",
+                                category="single_vision", design_type="spherical", market_scope="Out Of Egypt")
     assert (offer is not None) is allowed
 
 
@@ -127,8 +131,11 @@ def test_hoya_restricted_index(index, allowed):
     ("Maxxee", None, "Blue HMC+", 1300), ("HOYA", "Sensity 2", "BLC", 1500),
     ("Pixel", None, "Blue Cut Coating", 1000)])
 def test_seller_addon_unit_unresolved_contract(db, company, color, label, amount):
-    _, _, v, vp = _rx_product(db, company, "Base", "single_vision", -6, 6,
-                              color_variant=color, price=5000)
+    model, coating = {"HOYA": ("Nulux iDENTITY", "Long Life UV Control"),
+                      "Pixel": ("Pixel", "Astro"), "Maxxee": ("Maxxee", "H.M.C")}[company]
+    _, _, v, vp = _rx_product(db, company, model, "single_vision", -6, 6,
+                              color_variant="Clear" if company == "Pixel" else color,
+                              coating_code=coating, market_scope="Out Of Egypt", price=5000)
     if company == "Pixel":
         v.design_variant, vp.market_scope = "High Definition", "Out Of Egypt"
         db.commit()
@@ -157,7 +164,8 @@ def test_seller_proven_unit_arithmetic_isolated_fixture(db, monkeypatch, unit, m
     key = ("Maxxee", "rx", None)
     offer = te._ADDON_EVIDENCE[key][te.BLUE_LIGHT]._replace(unit_status=unit)
     monkeypatch.setitem(te._ADDON_EVIDENCE, key, {te.BLUE_LIGHT: offer})
-    _rx_product(db, "Maxxee", "Base", "single_vision", -6, 6, price=5000)
+    _rx_product(db, "Maxxee", "Maxxee", "single_vision", -6, 6, price=5000,
+                coating_code="H.M.C", market_scope="Out Of Egypt")
     response = seller(db, _mk_presc(db, -2, -2))
     r = response.best_match
     assert customer_needs.actionable(r)
@@ -167,7 +175,8 @@ def test_seller_proven_unit_arithmetic_isolated_fixture(db, monkeypatch, unit, m
 
 
 def test_included_preferred_and_strict_blue_photo_and(db):
-    _rx_product(db, "Maxxee", "Pending add-on", "single_vision", -6, 6, price=100)
+    _rx_product(db, "Maxxee", "Maxxee", "single_vision", -6, 6, price=100,
+                coating_code="H.M.C", market_scope="Out Of Egypt")
     _stock_product(db, "VISALL", "Included", "single_vision", -6, 6, price=1000,
                    treatment_band="Photochromic + BlueCut", color_variant="Gray")
     p = _mk_presc(db, -2, -2)

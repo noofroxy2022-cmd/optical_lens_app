@@ -226,66 +226,11 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
 }
 
 
-# ============================================================================
-# TYPE B - catalog-proven optional ADD-ON fulfillment (technology completeness
-# audit, V1.2). An add-on may complete a technology intent that the base
-# priced row does NOT itself include, but ONLY when this project already has
-# a committed, price-cited evidence file (*_addons_evidence.py) for it AND
-# that evidence file (or an adjacent committed test) also proves the scope the
-# add-on applies to. Absence of a scope statement means AMBIGUOUS_APPLICABILITY
-# and the add-on is deliberately NOT registered here - "must NOT be
-# automatically priced" (task rule). No price is ever invented: every amount
-# below is copied verbatim from an existing *_addons_evidence.py module that
-# already cites its source PDF/page.
-#
-# Audit outcome (full manufacturer sweep against every *_addons_evidence.py
-# module plus the printed-additions test comments already in this project):
-#
-#   Maxxee   "Blue HMC+" +1300 EGP (maxxee_addons_evidence.py) - PROVEN.
-#            Scope: "printed identically at the bottom of every RX page
-#            (3-8)" of the Maxxee catalog - a uniform, catalog-wide RX menu,
-#            not tied to one product/index -> PROVEN_CATEGORY_SPECIFIC
-#            (Maxxee, availability=RX, any category/index).
-#   PIXEL    pixel_phase4_test.pdf p.16 and the committed page-16/17
-#            reconciliation tests prove RX Single Vision, Out Of Egypt,
-#            with separate Free Form / High Definition designs. The footer
-#            does NOT prove Progressive, Bifocal or other designs/markets.
-#   HOYA     "Available Additions" on the Nulux iDENTITY RX page proves
-#            BLC +1500 EGP. Keep the existing conservative Sensity 2,
-#            index 1.5/1.6/1.67 restriction; do not broaden it in this fix.
-#            Visual review of the uploaded HOYA catalog shows the adjacent
-#            index caption belongs to a Sensity upgrade, not a BLC unit
-#            statement. It must never be used as proof of surcharge units.
-#   PLATINUM "Mira Blue" is named ONLY in test_platinum_import.py (a negative
-#            test proving it was never imported as a fake base product) - NO
-#            price for it exists anywhere in this project or workspace (no
-#            source PDF was supplied for PLATINUM this turn either) ->
-#            NOT PROVEN (price unresolved). Never invented/guessed.
-#   BBGR     "Neva blue" +1300 EGP (bbgr_addons_evidence.py page-4 list)
-#            exists, but this is the SAME ambiguity already recorded for
-#            BBGR's stock coating "Neva blu" above: no evidence distinguishes
-#            a genuine blue-light meaning from a coincidental brand-name
-#            fragment ("Neva Max"/"Neva Drive" are named the same way with no
-#            technology meaning at all) -> AMBIGUOUS_APPLICABILITY. No BBGR
-#            source catalog was supplied this turn to re-check. Left
-#            unregistered for consistency with the stock-side decision.
-#   SEIKO    page-5 additions (SRC ONE/SCREEN/ROAD/SUN/ULTRA, MIRROR, TINTING)
-#            - re-checked against the supplied Seiko_Pricelist_2025.pdf p.5:
-#            SRC SCREEN's own marketing paragraph explicitly claims reduced
-#            blue-light exposure -> PROVEN, registered above as
-#            ("SEIKO", "coating", "SRC - SCREEN"). SRC ONE/ROAD/ULTRA/SUN and
-#            MIRROR/TINTING describe anti-reflective, driver-glare, or
-#            outdoor-contrast benefits only, with no blue-light or
-#            photochromic claim anywhere in their own paragraphs -> NOT
-#            PRESENT for those six.
-#   SCOPE    scope_addons_evidence.py's ADDITIONS are coating/lens-service
-#            surcharges (hard-coat/edging/etc.) with no blue-light or
-#            photochromic item among them -> NOT PRESENT.
-#
-# No photochromic (Gray/Brown) add-on with a proven price AND proven scope
-# exists anywhere in the current project evidence for ANY manufacturer -
-# every photo_gray/photo_brown/combo result is either Type A directly, or
-# Type A (photochromic colour) + a proven Type B blue-light add-on.
+# Type B optional fulfillment. V1.3.3 applicability is an exact catalog-identity
+# whitelist (addon_scope_evidence.py), independent of printed amount/unit proof.
+# Source audit: HOYA Price List 2025 pp.9/10/12/16/19-24/26/27;
+# pixel_phase4_test.pdf p.16; Maxxee By Hoya 2025 pp.3-8.
+# Sensity Original prerequisites are NOT composed automatically.
 UNIT_PAIR_PROVEN = "UNIT_PAIR_PROVEN"
 UNIT_PER_LENS_PROVEN = "UNIT_PER_LENS_PROVEN"
 UNIT_UNRESOLVED = "UNIT_UNRESOLVED"
@@ -311,23 +256,9 @@ class AddonOffer(NamedTuple):
     designs: Optional[FrozenSet[str]] = None
     markets: Optional[FrozenSet[str]] = None
 
-# (company_name, availability_route, color_variant_scope) -> {capability: AddonOffer}
-# color_variant_scope is None for an add-on proven company/route-wide
-# (Maxxee); PIXEL also requires the offer's category/design/market. A
-# specific string (e.g. "Sensity 2") restricts the add-on
-# to rows whose OWN color_variant matches exactly, per the catalog's own
-# stated scope (HOYA's BLC). availability_route is the row's OWN proven
-# route ("rx" is the only scope any add-on is proven for today - never
-# "stock_egypt"/"stock_outside"/"stock_market_unknown", so Type-B fulfillment
-# can never silently reclassify a Stock row's availability; see
-# product_search.py's use of this registry).
-#
-# Unit audit (V1.3.2): the committed Maxxee/PIXEL evidence and HOYA
-# reconciliation notes prove the printed amounts, but never explicitly prove
-# per-pair vs per-lens units. Maxxee/PIXEL primary PDFs are absent from this
-# repository. HOYA uploads/catalogs/company_1_20260909_045148.pdf, PDF pages
-# 10/12 (printed 9/11), show BLC 700/1500 but no per-pair/per-lens statement.
-# Prior arithmetic and the base price_pair convention are NOT unit evidence.
+# Route keys never include Stock. HOYA now uses the same exact identity
+# validation as PIXEL/Maxxee instead of the misleading Sensity index caption.
+# All printed amounts remain informational: no source proves surcharge units.
 _ADDON_EVIDENCE: Dict[Tuple[str, str, Optional[str]], Dict[str, AddonOffer]] = {
     ("Maxxee", "rx", None): {
         BLUE_LIGHT: AddonOffer(label="Blue HMC+", price=Decimal("1300"), capability=BLUE_LIGHT),
@@ -339,9 +270,8 @@ _ADDON_EVIDENCE: Dict[Tuple[str, str, Optional[str]], Dict[str, AddonOffer]] = {
                               designs=frozenset({"Free Form", "High Definition"}),
                               markets=frozenset({"Out Of Egypt"})),
     },
-    ("HOYA", "rx", "Sensity 2"): {
-        BLUE_LIGHT: AddonOffer(label="BLC", price=Decimal("1500"), capability=BLUE_LIGHT,
-                                applicable_indexes=frozenset({1.5, 1.6, 1.67})),
+    ("HOYA", "rx", None): {
+        BLUE_LIGHT: AddonOffer(label="BLC", price=Decimal("1500"), capability=BLUE_LIGHT),
     },
 }
 
@@ -363,6 +293,11 @@ def addon_completion(company_name: Optional[str], availability_route: str,
                       category: Optional[str] = None,
                       design_variant: Optional[str] = None,
                       market_scope: Optional[str] = None,
+                      *, model_name: Optional[str] = None,
+                      coating_name: Optional[str] = None,
+                      treatment_band: Optional[str] = None,
+                      design_type: Optional[str] = None,
+                      design_tier: Optional[str] = None,
                       ) -> Optional[AddonCompletion]:
     """If a PROVEN add-on combination can supply EVERY capability in
     `missing` for this company+route(+color_variant/index scope where the
@@ -375,6 +310,13 @@ def addon_completion(company_name: Optional[str], availability_route: str,
     never the reverse, so a colour-restricted add-on is never accidentally
     reached by an unrelated row."""
     if not missing or not company_name:
+        return None
+    from app.addon_scope_evidence import proves_addon_scope
+    if not proves_addon_scope(
+            company_name, model_name=model_name, category=category, index_value=index_value,
+            design_type=design_type, design_variant=design_variant, design_tier=design_tier,
+            treatment_band=treatment_band, color_variant=color_variant,
+            coating_name=coating_name, market_scope=market_scope):
         return None
     scope_keys = [color_variant, None] if color_variant is not None else [None]
     for scope_key in scope_keys:

@@ -744,7 +744,11 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
                         company_name, "rx", missing,
                         color_variant=v.color_variant, index_value=v.index_value,
                         category=getattr(m.category, "value", m.category),
-                        design_variant=v.design_variant, market_scope=row.market_scope)
+                        design_variant=v.design_variant, market_scope=row.market_scope,
+                        model_name=m.name, coating_name=row.coating.name if row.coating else None,
+                        treatment_band=v.treatment_band,
+                        design_type=getattr(v.design_type, "value", v.design_type),
+                        design_tier=v.design_tier)
                     if offer is not None:
                         eligible_rx.append(row)
                         completion = offer

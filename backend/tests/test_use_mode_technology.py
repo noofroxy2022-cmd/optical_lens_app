@@ -130,13 +130,13 @@ def _stock_product(db, company_name, model_name, category, sph_min, sph_max, cyl
 
 def _rx_product(db, company_name, model_name, category, sph_min, sph_max, cyl_min=-10.0, cyl_max=0.0,
                  coating_code=None, treatment_band=None, color_variant=None, price=1000, company=None,
-                 index_value=1.50):
+                 index_value=1.50, market_scope=None):
     co = company or _mk_company(db, company_name)
     cat = _mk_catalog(db, co)
     m = _mk_model(db, co, model_name, category)
     v = _mk_variant(db, m, index_value=index_value, treatment_band=treatment_band, color_variant=color_variant)
     coating = _mk_coating(db, coating_code) if coating_code else None
-    vp = _mk_pricing(db, v, cat, availability=models.PricingAvailability.RX, price=price, coating=coating)
+    vp = _mk_pricing(db, v, cat, availability=models.PricingAvailability.RX, price=price, coating=coating, market_scope=market_scope)
     _mk_range(db, m, v, vp, sph_min=sph_min, sph_max=sph_max, cyl_min=cyl_min, cyl_max=cyl_max)
     return co, m, v, vp
 
@@ -403,19 +403,13 @@ def test_targeted_technology_intent_strict_and_with_other_filters(db):
 
 
 # ============================================================ TYPE B: ADD-ON
-# Proven, price-cited, scope-cited add-on: Maxxee "Blue HMC+" (+1300 EGP),
-# printed identically on every RX page (maxxee_addons_evidence.py) - the only
-# add-on that survived the Technology Fulfillment Completeness audit's
-# applicability check. Every other candidate (PIXEL Blue Cut, PLATINUM Mira
-# Blue, BBGR Neva blue) stays unregistered (ambiguous/unproven), so these
-# tests also double as regression coverage that NO other company/route ever
-# receives an invented add-on completion.
+# Add-on fixtures use exact catalog identities; surcharge units stay unresolved.
 
 def test_addon_blue_completes_rx_row_with_pending_unit(db):
     """B. A Maxxee RX row with a plain (non-blue) coating must be completed by
     the Blue HMC+ add-on: amount is known, but its unit requires confirmation."""
-    co, m, v, vp = _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
-                                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
+    co, m, v, vp = _rx_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450, market_scope="Out Of Egypt")
     presc = _tech_presc(db)
     resp = _search(db, presc, technology_intent="blue_light")
     assert resp.exact_total == 1
@@ -467,8 +461,8 @@ def test_pixel_astro_plain_coating_not_blue_light_but_addon_completes_it(db):
     (pixel_phase4_test.pdf p.6 describes it as anti-reflective/hydrophobic
     only), but the SAME row IS completed via the proven "Blue Cut Coating"
     RX add-on (p.16) - Type A fails, Type B succeeds."""
-    _, _, v, vp = _rx_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
-                sph_min=-3.0, sph_max=0.0, coating_code="Astro", price=5000)
+    _, _, v, vp = _rx_product(db, "Pixel", "Pixel", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-3.0, sph_max=0.0, coating_code="Astro", color_variant="Clear", price=5000)
     v.design_variant, vp.market_scope = "Free Form", "Out Of Egypt"
     db.commit()
     presc = _tech_presc(db)
@@ -514,9 +508,8 @@ def test_hoya_sensity2_proves_photo_gray_and_photo_brown(db):
 def test_hoya_sensity_original_does_not_prove_blue_light(db):
     """Sensity is a COLOUR/photochromic line, never blue-light protection by
     itself - a Sensity Original row without a blue-light coating must not
-    satisfy blue_light, and (per the catalog's own index restriction) the
-    BLC add-on must not apply to "Sensity Original" at all (it is scoped to
-    "Sensity 2" only)."""
+    satisfy blue_light. Its prerequisite Sensity 2 upgrade is not safely
+    composable, so BLC completion must fail closed."""
     _rx_product(db, "HOYA", "Nulux", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Super Hi Vision",
                 color_variant="Sensity Original", price=15550)
@@ -527,11 +520,11 @@ def test_hoya_sensity_original_does_not_prove_blue_light(db):
 
 def test_hoya_blc_addon_proven_index_specific(db):
     """HOYA's BLC add-on (+1500) completes blue_light for a Sensity 2 row at
-    a proven index (1.6), but must be REJECTED at an unproven index (1.53) -
-    the catalog explicitly lists only 1.5/1.6/1.67."""
+    a proven identity (1.6), but rejects an unrelated model/index identity.
+    This is not a manufacturer-wide exclusion of index 1.53."""
     _rx_product(db, "HOYA", "Nulux iDENTITY", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Long Life UV Control",
-                color_variant="Sensity 2", price=22900, index_value=1.6)
+                color_variant="Sensity 2", price=22900, index_value=1.6, market_scope="Out Of Egypt")
     _rx_product(db, "HOYA", "Amplitude PNX", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Hi Vision Aqua",
                 color_variant="Sensity 2", price=17250, index_value=1.53)
@@ -551,7 +544,7 @@ def test_hoya_sensity2_blue_photo_gray_via_base_plus_blc(db):
     base+add-on combination recovery."""
     _rx_product(db, "HOYA", "Nulux iDENTITY", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Long Life UV Control",
-                color_variant="Sensity 2", price=22900, index_value=1.6)
+                color_variant="Sensity 2", price=22900, index_value=1.6, market_scope="Out Of Egypt")
     presc = _tech_presc(db)
     resp = _search(db, presc, technology_intent="blue_photo_gray")
     assert resp.exact_total == 1
@@ -616,8 +609,8 @@ def test_addon_cannot_complete_photo_intent(db):
     """No photochromic add-on exists in current catalog evidence for any
     manufacturer - a Maxxee RX row with a plain coating must never be offered
     for photo_gray/photo_brown via an invented add-on."""
-    _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
-                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
+    _rx_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450, market_scope="Out Of Egypt")
     for intent in ("photo_gray", "photo_brown", "blue_photo_gray", "blue_photo_brown"):
         resp = _search(db, _tech_presc(db), technology_intent=intent)
         assert resp.exact_total == 0, intent
@@ -626,8 +619,8 @@ def test_addon_cannot_complete_photo_intent(db):
 def test_addon_incomplete_combo_rejected(db):
     """I. blue_photo_gray must NEVER be satisfied by Blue-via-addon alone -
     the combo also requires photochromic Gray, which no add-on can supply."""
-    _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
-                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
+    _rx_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450, market_scope="Out Of Egypt")
     resp = _search(db, _tech_presc(db), technology_intent="blue_photo_gray")
     assert resp.exact_total == 0
 
@@ -647,8 +640,8 @@ def test_addon_included_beats_addon_when_base_already_qualifies(db):
 def test_addon_availability_semantics_route_is_rx(db):
     """L/9. A Type-B result's own group/availability must be RX, never
     presented under Stock Egypt/OOE/unknown-market."""
-    _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
-                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
+    _rx_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450, market_scope="Out Of Egypt")
     resp = _search(db, _tech_presc(db), technology_intent="blue_light")
     rx_group = next(g for g in resp.groups if g.key == "rx")
     assert rx_group.count == 1
@@ -661,8 +654,8 @@ def test_addon_stock_powerrange_and_category_still_enforced(db):
     """M/N/O. Type-B fulfillment never bypasses Stock PowerRange, RX limits,
     or category boundaries - an out-of-range prescription and a wrong
     category must both still be correctly excluded."""
-    _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
-                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
+    _rx_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450, market_scope="Out Of Egypt")
     # out-of-range prescription for this RX row's (unbounded-by-range... but
     # RX rows with a PowerRange DO still enforce it) sph window
     out_of_range = _mk_presc(db, -20.0, -20.0, od_cyl=0.0, os_cyl=0.0)
