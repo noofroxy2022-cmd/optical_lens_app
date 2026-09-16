@@ -151,6 +151,18 @@ const USE_MODE_OPTIONS = [
   { value: 'bifocal', label: 'Bifocal' },
   { value: 'progressive', label: 'Progressive' },
 ];
+const CUSTOMER_NEED_OPTIONS = [
+  { value: 'none', label: 'بدون احتياج إضافي' },
+  { value: 'screens_blue_light', label: 'الشاشات / ترشيح الضوء الأزرق' },
+  { value: 'photochromic_gray', label: 'فوتوكروميك رمادي' },
+  { value: 'photochromic_brown', label: 'فوتوكروميك بني' },
+  { value: 'driving', label: 'القيادة' },
+  { value: 'sun', label: 'الشمس' },
+  { value: 'thinner_lens', label: 'عدسة رقيقة حسب الكتالوج' },
+  { value: 'high_impact_resistance', label: 'مقاومة الصدمات حسب الكتالوج' },
+  { value: 'best_optical_clarity', label: 'أفضل نقاء بصري — الدليل غير كافٍ', disabled: true },
+];
+
 const TECHNOLOGY_OPTIONS = [
   { value: 'none', label: 'عادي' },
   { value: 'blue_light', label: 'حماية من الضوء الأزرق' },
@@ -178,6 +190,10 @@ const isActionableBestMatch = (best) => (
   && !!best.pair_fulfillment
   && ACTIONABLE_PAIR_STATUSES.includes(best.pair_fulfillment.status)
   && best.pair_fulfillment.price_pair != null
+  && Number(best.pair_fulfillment.price_pair) > 0
+  && best.pair_fulfillment.provenance === 'single_route'
+  && !best.pair_fulfillment.needs_review
+  && !best.pair_fulfillment.price_confirmation_note
 );
 
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
@@ -237,7 +253,8 @@ const Prescriptions = () => {
   // are independent of `mode` (automatic vs targeted) below - the employee
   // still enters the doctor's prescription only once and never computes a
   // Reading power or a manufacturer's own technology naming by hand.
-  const [usageMode, setUsageMode] = useState(null);
+  const [usageMode, setUsageMode] = useState('distance');
+  const [customerNeed, setCustomerNeed] = useState('none');
   const [technologyIntent, setTechnologyIntent] = useState('none');
   const [mode, setMode] = useState('automatic');
   const [companies, setCompanies] = useState([]);
@@ -323,7 +340,8 @@ const Prescriptions = () => {
     setSearchFor(record);
     setSearchData(null);
     setMode('automatic');
-    setUsageMode(null);
+    setUsageMode('distance');
+    setCustomerNeed('none');
     setTechnologyIntent('none');
     setFilters({});
     setFacets(EMPTY_FACETS);
@@ -333,7 +351,7 @@ const Prescriptions = () => {
     // technologyIntent state left over from a previous prescription's session
     // (same lesson as the P1 Collapse fix: this Modal instance persists across
     // openSearch calls, so a closure-read of current state here could be stale).
-    runSearch(record, 'automatic', {}, null, 'none');
+    runSearch(record, 'automatic', {}, 'distance', 'none', 'none');
     refreshFacetOptions({});
   };
 
@@ -452,14 +470,14 @@ const Prescriptions = () => {
     return out;
   };
 
-  const runSearch = async (record, useMode, rawFilters, usageModeOverride, technologyIntentOverride) => {
+  const runSearch = async (record, useMode, rawFilters, usageModeOverride, technologyIntentOverride, needOverride) => {
     const m = useMode ?? mode;
     const um = usageModeOverride !== undefined ? usageModeOverride : usageMode;
     const ti = technologyIntentOverride !== undefined ? technologyIntentOverride : technologyIntent;
     setSearching(true);
     setSearchData(null);
     try {
-      const payload = { mode: m };
+      const payload = { mode: m, customer_need: needOverride !== undefined ? needOverride : customerNeed };
       if (m === 'targeted') payload.filters = rawFilters ?? buildFilterPayload();
       if (um) payload.use_mode = um;
       if (ti && ti !== 'none') payload.technology_intent = ti;
@@ -517,6 +535,9 @@ const Prescriptions = () => {
 
   const renderResultCard = (r) => (
     <>
+      {r.seller_recommendation_reason && (
+        <Alert type="info" message={r.seller_recommendation_reason} style={{ marginBottom: 10 }} />
+      )}
       <Descriptions size="small" column={3} bordered style={{ marginBottom: 10 }}>
         <Descriptions.Item label="الشركة">{r.company_name || '—'}</Descriptions.Item>
         <Descriptions.Item label="الموديل">{r.model_name}</Descriptions.Item>
@@ -636,24 +657,36 @@ const Prescriptions = () => {
           <Radio.Group
             optionType="button"
             value={usageMode}
-            onChange={(e) => setUsageMode(e.target.value)}
+            disabled={searching}
+            onChange={(e) => { setUsageMode(e.target.value); setSearchData(null); }}
             options={USE_MODE_OPTIONS}
           />
         </div>
 
         <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>احتياج العميل</div>
+          <Select aria-label="احتياج العميل" style={{ width: '100%', maxWidth: 450 }}
+            value={customerNeed} options={CUSTOMER_NEED_OPTIONS} disabled={searching}
+            onChange={(value) => { setCustomerNeed(value); setSearchData(null); }} />
+          <div style={{ color: '#666', marginTop: 6 }}>نوصي فقط بما يثبته الكتالوج. عند غياب دليل كافٍ لا نعرض اختياراً تخمينياً.</div>
+        </div>
+
+        <Collapse ghost style={{ marginBottom: 12 }}>
+          <Panel header="خيارات متقدمة: تقنية إضافية" key="technology">
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>التكنولوجيا المطلوبة</div>
           <Radio.Group
             optionType="button"
             value={technologyIntent}
-            onChange={(e) => setTechnologyIntent(e.target.value)}
+            disabled={searching}
+            onChange={(e) => { setTechnologyIntent(e.target.value); setSearchData(null); }}
             options={TECHNOLOGY_OPTIONS}
           />
-        </div>
+          </Panel>
+        </Collapse>
 
         <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} style={{ marginBottom: 12 }}>
           <Radio value="automatic">بحث تلقائي</Radio>
-          <Radio value="targeted">بحث بمواصفات محددة</Radio>
+          <Radio value="targeted">مرشحات متقدمة</Radio>
         </Radio.Group>
 
         {mode === 'targeted' && (
@@ -775,12 +808,12 @@ const Prescriptions = () => {
               </div>
             ) : null}
             <Descriptions size="small" column={5} bordered style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="خيارات الزوج">{sd.exact_total}</Descriptions.Item>
-              <Descriptions.Item label="زوج STOCK مصر">{sd.stock_egypt_count}</Descriptions.Item>
-              <Descriptions.Item label="زوج STOCK خارج مصر">{sd.stock_out_of_egypt_count}</Descriptions.Item>
-              <Descriptions.Item label="زوج STOCK — سوق غير محدد">{sd.stock_market_unknown_count}</Descriptions.Item>
-              <Descriptions.Item label="زوج RX">{sd.rx_count}</Descriptions.Item>
-              <Descriptions.Item label="مقسّم / غير متوفر">{sd.split_count}</Descriptions.Item>
+              <Descriptions.Item label="خيارات الزوج"><span style={{ whiteSpace: 'nowrap' }}>{sd.exact_total}</span></Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK مصر"><span style={{ whiteSpace: 'nowrap' }}>{sd.stock_egypt_count}</span></Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK خارج مصر"><span style={{ whiteSpace: 'nowrap' }}>{sd.stock_out_of_egypt_count}</span></Descriptions.Item>
+              <Descriptions.Item label="زوج STOCK — سوق غير محدد"><span style={{ whiteSpace: 'nowrap' }}>{sd.stock_market_unknown_count}</span></Descriptions.Item>
+              <Descriptions.Item label="زوج RX"><span style={{ whiteSpace: 'nowrap' }}>{sd.rx_count}</span></Descriptions.Item>
+              <Descriptions.Item label="مقسّم / غير متوفر"><span style={{ whiteSpace: 'nowrap' }}>{sd.split_count}</span></Descriptions.Item>
               <Descriptions.Item label="توصية Index" span={3}>{sd.index_recommendation}</Descriptions.Item>
               <Descriptions.Item label="توصية Aspherical" span={2}>{sd.aspherical_recommendation}</Descriptions.Item>
             </Descriptions>
@@ -791,6 +824,19 @@ const Prescriptions = () => {
               </Card>
             )}
 
+            {!bestIsActionable && sd.exact_total > 0 && (
+              <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                message="لا توجد توصية تستوفي التوفر المثبت والسعر النهائي؛ راجع التفاصيل أدناه." />
+            )}
+            {(sd.seller_alternatives || []).filter(isActionableBestMatch).map((r, i) => (
+              <Card key={`seller-${rowKey(r)}`} size="small" title={`بديل ${i + 1} — يحقق نفس الاحتياج`}
+                style={{ marginBottom: 12, borderColor: '#1677ff' }}>
+                {renderResultCard(r)}
+              </Card>
+            ))}
+            {bestIsActionable && (sd.seller_alternatives || []).length < 2 && (
+              <div style={{ color: '#666', marginBottom: 12 }}>لا يوجد بديلان إضافيان يستوفيان جميع الشروط في الكتالوج الحالي.</div>
+            )}
             {sd.exact_total === 0 && <Empty description="لا توجد نتيجة مطابقة تماماً" />}
 
             <Collapse activeKey={activePanelKeys} onChange={setActivePanelKeys}>

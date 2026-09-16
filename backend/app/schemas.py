@@ -572,6 +572,7 @@ class MatchResponse(BaseModel):
 
 # ===== V1.0.1 product search (availability-first, targeted filters, alternatives) =====
 class ProductSearchRequest(BaseModel):
+    customer_need: Optional[str] = None
     """Two modes:
       - "automatic"  -> every lens optically valid for the prescription
       - "targeted"   -> automatic result, then `filters` applied as strict AND;
@@ -719,6 +720,7 @@ class PerEyeProductResult(BaseModel):
     currency: str = "EGP"
     match_score: float = Field(..., ge=0, le=100)
     reason: str
+    seller_recommendation_reason: Optional[str] = None
     od: EyeAvailability
     os: EyeAvailability
     pair_fulfillment: PairFulfillment
@@ -762,6 +764,8 @@ class DerivedSearchRx(BaseModel):
 
 
 class ProductSearchResponse(BaseModel):
+    customer_need: Optional[str] = None
+    seller_alternatives: List[PerEyeProductResult] = []
     prescription: PrescriptionResponse
     mode: str
     # V1.2 core-workflow: echoes the request's use_mode/technology_intent so

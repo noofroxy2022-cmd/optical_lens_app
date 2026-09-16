@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app import schemas, models
 from app import technology_evidence
+from app import customer_needs
 from app.lens_matcher import lens_matcher
 
 _RX = models.PricingAvailability.RX
@@ -692,6 +693,8 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
         v = sample.variant
         m = v.lens_model
         company_name = m.company.name if m.company else None
+        if not customer_needs.proves(req.customer_need, company_name, v.treatment_band):
+            continue
 
         routes = {
             "stock_egypt": [p for p in opt_rows if _row_route(p) == "stock_egypt"],
@@ -970,7 +973,33 @@ def search(db: Session, prescription: models.Prescription,
     targeted = (req.mode or "automatic").strip().lower() == "targeted"
     filters = req.filters if targeted else None
 
+    # Request-local copies: never rewrite the caller's advanced filters.
+    filters = filters.model_copy(deep=True) if filters is not None else None
+    if not customer_needs.valid_rx(prescription):
+        return _validation_response(prescription, req, req.use_mode,
+            "الوصفة غير صالحة", "راجع قيم SPH / CYL / AXIS / ADD لكل عين.")
+    need = req.customer_need
+    tech = req.technology_intent or "none"
+    if need not in (None, *customer_needs.LABELS) or tech not in technology_evidence.INTENTS:
+        return _validation_response(prescription, req, req.use_mode,
+            "احتياج أو تقنية غير معروف", "اختر احتياجاً وتقنية من الخيارات المعتمدة.")
+    if need == "best_optical_clarity":
+        return _validation_response(prescription, req, req.use_mode,
+            "الدليل الكتالوجي غير كافٍ", "لا يوجد دليل مقارنة مثبت يسمح بتوصية أفضل نقاء بصري.")
+    required_tech = customer_needs.TECHNOLOGY.get(need)
+    if required_tech:
+        if tech == "none":
+            tech = required_tech
+        elif not technology_evidence.satisfies(required_tech,
+                technology_evidence.missing_capabilities(tech, set())):
+            return _validation_response(prescription, req, req.use_mode,
+                "تعارض الاحتياج والتقنية", "التقنية المختارة لا تحقق احتياج العميل؛ راجع الاختيار.")
+    req = req.model_copy(update={"technology_intent": tech})
+
     use_mode = (req.use_mode or "").strip().lower() or None
+    if need is not None and use_mode is None:
+        return _validation_response(prescription, req, use_mode,
+            "حدد نوع الاستخدام", "اختر الأبعد أو القراءة أو ثنائي البؤرة أو المتدرج قبل التوصية.")
     derived_category: Optional[str] = None
     derived_rx: Optional[schemas.DerivedSearchRx] = None
     search_prescription: models.Prescription = prescription
@@ -1015,6 +1044,9 @@ def search(db: Session, prescription: models.Prescription,
         # + compute_alternatives) enforces it with no new code path; use_mode
         # is authoritative over any independently-chosen "الفئة" value.
         if filters is not None:
+            if filters.category is not None and getattr(filters.category, "value", filters.category) != derived_category:
+                return _validation_response(prescription, req, use_mode,
+                    "تعارض الفئة ونوع الاستخدام", "اختر فئة متوافقة مع نوع الاستخدام؛ لا يتم تجاوز المرشحات.")
             filters.category = derived_category
 
     max_sph = max(abs(search_prescription.od_sph), abs(search_prescription.os_sph))
@@ -1072,7 +1104,7 @@ def search(db: Session, prescription: models.Prescription,
                               "المطلوب بحالة أخرى (خارج المطلوب، أو توافقه مع الوصفة غير مؤكد "
                               "بسبب نطاق القوة) — ليس نتيجة مطابقة.")
 
-        if not exact and not intel and req.include_alternatives:
+        if not exact and not intel and req.include_alternatives and need is None and tech == "none" and use_mode is None:
             all_results, *_ = lens_matcher.match_lenses(
                 db, search_prescription, None, req.prefer_stock, req.prefer_aspherical)
             # Phase 3C: an alternative must be prescription-safe too - a
@@ -1087,6 +1119,11 @@ def search(db: Session, prescription: models.Prescription,
                             "وهي ليست مطابقات تامة.")
 
     ordered = sorted(exact, key=_order_key)
+    # Informational groups retain their existing availability/price semantics.
+    # Only proven, fully priced pairs enter the seller recommendation ranking.
+    recommended = sorted((r for r in exact if customer_needs.actionable(r)), key=_order_key)
+    for r in recommended:
+        r.seller_recommendation_reason = customer_needs.seller_reason(r, need, tech)
     groups = _build_groups(ordered)
     answer = _answer(ordered)
 
@@ -1131,7 +1168,11 @@ def search(db: Session, prescription: models.Prescription,
         transposition_applied=prescription.transposition_applied,
         index_recommendation=index_desc, aspherical_recommendation=aspherical_desc,
         availability_answer=answer, exact_total=len(ordered),
-        best_match=ordered[0] if ordered else None, groups=groups,
+        # Legacy clients omit customer_need and retain the informational best
+        # result contract. The seller UI always sends it, including "none".
+        best_match=((recommended[0] if recommended else None) if need is not None
+                    else (ordered[0] if ordered else None)), groups=groups,
+        customer_need=need, seller_alternatives=recommended[1:3],
         stock_egypt_count=counts["stock_egypt"],
         stock_out_of_egypt_count=counts["stock_out_of_egypt"],
         stock_market_unknown_count=counts["stock_market_unknown"],
