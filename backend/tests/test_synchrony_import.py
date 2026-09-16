@@ -171,8 +171,10 @@ def test_C_1_56_AS_stepped_bands(db, synchrony_setup):
 def test_D_1_67_AS_stepped_tail_exact(db, synchrony_setup):
     sv = synchrony_setup["sv"]
     for sph, cyl, expect in [
-        (-8.30, -1.75, True),    # inside the -8.25 row's own cyl width
-        (-8.30, -2.50, False),   # clearly past that row's cyl width (beyond the 0.25D tolerance too)
+        (-8.25, -1.75, True),    # exact printed SPH step, within its CYL width
+        (-8.30, -1.75, False),   # even 0.05D past that step must not pass
+        (-8.50, -1.75, False),   # 0.25D past the printed SPH step
+        (-8.30, -2.50, False),   # outside both the SPH step and CYL width
         (-11.0, 0.0, True),      # inside the flat cyl=0-only tail
         (-11.0, -0.75, False),   # clearly past the tail's cyl=0-only width
     ]:

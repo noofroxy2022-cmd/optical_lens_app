@@ -72,7 +72,7 @@ const PairMatrix = ({ od, os }) => (
 );
 
 // "أفضل حل موحد للزوج" + a pair price only when provenance is proven (§4/§8/§2).
-const PairAnswer = ({ pf }) => {
+export const PairAnswer = ({ pf }) => {
   const priced = pf.price_pair != null;
   const unproven = pf.provenance === 'unproven_mixed';
   const unknownEligibility = pf.status === 'eligibility_unknown';
@@ -90,25 +90,26 @@ const PairAnswer = ({ pf }) => {
             always null here (backend never exposes a catalog price as an
             actionable pair price while power eligibility is unresolved), so
             this deliberately reads as a compatibility question, not a price. */}
-        <b>{unknownEligibility ? 'توافق الوصفة: ' : 'السعر: '}</b>
+        <b>{unknownEligibility ? 'توافق الوصفة: ' : pf.price_confirmation_note ? 'السعر بانتظار التأكيد: ' : 'السعر: '}</b>
         {priced
           ? <span>{`${pf.price_pair} ${pf.currency || ''} / Pair`}</span>
-          : unknownEligibility
+          : pf.price_confirmation_note
+            ? <span style={{ color: '#ad6800' }}>بانتظار تأكيد المعمل — لا يوجد سعر نهائي مؤكد</span>
+            : unknownEligibility
             ? <span style={{ color: '#cf1322' }}>غير مؤكد بسبب نطاق القوة — يحتاج مراجعة قبل اعتماد الطلب</span>
             : unproven
               ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
               : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
       </div>
-      {/* V1.2 technology-fulfillment completeness: the displayed price above
-          is ALWAYS the final sellable total already - this box only explains
-          the base+add-on breakdown behind it when the requested technology
-          was fulfilled via a catalog-proven add-on rather than being already
-          included in the base row (Type B, see technology_evidence.py). */}
+      {/* An unresolved surcharge unit must never display a computed total. */}
       {pf.technology_addon && (
         <div style={{ marginTop: 4, color: '#0958d9', fontSize: 12, background: '#e6f4ff',
                      border: '1px solid #91caff', borderRadius: 4, padding: '4px 8px' }}>
-          ℹ️ يشمل السعر إضافة مثبتة من الكتالوج لتوفير التكنولوجيا المطلوبة —
-          الأساس {pf.technology_addon.base_price} + {pf.technology_addon.label} {pf.technology_addon.addon_price} = {pf.price_pair} {pf.currency}
+          ℹ️ إضافة لتوفير التكنولوجيا المطلوبة —
+          الأساس {pf.technology_addon.base_price} {pf.currency}؛ {pf.technology_addon.label} {pf.technology_addon.addon_price} {pf.currency}
+          {pf.technology_addon.unit_status === 'UNIT_UNRESOLVED'
+            ? ' — وحدة الإضافة بانتظار التأكيد؛ السعر النهائي غير مؤكد'
+            : ` — الإجمالي ${pf.price_pair} ${pf.currency}`}
         </div>
       )}
       {/* Generic, catalog-driven caveat: base price/eligibility above are

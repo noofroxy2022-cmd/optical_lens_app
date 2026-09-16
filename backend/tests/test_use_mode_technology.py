@@ -411,9 +411,9 @@ def test_targeted_technology_intent_strict_and_with_other_filters(db):
 # tests also double as regression coverage that NO other company/route ever
 # receives an invented add-on completion.
 
-def test_addon_blue_completes_rx_row_with_correct_final_price(db):
+def test_addon_blue_completes_rx_row_with_pending_unit(db):
     """B. A Maxxee RX row with a plain (non-blue) coating must be completed by
-    the proven Blue HMC+ add-on: final price = base + 1300, clearly labelled."""
+    the Blue HMC+ add-on: amount is known, but its unit requires confirmation."""
     co, m, v, vp = _rx_product(db, "Maxxee", "Basic", schemas.LensCategory.SINGLE_VISION,
                                 sph_min=-3.0, sph_max=0.0, coating_code="H.M.C", price=9450)
     presc = _tech_presc(db)
@@ -426,7 +426,9 @@ def test_addon_blue_completes_rx_row_with_correct_final_price(db):
     assert pf.technology_addon.label == "Blue HMC+"
     assert pf.technology_addon.base_price == Decimal("9450")
     assert pf.technology_addon.addon_price == Decimal("1300")
-    assert pf.price_pair == Decimal("10750")  # J. final pair price arithmetic
+    assert pf.price_pair is None  # printed amount does not prove the unit
+    assert pf.price_confirmation_note
+    assert pf.technology_addon.unit_status == "UNIT_UNRESOLVED"
 
 
 def test_addon_blue_never_applied_to_stock_route(db):
@@ -465,15 +467,18 @@ def test_pixel_astro_plain_coating_not_blue_light_but_addon_completes_it(db):
     (pixel_phase4_test.pdf p.6 describes it as anti-reflective/hydrophobic
     only), but the SAME row IS completed via the proven "Blue Cut Coating"
     RX add-on (p.16) - Type A fails, Type B succeeds."""
-    _rx_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
+    _, _, v, vp = _rx_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Astro", price=5000)
+    v.design_variant, vp.market_scope = "Free Form", "Out Of Egypt"
+    db.commit()
     presc = _tech_presc(db)
     resp = _search(db, presc, technology_intent="blue_light")
     assert resp.exact_total == 1
     pf = resp.best_match.pair_fulfillment
     assert pf.technology_addon is not None
     assert pf.technology_addon.label == "Blue Cut Coating"
-    assert pf.price_pair == Decimal("6000")  # 5000 base + 1000 addon
+    assert pf.price_pair is None  # unit and Hi Power both need confirmation
+    assert pf.price_confirmation_note
 
 
 def test_pixel_astro_plus_coating_is_included_blue_light(db):
@@ -536,7 +541,8 @@ def test_hoya_blc_addon_proven_index_specific(db):
     r = resp.best_match
     assert r.model_name == "Nulux iDENTITY"
     assert r.pair_fulfillment.technology_addon.addon_price == Decimal("1500")
-    assert r.pair_fulfillment.price_pair == Decimal("24400")  # 22900 + 1500
+    assert r.pair_fulfillment.price_pair is None  # BLC unit is unresolved
+    assert r.pair_fulfillment.price_confirmation_note
 
 
 def test_hoya_sensity2_blue_photo_gray_via_base_plus_blc(db):
@@ -549,7 +555,8 @@ def test_hoya_sensity2_blue_photo_gray_via_base_plus_blc(db):
     presc = _tech_presc(db)
     resp = _search(db, presc, technology_intent="blue_photo_gray")
     assert resp.exact_total == 1
-    assert resp.best_match.pair_fulfillment.price_pair == Decimal("24400")
+    assert resp.best_match.pair_fulfillment.price_pair is None
+    assert resp.best_match.pair_fulfillment.price_confirmation_note
 
 
 def test_seiko_sensity2_proves_photo_gray_and_photo_brown_not_blueblock(db):

@@ -2,7 +2,7 @@
 مخططات Pydantic النهائية
 """
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -643,7 +643,8 @@ class TechnologyAddonInfo(BaseModel):
     technology fulfillment. See PairFulfillment.technology_addon below."""
     label: str              # catalog-printed add-on name(s), e.g. "Blue HMC+"
     base_price: Decimal     # the base row's own proven pair price
-    addon_price: Decimal    # the proven add-on surcharge (pair-level, added once)
+    addon_price: Decimal    # printed amount if unresolved; pair surcharge if proven
+    unit_status: Literal["UNIT_PAIR_PROVEN", "UNIT_PER_LENS_PROVEN", "UNIT_UNRESOLVED"] = "UNIT_UNRESOLVED"
 
 
 class PairFulfillment(BaseModel):
@@ -694,8 +695,9 @@ class PairFulfillment(BaseModel):
     # see app.technology_evidence.addon_completion). None means either no
     # technology_intent was requested, or the base row already included the
     # requested technology on its own (Type A - the ordinary, unmodified
-    # case). `price_pair` above is ALWAYS the final sellable total either way
-    # (base + addon when this is set) - never the base-only price.
+    # case). With unresolved add-on units, price_pair is None and the base
+    # price remains in technology_addon. A confirmation note always prevents
+    # an unconditional final quotation, even if a numeric total is available.
     technology_addon: Optional[TechnologyAddonInfo] = None
 
 

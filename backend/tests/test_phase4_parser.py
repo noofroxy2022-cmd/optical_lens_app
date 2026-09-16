@@ -2599,9 +2599,8 @@ def test_g3_Y_boundaries_inclusive_and_cap_unchanged():
 #  PHASE 4G - G3 zero-tolerance hard boundaries (permanent)
 #  total_power_min/total_power_max/max_cyl_abs are manufacturer HARD
 #  limits: the boundary itself is inclusive, but nothing beyond it by
-#  even 0.25D passes any more. This is deliberately narrower than the
-#  legacy coarse sph/cyl/add box, which keeps its +-0.25 tolerance
-#  unchanged (see test_g3_ZA_coarse_tolerance_still_applies below).
+#  even 0.25D passes. V1.3.2 applies the same strict rule to explicit
+#  SPH/CYL/ADD limits (see test_g3_ZD_explicit_box_is_strict below).
 # ============================================================
 
 # -- ZA. hypothetical range -20.00..+14.00, max_cyl_abs 10.00 --------
@@ -2743,17 +2742,16 @@ def test_g3_ZC_real_hoya_row_cyl_quarter_past_cap_ineligible():
     assert issues and any("magnitude" in i for i in issues)
 
 
-# -- ZD. coarse sph/cyl/add tolerance is UNCHANGED by the G3 fix --------
-def test_g3_ZD_coarse_tolerance_still_applies_untouched():
+# -- ZD. explicit catalog limits are strict even without a G3 clause ----
+def test_g3_ZD_explicit_box_is_strict():
     from app.lens_matcher import LensMatcherFinal
     m = LensMatcherFinal()
     pr = _g3_pr(total_power_min=None, total_power_max=None, max_cyl_abs=None,
                 sph_min=-10.0, sph_max=10.0, cyl_min=-4.0, cyl_max=0.0)
-    # 0.25D past the coarse SPH box still passes - that tolerance is untouched
-    assert m._check_form_against_range(pr, (10.25, 0.0, 0, 0.0)) == []
-    # 0.26D past it still fails, exactly as before
-    issues = m._check_form_against_range(pr, (10.26, 0.0, 0, 0.0))
-    assert issues and any(i.startswith("SPH ") for i in issues)
+    assert m._check_form_against_range(pr, (10.0, 0.0, 0, 0.0)) == []
+    for sph in (10.25, 10.26):
+        issues = m._check_form_against_range(pr, (sph, 0.0, 0, 0.0))
+        assert issues and any(i.startswith("SPH ") for i in issues)
 
 
 # ============================================================

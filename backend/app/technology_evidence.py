@@ -94,8 +94,6 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # different manufacturer, e.g. PLATINUM's plano Sun-Gray stock).
     ("VISALL", "treatment_band", "Photochromic"): frozenset(),
     ("VISALL", "treatment_band", "Photochromic + BlueCut"): frozenset({BLUE_LIGHT}),
-    ("VISALL", "color_variant", "Gray"): frozenset({PHOTO_GRAY}),
-    ("VISALL", "color_variant", "Gray / Brown"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
 
     # ---- BBGR ---------------------------------------------------------------
     ("BBGR", "treatment_band", "Blu stop"): frozenset({BLUE_LIGHT}),
@@ -106,10 +104,6 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # ---- Maxxee ---------------------------------------------------------
     ("Maxxee", "coating", "Blue U.V"): frozenset({BLUE_LIGHT}),
     ("Maxxee", "treatment_band", "Photo"): frozenset(),  # colour from color_variant
-    ("Maxxee", "color_variant", "Gray"): frozenset({PHOTO_GRAY}),
-    ("Maxxee", "color_variant", "Brown"): frozenset({PHOTO_BROWN}),
-    ("Maxxee", "color_variant", "Gray/Brown"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
-    ("Maxxee", "color_variant", "Gray/Brown/Green"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
     # Maxxee never combines "Blue U.V" coating with "Photo" treatment_band on
     # the same row (verified) - no blue_photo_* combo exists for Maxxee.
 
@@ -252,22 +246,16 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
 #            (3-8)" of the Maxxee catalog - a uniform, catalog-wide RX menu,
 #            not tied to one product/index -> PROVEN_CATEGORY_SPECIFIC
 #            (Maxxee, availability=RX, any category/index).
-#   PIXEL    RECONCILED (pixel_phase4_test.pdf, p.16): "Blue Cut Coating"
-#            +1000 EGP is printed in a "Treatments" footer directly attached
-#            to the "Rx, Single Vision, Out Of Egypt, Free Form High
-#            Definition" price table - the same "footer menu on an RX price
-#            table" pattern already proven for Maxxee -> PROVEN_CATEGORY_
-#            SPECIFIC (Pixel, availability=RX). (No equivalent footer was
-#            found on the supplied Progressive-RX page, so this is registered
-#            company/route-wide per the one page it IS proven on, exactly
-#            like Maxxee's evidence; not extended beyond what the page shows.)
-#   HOYA     RECONCILED (Hoya_Price_List_2025.pdf, pp.10/12 "Available
-#            Additions"): "BLC" (Blue Light Control) +1500 EGP, explicitly
-#            scoped "On Sensity 2 Indexes ( 1.5 & 1.6 & 1.67 )" -
-#            PROVEN_INDEX_SPECIFIC, restricted to HOYA RX rows whose
-#            color_variant is "Sensity 2" at index 1.5/1.6/1.67 exactly as
-#            printed (1.53/1.74 Sensity 2 rows are NOT covered - the catalog
-#            never lists them for BLC, so they are correctly NOT completed).
+#   PIXEL    pixel_phase4_test.pdf p.16 and the committed page-16/17
+#            reconciliation tests prove RX Single Vision, Out Of Egypt,
+#            with separate Free Form / High Definition designs. The footer
+#            does NOT prove Progressive, Bifocal or other designs/markets.
+#   HOYA     "Available Additions" on the Nulux iDENTITY RX page proves
+#            BLC +1500 EGP. Keep the existing conservative Sensity 2,
+#            index 1.5/1.6/1.67 restriction; do not broaden it in this fix.
+#            Visual review of the uploaded HOYA catalog shows the adjacent
+#            index caption belongs to a Sensity upgrade, not a BLC unit
+#            statement. It must never be used as proof of surcharge units.
 #   PLATINUM "Mira Blue" is named ONLY in test_platinum_import.py (a negative
 #            test proving it was never imported as a fake base product) - NO
 #            price for it exists anywhere in this project or workspace (no
@@ -298,15 +286,35 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
 # exists anywhere in the current project evidence for ANY manufacturer -
 # every photo_gray/photo_brown/combo result is either Type A directly, or
 # Type A (photochromic colour) + a proven Type B blue-light add-on.
+UNIT_PAIR_PROVEN = "UNIT_PAIR_PROVEN"
+UNIT_PER_LENS_PROVEN = "UNIT_PER_LENS_PROVEN"
+UNIT_UNRESOLVED = "UNIT_UNRESOLVED"
+UNIT_CONFIRMATION_NOTE = (
+    "وحدة رسوم الإضافة غير مثبتة (للزوج أم للعدسة) — السعر النهائي يحتاج تأكيد المعمل."
+)
+
+
+class AddonCompletion(NamedTuple):
+    price: Decimal
+    label: str
+    capabilities: FrozenSet[str]
+    unit_status: str
+
+
 class AddonOffer(NamedTuple):
     label: str                                   # catalog-printed add-on name, shown verbatim to the seller
-    price: Decimal                                # printed surcharge, pair-level (see note below)
+    price: Decimal                                # printed amount; unit requires independent evidence
     capability: str                               # canonical capability this add-on proves
-    applicable_indexes: Optional[FrozenSet[float]] = None  # None = no index restriction proven/needed
+    applicable_indexes: Optional[FrozenSet[float]] = None
+    unit_status: str = UNIT_UNRESOLVED
+    categories: Optional[FrozenSet[str]] = None
+    designs: Optional[FrozenSet[str]] = None
+    markets: Optional[FrozenSet[str]] = None
 
 # (company_name, availability_route, color_variant_scope) -> {capability: AddonOffer}
 # color_variant_scope is None for an add-on proven company/route-wide
-# (Maxxee, PIXEL); a specific string (e.g. "Sensity 2") restricts the add-on
+# (Maxxee); PIXEL also requires the offer's category/design/market. A
+# specific string (e.g. "Sensity 2") restricts the add-on
 # to rows whose OWN color_variant matches exactly, per the catalog's own
 # stated scope (HOYA's BLC). availability_route is the row's OWN proven
 # route ("rx" is the only scope any add-on is proven for today - never
@@ -314,20 +322,22 @@ class AddonOffer(NamedTuple):
 # can never silently reclassify a Stock row's availability; see
 # product_search.py's use of this registry).
 #
-# Unit-basis note: every *_addons_evidence.py docstring AND both newly
-# supplied catalogs (Hoya_Price_List_2025.pdf p.10/12, pixel_phase4_test.pdf
-# p.16) describe these amounts as flat surcharges layered onto an
-# already-priced base commercial identity for ONE RX order - the SAME unit
-# (per pair, matching this project's existing pair-price convention, never
-# per-lens) as the base VariantPricing.price_pair they attach to. This is the
-# existing project convention already relied on everywhere else (pair price
-# only, never /2, never per-lens) - no new unit assumption is introduced here.
+# Unit audit (V1.3.2): the committed Maxxee/PIXEL evidence and HOYA
+# reconciliation notes prove the printed amounts, but never explicitly prove
+# per-pair vs per-lens units. Maxxee/PIXEL primary PDFs are absent from this
+# repository. HOYA uploads/catalogs/company_1_20260909_045148.pdf, PDF pages
+# 10/12 (printed 9/11), show BLC 700/1500 but no per-pair/per-lens statement.
+# Prior arithmetic and the base price_pair convention are NOT unit evidence.
 _ADDON_EVIDENCE: Dict[Tuple[str, str, Optional[str]], Dict[str, AddonOffer]] = {
     ("Maxxee", "rx", None): {
         BLUE_LIGHT: AddonOffer(label="Blue HMC+", price=Decimal("1300"), capability=BLUE_LIGHT),
     },
     ("Pixel", "rx", None): {
-        BLUE_LIGHT: AddonOffer(label="Blue Cut Coating", price=Decimal("1000"), capability=BLUE_LIGHT),
+        BLUE_LIGHT: AddonOffer(label="Blue Cut Coating", price=Decimal("1000"), capability=BLUE_LIGHT,
+                              applicable_indexes=frozenset({1.5, 1.53, 1.56, 1.61, 1.67, 1.74}),
+                              categories=frozenset({"single_vision"}),
+                              designs=frozenset({"Free Form", "High Definition"}),
+                              markets=frozenset({"Out Of Egypt"})),
     },
     ("HOYA", "rx", "Sensity 2"): {
         BLUE_LIGHT: AddonOffer(label="BLC", price=Decimal("1500"), capability=BLUE_LIGHT,
@@ -350,11 +360,15 @@ def missing_capabilities(intent: Optional[str], capabilities: Set[str]) -> Froze
 def addon_completion(company_name: Optional[str], availability_route: str,
                       missing: FrozenSet[str], color_variant: Optional[str] = None,
                       index_value: Optional[float] = None,
-                      ) -> Optional[Tuple[Decimal, str, FrozenSet[str]]]:
+                      category: Optional[str] = None,
+                      design_variant: Optional[str] = None,
+                      market_scope: Optional[str] = None,
+                      ) -> Optional[AddonCompletion]:
     """If a PROVEN add-on combination can supply EVERY capability in
     `missing` for this company+route(+color_variant/index scope where the
-    evidence requires it), return (total_addon_price, combined_label,
-    supplied_capabilities). Otherwise None - fails closed, never partially
+    evidence requires it), return amount, label, capabilities and unit status.
+    An unresolved unit is informational only, never a final pair surcharge.
+    Otherwise None - fails closed, never partially
     completes a combination (e.g. blue proven via add-on but photo_gray still
     missing must return None, not a half-satisfied result). Tries the row's
     own color_variant scope first, then the company/route-wide (None) scope -
@@ -368,6 +382,7 @@ def addon_completion(company_name: Optional[str], availability_route: str,
         if not scope:
             continue
         total = Decimal("0")
+        units = set()
         labels = []
         supplied: Set[str] = set()
         ok = True
@@ -376,15 +391,25 @@ def addon_completion(company_name: Optional[str], availability_route: str,
             if offer is None:
                 ok = False
                 break
-            if (offer.applicable_indexes is not None and index_value is not None
-                    and round(float(index_value), 2) not in offer.applicable_indexes):
+            if (offer.applicable_indexes is not None
+                    and (index_value is None or index_value not in offer.applicable_indexes)):
                 ok = False
                 break
-            total += offer.price
+            if any(allowed is not None and value not in allowed for allowed, value in (
+                    (offer.categories, category), (offer.designs, design_variant),
+                    (offer.markets, market_scope))):
+                ok = False
+                break
+            units.add(offer.unit_status)
+            # PER_LENS means the cited charge applies to each of the two lenses.
+            total += offer.price * (2 if offer.unit_status == UNIT_PER_LENS_PROVEN else 1)
             labels.append(offer.label)
             supplied.add(cap)
         if ok:
-            return total, " + ".join(sorted(labels)), frozenset(supplied)
+            unit = (next(iter(units)) if len(units) == 1 else UNIT_UNRESOLVED)
+            if unit not in (UNIT_PAIR_PROVEN, UNIT_PER_LENS_PROVEN):
+                unit = UNIT_UNRESOLVED
+            return AddonCompletion(total, " + ".join(sorted(labels)), frozenset(supplied), unit)
     return None
 
 
@@ -402,6 +427,18 @@ def proven_capabilities(company_name: Optional[str], coating_name: Optional[str]
         hit = _EVIDENCE.get((company_name, field, value.strip()))
         if hit:
             caps |= hit
+    # Bare colours are never evidence of a photochromic treatment.
+    photo_treatments = {"VISALL": {"Photochromic", "Photochromic + BlueCut"},
+                        "Maxxee": {"Photo"}}
+    photo_colours = {
+        "VISALL": {"Gray": {PHOTO_GRAY}, "Brown": {PHOTO_BROWN},
+                   "Gray / Brown": {PHOTO_GRAY, PHOTO_BROWN}},
+        "Maxxee": {"Gray": {PHOTO_GRAY}, "Brown": {PHOTO_BROWN},
+                   "Gray/Brown": {PHOTO_GRAY, PHOTO_BROWN},
+                   "Gray/Brown/Green": {PHOTO_GRAY, PHOTO_BROWN}},
+    }
+    if (treatment_band or "").strip() in photo_treatments.get(company_name, set()):
+        caps |= photo_colours[company_name].get((color_variant or "").strip(), set())
     return caps
 
 

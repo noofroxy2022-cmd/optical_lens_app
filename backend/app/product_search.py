@@ -465,6 +465,21 @@ def _same_pricing_offer(a: models.VariantPricing, b: models.VariantPricing) -> b
             and a.currency == b.currency)
 
 
+def _price_confirmation_note(pricing):
+    """Enforce the existing PIXEL RX policy even when persisted notes are missing.
+
+    The catalog has no numeric Hi Power trigger and the schema has no lab
+    approval state. A missing/blank note can never mean the lab confirmed it.
+    """
+    from app.pixel_addons_evidence import HI_POWER_CONFIRMATION_NOTE
+    note = pricing.price_confirmation_note
+    company = pricing.variant.lens_model.company
+    if _row_route(pricing) == "rx" and company and company.name == "Pixel":
+        if not note or not note.strip():
+            return HI_POWER_CONFIRMATION_NOTE
+    return note
+
+
 def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                       od: schemas.EyeAvailability, os_: schemas.EyeAvailability,
                       prescription: models.Prescription,
@@ -524,7 +539,7 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
             # on a real commercial dimension (diameter) this matcher cannot
             # evaluate. Never silently hidden behind the cheaper price.
             diameter_note = _diameter_confirmation_note(candidates, prescription, applicability_key)
-            combined_note = both.price_confirmation_note
+            combined_note = _price_confirmation_note(both)
             if diameter_note:
                 combined_note = f"{combined_note} | {diameter_note}" if combined_note else diameter_note
             return schemas.PairFulfillment(
@@ -561,7 +576,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                 reason=(f"عرض تسعير واحد بعدة مدى قوة (OR) يغطي العينين ({tier_label[tier]})"
                         f"{subtype_note} — سعر الزوج من الكتالوج."),
                 applicability_key=proving_key,
-                price_confirmation_note=a.price_confirmation_note)
+                price_confirmation_note=" | ".join(dict.fromkeys(
+                    note for note in (_price_confirmation_note(a), _price_confirmation_note(b)) if note)) or None)
 
         # (b) both eyes at this tier, but via SEPARATE VariantPricing rows whose
         #     belonging to one catalog offer cannot be proven -> NO pair price.
@@ -705,6 +721,7 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
 
         addon_price: Optional[Decimal] = None
         addon_label: Optional[str] = None
+        addon_unit = technology_evidence.UNIT_UNRESOLVED
         if want_tech:
             caps = technology_evidence.proven_capabilities(
                 company_name=company_name, coating_name=(sample.coating.name if sample.coating else None),
@@ -720,15 +737,22 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
                 # `opt_rows` itself) reuses the exact same _eye_availability/
                 # _pair_fulfillment logic unmodified for every other caller.
                 missing = technology_evidence.missing_capabilities(technology_intent, caps)
-                completion = (technology_evidence.addon_completion(
-                                  company_name, "rx", missing,
-                                  color_variant=v.color_variant, index_value=v.index_value)
-                              if routes["rx"] else None)
+                eligible_rx = []
+                completion = None
+                for row in routes["rx"]:
+                    offer = technology_evidence.addon_completion(
+                        company_name, "rx", missing,
+                        color_variant=v.color_variant, index_value=v.index_value,
+                        category=getattr(m.category, "value", m.category),
+                        design_variant=v.design_variant, market_scope=row.market_scope)
+                    if offer is not None:
+                        eligible_rx.append(row)
+                        completion = offer
                 if completion is None:
-                    continue  # neither the base row nor any proven add-on satisfies it
-                addon_price, addon_label, _ = completion
+                    continue  # no row in the proven scope can complete the intent
+                addon_price, addon_label, _, addon_unit = completion
                 routes = {"stock_egypt": [], "stock_outside": [], "stock_market_unknown": [],
-                          "rx": routes["rx"]}
+                          "rx": eligible_rx}
 
         applicability_key = filters.applicability_key if filters else None
         od = _eye_availability(routes, prescription, "od", applicability_key)
@@ -741,10 +765,17 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
             # since there is then no single proven base price to add to.
             if pf.status != "rx" or pf.price_pair is None:
                 continue
+            unit_proven = addon_unit in (technology_evidence.UNIT_PAIR_PROVEN,
+                                         technology_evidence.UNIT_PER_LENS_PROVEN)
+            note = pf.price_confirmation_note
+            if not unit_proven:
+                note = " | ".join(x for x in (note, technology_evidence.UNIT_CONFIRMATION_NOTE) if x)
             pf = pf.model_copy(update={
-                "price_pair": pf.price_pair + addon_price,
+                "price_pair": pf.price_pair + addon_price if unit_proven else None,
+                "price_confirmation_note": note,
                 "technology_addon": schemas.TechnologyAddonInfo(
-                    label=addon_label, base_price=pf.price_pair, addon_price=addon_price),
+                    label=addon_label, base_price=pf.price_pair, addon_price=addon_price,
+                    unit_status=addon_unit),
                 "reason": pf.reason + f" + إضافة مثبتة من الكتالوج: {addon_label} (+{addon_price} EGP) لتحقيق التكنولوجيا المطلوبة.",
             })
 

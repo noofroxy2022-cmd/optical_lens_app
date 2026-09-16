@@ -139,9 +139,6 @@ class LensMatcherFinal:
     """محرك المطابقة النهائي"""
 
     def __init__(self):
-        self.tolerance_sph = 0.25
-        self.tolerance_cyl = 0.25
-        self.tolerance_add = 0.25
         self.transposition = TranspositionEngine()
         self.recommender = OpticsRecommender()
 
@@ -215,17 +212,14 @@ class LensMatcherFinal:
         sph, cyl, axis, add = form
         cyl_needed = cyl or 0.0
         issues = []
-        if not (power_range.sph_min - self.tolerance_sph <= sph
-                <= power_range.sph_max + self.tolerance_sph):
+        if not (power_range.sph_min <= sph <= power_range.sph_max):
             issues.append(f"SPH {sph} خارج [{power_range.sph_min}, {power_range.sph_max}]")
-        if not (power_range.cyl_min - self.tolerance_cyl <= cyl_needed
-                <= power_range.cyl_max + self.tolerance_cyl):
+        if not (power_range.cyl_min <= cyl_needed <= power_range.cyl_max):
             issues.append(f"CYL {cyl_needed} خارج [{power_range.cyl_min}, {power_range.cyl_max}]")
         if add and add > 0:
             if power_range.add_min is None or power_range.add_max is None:
                 issues.append("لا يدعم ADD")
-            elif not (power_range.add_min - self.tolerance_add <= add
-                      <= power_range.add_max + self.tolerance_add):
+            elif not (power_range.add_min <= add <= power_range.add_max):
                 issues.append(f"ADD {add} خارج [{power_range.add_min}, {power_range.add_max}]")
         # high-SPH cylinder cap - evaluated with THIS form's sph/cyl together
         if (power_range.max_cyl_for_high_sph is not None
@@ -243,7 +237,7 @@ class LensMatcherFinal:
         # total_power_min bounds the LOW meridian; total_power_max bounds the
         # HIGH meridian. The sph/cyl box checks above are only a coarse prefilter
         # for G3 rows. This is a manufacturer HARD limit, not a fuzzy-matching
-        # box - unlike the coarse checks above, it is evaluated with NO
+        # box - like the explicit checks above, it is evaluated with NO
         # tolerance: the boundary itself is inclusive, but nothing beyond it
         # passes, by even 0.01D.
         tp_min = getattr(power_range, "total_power_min", None)
