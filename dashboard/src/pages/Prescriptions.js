@@ -257,7 +257,7 @@ export const sellerSections = (data) => {
     }
     return section;
   }).filter((section) => section.results.length || (multi ? section.key === 'rx'
-    : ['stock_egypt', 'stock_out_of_egypt', 'rx'].includes(section.key)));
+    : ['stock_egypt', 'stock_out_of_egypt'].includes(section.key)));
 };
 
 const Prescriptions = () => {
@@ -349,8 +349,8 @@ const Prescriptions = () => {
         customer_phone: values.customer_phone || null,
         pd: values.pd ?? null,
         notes: values.notes || null,
-        od: { sph: values.od_sph, cyl: values.od_cyl ?? 0, axis: values.od_axis ?? null, add: values.od_add ?? 0 },
-        os: { sph: values.os_sph, cyl: values.os_cyl ?? 0, axis: values.os_axis ?? null, add: values.os_add ?? 0 },
+        od: { sph: values.od_sph, cyl: values.od_cyl ?? 0, axis: values.od_axis ?? null, add: values.od_add ?? null },
+        os: { sph: values.os_sph, cyl: values.os_cyl ?? 0, axis: values.os_axis ?? null, add: values.os_add ?? null },
       };
       const res = editing ? await prescriptionAPI.update(editing.id, payload) : await prescriptionAPI.create(payload);
       message.success(editing ? 'تم حفظ الوصفة الأصلية — اضغط بحث لتحديث النتائج' : 'تم إنشاء الوصفة');
@@ -664,8 +664,8 @@ const Prescriptions = () => {
             <Descriptions.Item label="OS CYL">{selected.os_cyl}</Descriptions.Item>
             <Descriptions.Item label="OD Axis">{selected.od_axis}°</Descriptions.Item>
             <Descriptions.Item label="OS Axis">{selected.os_axis}°</Descriptions.Item>
-            <Descriptions.Item label="OD ADD">{selected.od_add}</Descriptions.Item>
-            <Descriptions.Item label="OS ADD">{selected.os_add}</Descriptions.Item>
+            <Descriptions.Item label="OD ADD">{selected.od_add ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="OS ADD">{selected.os_add ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="PD">{selected.pd || '—'}</Descriptions.Item>
             <Descriptions.Item label="تحويل السالب↔الموجب">{selected.transposition_applied ? 'نعم' : 'لا'}</Descriptions.Item>
           </Descriptions>
@@ -722,7 +722,7 @@ const Prescriptions = () => {
         width={1180}
       >
         {searchFor && <Card size="small" title="الوصفة الأصلية — قبل تحويل القراءة" style={{ marginBottom: 12 }}>
-          {['od', 'os'].map((eye) => <div key={eye}>{eye.toUpperCase()}: SPH {searchFor[`${eye}_sph_original`]} / CYL {searchFor[`${eye}_cyl_original`]} × {searchFor[`${eye}_axis_original`]} — ADD {searchFor[`${eye}_add`] || 0}</div>)}
+          {['od', 'os'].map((eye) => <div key={eye}>{eye.toUpperCase()}: SPH {searchFor[`${eye}_sph_original`]} / CYL {searchFor[`${eye}_cyl_original`]} × {searchFor[`${eye}_axis_original`]} — ADD {searchFor[`${eye}_add`] ?? '—'}</div>)}
           <Button onClick={() => openEdit(searchFor)}>تعديل الوصفة الأصلية</Button>
         </Card>}
         <div style={{ marginBottom: 12 }}>

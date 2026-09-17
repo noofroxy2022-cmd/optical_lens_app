@@ -235,3 +235,15 @@ test('primary tables replace recommendation cards and paginate without hiding ma
   expect(section.querySelector('thead').textContent).not.toContain('الدرجة');
   expect(document.querySelectorAll('.ant-table-expanded-row')).toHaveLength(0);
 });
+
+
+test.each([null, 0, 2])('ADD preserves blank versus explicit numeric value: %s', async (add) => {
+  prescriptionAPI.getAll.mockResolvedValue({ data: [{ ...record, od_add: add, os_add: add }] });
+  prescriptionAPI.update.mockResolvedValue({ data: { ...record, od_add: add, os_add: add } });
+  await mountSearch();
+  expect(text()).toContain(`ADD ${add ?? '—'}`);
+  await click('تعديل الوصفة الأصلية');
+  await click('حفظ التعديل');
+  expect(prescriptionAPI.update.mock.calls[0][1].od.add).toBe(add);
+  expect(prescriptionAPI.update.mock.calls[0][1].os.add).toBe(add);
+});

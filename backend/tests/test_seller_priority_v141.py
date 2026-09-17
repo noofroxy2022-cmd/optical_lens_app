@@ -49,8 +49,8 @@ def test_availability_precedes_price_pending_and_unknown_never_recommended(db):
     _rx_product(db, 'Other', 'RX', 'single_vision', -6, 6, price=100)
     db.commit()
     result = search(db, [])
-    assert [r.model_name for r in cards(result)] == ['Egypt', 'Outside', 'RX']
-    assert result.exact_total == 5
+    assert [r.model_name for r in cards(result)] == ['Egypt', 'Outside']
+    assert result.exact_total == 4
     assert any(g.key == 'stock_market_unknown' and g.count == 1 for g in result.groups)
 
 

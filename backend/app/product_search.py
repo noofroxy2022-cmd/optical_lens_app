@@ -433,14 +433,24 @@ def _diameter_confirmation_note(candidates: List[Tuple[models.VariantPricing, Op
         return None
     if len({c[0].price_pair for c in candidates}) < 2:
         return None
-    diameters = set()
+    # Resolve overlapping cylinder bands independently at each proven diameter.
+    # Different band prices alone do not prove diameter-dependent pricing.
+    prices_by_diameter = {}
     for p, _ in candidates:
+        eye_diameters = []
         for eye in ("od", "os"):
-            for pr in _row_matching_ranges(p, prescription, eye, applicability_key):
-                d = _extract_diameter_mm(pr.notes)
-                if d is not None:
-                    diameters.add(d)
+            eye_diameters.append({d for pr in _row_matching_ranges(
+                p, prescription, eye, applicability_key)
+                if (d := _extract_diameter_mm(pr.notes)) is not None})
+        for d in eye_diameters[0] | eye_diameters[1]:
+            prices_by_diameter.setdefault(d, [])
+        for d in eye_diameters[0] & eye_diameters[1]:
+            prices_by_diameter[d].append(p.price_pair)
+    diameters = set(prices_by_diameter)
     if len(diameters) < 2:
+        return None
+    if all(prices_by_diameter.values()) and len({
+            min(prices) for prices in prices_by_diameter.values()}) == 1:
         return None
     dia_list = "/".join(str(d) for d in sorted(diameters))
     return (f"السعر يعتمد على قطر العدسة المطلوب ({dia_list} مم)، "
@@ -1159,6 +1169,12 @@ def search(db: Session, prescription: models.Prescription,
             if alternatives:
                 alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "
                             "وهي ليست مطابقات تامة.")
+
+    # SV manufacturing is fallback only, after every exact-request gate.
+    if use_mode in ("distance", "reading") and any(
+            r.pair_fulfillment.status in ("stock_egypt", "stock_outside")
+            and customer_needs.actionable(r) for r in exact):
+        exact = [r for r in exact if r.pair_fulfillment.status != "rx"]
 
     # Location is catalog/business identity, including pending matching offers;
     # it does not grant actionability or a confirmed price.

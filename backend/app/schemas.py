@@ -401,7 +401,7 @@ class EyePrescription(BaseModel):
     sph: float = Field(..., ge=-30.0, le=30.0)
     cyl: Optional[float] = Field(0.0, ge=-10.0, le=10.0)
     axis: Optional[int] = Field(None, ge=0, le=180)
-    add: Optional[float] = Field(0.0, ge=0.0, le=5.0)
+    add: Optional[float] = Field(None, ge=0.0, le=5.0)
 
     @model_validator(mode="after")
     def require_explicit_axis(self):
@@ -410,7 +410,6 @@ class EyePrescription(BaseModel):
         # Missing axis is harmless only for zero cylinder. Explicit 0/180
         # remain valid under the existing transposition convention.
         self.cyl = self.cyl or 0.0
-        self.add = self.add or 0.0
         if self.axis is None:
             self.axis = 0
         return self

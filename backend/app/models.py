@@ -623,7 +623,7 @@ class Prescription(Base):
     od_sph_original = Column(Float, nullable=False)
     od_cyl_original = Column(Float, nullable=True, default=0.0)
     od_axis_original = Column(Integer, nullable=True, default=0)
-    od_add = Column(Float, nullable=True, default=0.0)
+    od_add = Column(Float, nullable=True)
 
     # العين اليمنى - بعد Transposition
     od_sph = Column(Float, nullable=False)
@@ -634,7 +634,7 @@ class Prescription(Base):
     os_sph_original = Column(Float, nullable=False)
     os_cyl_original = Column(Float, nullable=True, default=0.0)
     os_axis_original = Column(Integer, nullable=True, default=0)
-    os_add = Column(Float, nullable=True, default=0.0)
+    os_add = Column(Float, nullable=True)
 
     # العين اليسرى - بعد Transposition
     os_sph = Column(Float, nullable=False)

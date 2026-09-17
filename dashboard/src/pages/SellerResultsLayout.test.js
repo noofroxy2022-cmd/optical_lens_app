@@ -57,3 +57,11 @@ test('coverage counts all pages and labels pending DIVEL without implying final 
   expect(el.textContent).toContain('DIVEL 1 — يحتاج تأكيد');
   act(() => root.unmount());
 });
+
+
+test('suppressed empty RX has no primary section', () => {
+  const sections = sellerSections({ use_mode: 'distance', groups: [
+    group('stock_egypt', [row(1, 1.5, 700)]), group('rx', []),
+    group('stock_market_unknown', [row(2, 1.5, 800)])] });
+  expect(sections.map((s) => s.key)).toEqual(['stock_egypt', 'stock_out_of_egypt', 'stock_market_unknown']);
+});
