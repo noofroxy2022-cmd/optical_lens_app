@@ -25,6 +25,25 @@ from typing import Dict, FrozenSet, NamedTuple, Optional, Set, Tuple
 BLUE_LIGHT = "blue_light"
 PHOTO_GRAY = "photo_gray"
 PHOTO_BROWN = "photo_brown"
+IMPACT_RESISTANT = "impact_resistant"
+
+# Hoya_Smart_Guide.pdf PDF p.8: PNX 1.53, "مقاومة كسر عالية جداً".
+# Exact PNX model identities: Hoya_Price_List_2025_Updated.pdf pp.4,6,7,9,
+# 12,14-16,19-24,26. Neither an arbitrary 1.53 nor a name containing PNX is proof.
+_HOYA_PNX_MODELS = frozenset({
+    "Hilux PNX", "Nulux PNX", "Sync III PNX", "Amplitude Plus PNX",
+    "Daynamic PNX", "Balansis PNX", "iD LifeStyle PNX", "iD MyStyle PNX",
+    "iD MySelf PNX", "WorkSmart PNX", "iD WorkStyle PNX",
+})
+# SCOPE.pdf PDF p.10 (SV), repeated ROW26 identities in pp.3-7,9,11-12:
+# HiFlex / HiFlex Relax and PhotoGray versions explicitly say "مقاوم للكسر".
+_SCOPE_IMPACT_TERMS = frozenset({
+    "HiFlex Impact-Resistant", "HiFlex Relax Impact-Resistant Blue Light",
+    "HiFlex PhotoGray Impact-Resistant",
+    "HiFlex PhotoGray Relax Impact-Resistant Blue Light",
+})
+# A generic Trivex/polycarbonate enum or 1.53/1.59 is deliberately insufficient.
+# PLATINUM.pdf p.2 prints only 1.59: do not broaden it into impact proof.
 
 # Canonical customer-facing intents (Phase 3). "none" always passes.
 INTENTS = (
@@ -161,6 +180,8 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     ("SCOPE", "treatment_band", "Relax Blue Light"): frozenset({BLUE_LIGHT}),
     ("SCOPE", "treatment_band", "Relax Blue Light (Semi-Compressed)"): frozenset({BLUE_LIGHT}),
     ("SCOPE", "treatment_band", "Relax HeatGuard Blue Light (Semi-Compressed)"): frozenset({BLUE_LIGHT}),
+    # SCOPE.pdf p.10 R13: HiFlex Relax explicitly says protection from blue light.
+    ("SCOPE", "treatment_band", "HiFlex Relax Impact-Resistant Blue Light"): frozenset({BLUE_LIGHT}),
     ("SCOPE", "treatment_band", "HiFlex PhotoGray Impact-Resistant"): frozenset({PHOTO_GRAY}),
     ("SCOPE", "treatment_band", "PhotoGray Multi-color (7 shades)"): frozenset({PHOTO_GRAY}),
     ("SCOPE", "treatment_band", "Photo Glass (PhotoGray-Brown Extra Corning French)"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
@@ -356,12 +377,18 @@ def addon_completion(company_name: Optional[str], availability_route: str,
 
 
 def proven_capabilities(company_name: Optional[str], coating_name: Optional[str],
-                         treatment_band: Optional[str], color_variant: Optional[str]) -> Set[str]:
+                         treatment_band: Optional[str], color_variant: Optional[str], *,
+                         model_name: Optional[str] = None, index_value: Optional[float] = None,
+                         material: Optional[str] = None) -> Set[str]:
     """Union of every EXACT-match evidence rule this row satisfies. Never a
     substring/fuzzy match - only values registered verbatim in _EVIDENCE."""
     if not company_name:
         return set()
     caps: Set[str] = set()
+    if ((company_name == "HOYA" and model_name in _HOYA_PNX_MODELS and index_value == 1.53)
+            or (company_name == "SCOPE" and treatment_band in _SCOPE_IMPACT_TERMS
+                and index_value == 1.56)):
+        caps.add(IMPACT_RESISTANT)
     for field, value in (("coating", coating_name), ("treatment_band", treatment_band),
                           ("color_variant", color_variant)):
         if not value:

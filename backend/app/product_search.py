@@ -703,7 +703,9 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
 
     out: List[schemas.PerEyeProductResult] = []
     want_specific_product = bool(filters and filters.lens_model_id is not None)
-    want_tech = bool(technology_intent and technology_intent != "none")
+    required_caps = (technology_evidence.missing_capabilities(technology_intent, set())
+                     | set(req.customer_needs or []))
+    want_tech = bool(required_caps)
     for _key, opt_rows in groups.items():
         sample = opt_rows[0]
         v = sample.variant
@@ -725,8 +727,10 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
         if want_tech:
             caps = technology_evidence.proven_capabilities(
                 company_name=company_name, coating_name=(sample.coating.name if sample.coating else None),
-                treatment_band=v.treatment_band, color_variant=v.color_variant)
-            if technology_evidence.satisfies(technology_intent, caps):
+                treatment_band=v.treatment_band, color_variant=v.color_variant,
+                model_name=m.name, index_value=v.index_value,
+                material=getattr(v.material, "value", v.material))
+            if required_caps.issubset(caps):
                 pass  # Type A - base row already proves it; no price change
             else:
                 # Type B: a proven add-on can ONLY ever complete the "rx"
@@ -736,7 +740,7 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
                 # Restricting `routes` to rx-only here (rather than filtering
                 # `opt_rows` itself) reuses the exact same _eye_availability/
                 # _pair_fulfillment logic unmodified for every other caller.
-                missing = technology_evidence.missing_capabilities(technology_intent, caps)
+                missing = required_caps - caps
                 eligible_rx = []
                 completion = None
                 for row in routes["rx"]:
@@ -995,7 +999,7 @@ def _validation_response(prescription: models.Prescription, req: schemas.Product
     return schemas.ProductSearchResponse(
         prescription=schemas.PrescriptionResponse.model_validate(prescription),
         mode="targeted" if (req.mode or "automatic").strip().lower() == "targeted" else "automatic",
-        use_mode=use_mode, technology_intent=req.technology_intent,
+        use_mode=use_mode, technology_intent=req.technology_intent, customer_needs=req.customer_needs,
         transposition_applied=prescription.transposition_applied,
         index_recommendation="", aspherical_recommendation="",
         availability_answer=schemas.AvailabilityAnswer(code="validation_error", title=title, detail=detail),
@@ -1014,6 +1018,9 @@ def search(db: Session, prescription: models.Prescription,
         return _validation_response(prescription, req, req.use_mode,
             "الوصفة غير صالحة", "راجع قيم SPH / CYL / AXIS / ADD لكل عين.")
     need = req.customer_need
+    if req.customer_needs is not None and need is None:
+        need = "none"
+        req = req.model_copy(update={"customer_need": need})
     tech = req.technology_intent or "none"
     if need not in (None, *customer_needs.LABELS) or tech not in technology_evidence.INTENTS:
         return _validation_response(prescription, req, req.use_mode,
@@ -1153,10 +1160,16 @@ def search(db: Session, prescription: models.Prescription,
                 alt_note = ("لا يوجد مطابق تام للمواصفات المطلوبة؛ هذه أقرب البدائل تجارياً "
                             "وهي ليست مطابقات تامة.")
 
+    # Location is catalog/business identity, including pending matching offers;
+    # it does not grant actionability or a confirmed price.
+    for r in exact:
+        if customer_needs.local_manufacturing(r):
+            r.manufacturing_location = "egypt"
     ordered = sorted(exact, key=_order_key)
     # Informational groups retain their existing availability/price semantics.
     # Only proven, fully priced pairs enter the seller recommendation ranking.
-    recommended = sorted((r for r in exact if customer_needs.actionable(r)), key=_order_key)
+    recommended = sorted((r for r in exact if customer_needs.actionable(r)),
+                         key=_order_key if targeted else customer_needs.seller_order)
     for r in recommended:
         r.seller_recommendation_reason = customer_needs.seller_reason(r, need, tech)
     groups = _build_groups(ordered)
@@ -1200,6 +1213,7 @@ def search(db: Session, prescription: models.Prescription,
         prescription=schemas.PrescriptionResponse.model_validate(prescription),
         mode="targeted" if targeted else "automatic",
         use_mode=use_mode, technology_intent=req.technology_intent, derived_search_rx=derived_rx,
+        customer_needs=req.customer_needs,
         transposition_applied=prescription.transposition_applied,
         index_recommendation=index_desc, aspherical_recommendation=aspherical_desc,
         availability_answer=answer, exact_total=len(ordered),

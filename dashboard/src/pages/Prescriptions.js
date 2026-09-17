@@ -88,17 +88,33 @@ export const PairPrice = ({ pf }) => {
   </div> : <div><b>سعر الزوج النهائي: </b>{pf.price_pair} {pf.currency} / Pair</div>;
 };
 
-export const sellerNeedPayload = (need) => ({
-  customer_need: ['blue_photo_gray', 'blue_photo_brown'].includes(need) ? 'none' : need,
-  technology_intent: ({ screens_blue_light: 'blue_light', photochromic_gray: 'photo_gray',
-    photochromic_brown: 'photo_brown', blue_photo_gray: 'blue_photo_gray', blue_photo_brown: 'blue_photo_brown' })[need] || 'none',
-});
+export const sellerNeedPayload = (needs) => ({ customer_needs: needs });
+
+export const ManufacturerCoverage = ({ groups = [] }) => {
+  const coverage = new Map();
+  groups.forEach((group) => group.results.forEach((result) => {
+    const name = result.company_name;
+    const entry = coverage.get(name) || { count: 0, actionable: 0 };
+    entry.count += 1;
+    if (isActionableBestMatch(result)) entry.actionable += 1;
+    coverage.set(name, entry);
+  }));
+  if (!coverage.size) return null;
+  return <div style={{ marginBottom: 12 }} aria-label="نتائج مطابقة أخرى">
+    <b>نتائج مطابقة أخرى</b>
+    <div style={{ marginTop: 6 }}>{Array.from(coverage, ([name, entry]) => (
+      <Tag key={name} color={entry.actionable ? 'blue' : 'orange'}>
+        {name} {entry.count}{!entry.actionable ? ' — يحتاج تأكيد' : ''}
+      </Tag>
+    ))}</div>
+  </div>;
+};
 
 export const sellerHeadline = (data) => {
   if (isActionableBestMatch(data.best_match)) {
     const status = data.best_match.pair_fulfillment.status;
     return { code: status === 'stock_outside' ? 'stock_out_of_egypt' : status === 'rx' ? 'rx_only' : status,
-      title: `الخيار الموصى به: ${PAIR_STATUS_AR[status]}`, detail: 'سعر الزوج النهائي مؤكد؛ التوفر حسب الكتالوج.' };
+      title: `الخيار الموصى به: ${data.best_match.manufacturing_location === 'egypt' && status === 'rx' ? 'تصنيع داخل مصر' : PAIR_STATUS_AR[status]}`, detail: 'سعر الزوج النهائي مؤكد؛ التوفر حسب الكتالوج.' };
   }
   if (data.exact_total > 0 || data.availability_intelligence?.length) {
     return { code: 'pending', title: 'يوجد خيار يحتاج تأكيد — لا توجد توصية جاهزة بسعر نهائي',
@@ -108,12 +124,12 @@ export const sellerHeadline = (data) => {
 };
 
 // "أفضل حل موحد للزوج" + a pair price only when provenance is proven (§4/§8/§2).
-export const PairAnswer = ({ pf }) => {
+export const PairAnswer = ({ pf, manufacturingLocation }) => {
   return (
     <div>
       <div>
         <b>أفضل حل موحد للزوج: </b>
-        <Tag color={PAIR_STATUS_COLOR[pf.status]}>{PAIR_STATUS_AR[pf.status] || pf.status}</Tag>
+        <Tag color={PAIR_STATUS_COLOR[pf.status]}>{manufacturingLocation === 'egypt' && pf.status === 'rx' ? 'تصنيع داخل مصر' : PAIR_STATUS_AR[pf.status] || pf.status}</Tag>
         {(pf.status === 'stock_egypt' || pf.status === 'stock_outside' || pf.status === 'stock_market_unknown') &&
           <span style={{ color: '#888', fontSize: 12 }}>— حسب الكتالوج</span>}
         {pf.needs_review && <Tag color="volcano" style={{ marginRight: 6 }}>بحاجة لمراجعة</Tag>}
@@ -172,17 +188,10 @@ const USE_MODE_OPTIONS = [
   { value: 'progressive', label: 'Progressive' },
 ];
 const CUSTOMER_NEED_OPTIONS = [
-  { value: 'none', label: 'بدون احتياج إضافي — بدون شرط تكنولوجي' },
-  { value: 'screens_blue_light', label: 'حماية من الضوء الأزرق' },
-  { value: 'photochromic_gray', label: 'فوتوكروميك رمادي' },
-  { value: 'photochromic_brown', label: 'فوتوكروميك بني' },
-  { value: 'blue_photo_gray', label: 'أزرق + فوتوكروميك رمادي' },
-  { value: 'blue_photo_brown', label: 'أزرق + فوتوكروميك بني' },
-  { value: 'driving', label: 'القيادة' },
-  { value: 'sun', label: 'الشمس' },
-  { value: 'thinner_lens', label: 'عدسة رقيقة حسب الكتالوج' },
-  { value: 'high_impact_resistance', label: 'مقاومة الصدمات حسب الكتالوج' },
-  { value: 'best_optical_clarity', label: 'أفضل نقاء بصري — الدليل غير كافٍ', disabled: true },
+  { value: 'blue_light', label: 'حماية من الضوء الأزرق' },
+  { value: 'photo_gray', label: 'Photo Gray' },
+  { value: 'photo_brown', label: 'Photo Brown' },
+  { value: 'impact_resistant', label: 'مقاومة للكسر' },
 ];
 
 // Canonical proven-pair statuses (backend PairFulfillment.status) that may
@@ -213,32 +222,42 @@ const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_va
 
 // Maps PairFulfillment.status (the proven pair-level route) to the matching
 // LensSearchGroup.key so the decision-relevant group can be opened by default.
-// Note the deliberate naming difference between the two enums for the same
-// concept: pair status "stock_outside" vs. group key "stock_out_of_egypt".
-const STATUS_TO_DEFAULT_GROUP_KEY = {
-  stock_egypt: 'stock_egypt',
-  stock_outside: 'stock_out_of_egypt',
-  stock_market_unknown: 'stock_market_unknown',
-  rx: 'rx',
-  split: 'split',
-  eligibility_unknown: 'eligibility_unknown',
+// Presentation order is independent of recommendation score and selected needs.
+export const sellerRowOrder = (a, b) => {
+  const index = Number(a.index_value) - Number(b.index_value);
+  if (index) return index;
+  const pendingA = priceNeedsConfirmation(a.pair_fulfillment);
+  const pendingB = priceNeedsConfirmation(b.pair_fulfillment);
+  if (pendingA !== pendingB) return pendingA ? 1 : -1;
+  if (!pendingA) {
+    const price = Number(a.pair_fulfillment.price_pair) - Number(b.pair_fulfillment.price_pair);
+    if (price) return price;
+  }
+  const identity = (r) => `${r.company_name}|${r.lens_model_id}|${r.variant_id}|${r.coating_id}|${r.pair_fulfillment.source_pricing_ids?.join(',')}`;
+  return identity(a).localeCompare(identity(b));
 };
 
-// Computes which result groups should start expanded for a given search
-// response: the group matching the proven best-pair route, plus the
-// eligibility_unknown group (when populated) since it always represents
-// rows that need employee review regardless of the best-pair outcome.
-const defaultOpenGroupKeys = (data) => {
-  if (!data || !Array.isArray(data.groups)) return [];
-  const openKeys = new Set();
-  const status = data.best_match?.pair_fulfillment?.status;
-  const mappedKey = status && STATUS_TO_DEFAULT_GROUP_KEY[status];
-  if (mappedKey && data.groups.some((g) => g.key === mappedKey && g.count > 0)) {
-    openKeys.add(mappedKey);
-  }
-  const reviewGroup = data.groups.find((g) => g.key === 'eligibility_unknown' && g.count > 0);
-  if (reviewGroup) openKeys.add(reviewGroup.key);
-  return Array.from(openKeys);
+export const sellerSections = (data) => {
+  const multi = ['progressive', 'bifocal'].includes(data.use_mode);
+  const groups = data.groups || [];
+  const labels = { stock_egypt: 'STOCK داخل مصر', stock_out_of_egypt: 'STOCK خارج مصر',
+    rx: 'RX / تصنيع', stock_market_unknown: 'STOCK — مكان التوفر غير محدد' };
+  const order = multi ? ['rx', 'stock_egypt', 'stock_out_of_egypt', 'stock_market_unknown']
+    : ['stock_egypt', 'stock_out_of_egypt', 'rx', 'stock_market_unknown'];
+  const keys = [...order, ...groups.map((g) => g.key).filter((key) => !order.includes(key))];
+  return keys.map((key) => {
+    const group = groups.find((g) => g.key === key);
+    const results = [...(group?.results || [])].sort(sellerRowOrder);
+    const section = { key, label: labels[key] || group?.label, results };
+    if (multi && key === 'rx') {
+      section.tiers = [
+        { key: 'local', label: 'تصنيع داخل مصر', results: results.filter((r) => r.manufacturing_location === 'egypt') },
+        { key: 'other', label: 'باقي خيارات RX / التصنيع', results: results.filter((r) => r.manufacturing_location !== 'egypt') },
+      ];
+    }
+    return section;
+  }).filter((section) => section.results.length || (multi ? section.key === 'rx'
+    : ['stock_egypt', 'stock_out_of_egypt', 'rx'].includes(section.key)));
 };
 
 const Prescriptions = () => {
@@ -260,14 +279,13 @@ const Prescriptions = () => {
   // defaultActiveKey) because the search Modal/Collapse instance persists
   // across repeated searches within one session (see the effect below) -
   // defaultActiveKey would only apply once, on first mount.
-  const [activePanelKeys, setActivePanelKeys] = useState([]);
   // V1.2 core-workflow: what the customer wants made (distance/reading/
   // bifocal/progressive) and a manufacturer-agnostic technology need. Both
   // are independent of `mode` (automatic vs targeted) below - the employee
   // still enters the doctor's prescription only once and never computes a
   // Reading power or a manufacturer's own technology naming by hand.
   const [usageMode, setUsageMode] = useState('distance');
-  const [customerNeed, setCustomerNeed] = useState('none');
+  const [customerNeeds, setCustomerNeeds] = useState([]);
   const searchVersion = useRef(0);
   const [editing, setEditing] = useState(null);
   const invalidateSearch = () => {
@@ -295,15 +313,6 @@ const Prescriptions = () => {
     loadPrescriptions();
     companyAPI.getAll().then((r) => setCompanies(r.data)).catch(() => {});
   }, []);
-
-  // Resets which result groups are open only when a genuinely NEW search
-  // response arrives (a new searchData object, including the null reset at
-  // the start of a search). Manual panel toggles the user makes afterward
-  // only touch activePanelKeys, so they are never overridden until the next
-  // real search response lands.
-  useEffect(() => {
-    setActivePanelKeys(defaultOpenGroupKeys(searchData));
-  }, [searchData]);
 
   const loadPrescriptions = async () => {
     setLoading(true);
@@ -381,7 +390,7 @@ const Prescriptions = () => {
     setSearchData(null);
     setMode('automatic');
     setUsageMode('distance');
-    setCustomerNeed('none');
+    setCustomerNeeds([]);
     setFilters({});
     setFacets(EMPTY_FACETS);
     setModelNameById({});
@@ -389,7 +398,7 @@ const Prescriptions = () => {
     // Explicit defaults avoid stale use/need from a previous prescription.
     // (same lesson as the P1 Collapse fix: this Modal instance persists across
     // openSearch calls, so a closure-read of current state here could be stale).
-    runSearch(record, 'automatic', {}, 'distance', 'none');
+    runSearch(record, 'automatic', {}, 'distance', []);
     refreshFacetOptions({});
   };
 
@@ -524,7 +533,7 @@ const Prescriptions = () => {
     setSearching(true);
     setSearchData(null);
     try {
-      const payload = { mode: m, ...sellerNeedPayload(needOverride !== undefined ? needOverride : customerNeed) };
+      const payload = { mode: m, ...sellerNeedPayload(needOverride !== undefined ? needOverride : customerNeeds) };
       if (m === 'targeted') payload.filters = rawFilters ?? buildFilterPayload();
       if (um) payload.use_mode = um;
       const res = await prescriptionAPI.search(record.id, payload);
@@ -561,19 +570,26 @@ const Prescriptions = () => {
 
   // ---- V1.0.2 exact result = one commercial option (PerEyeProductResult) ----
   const resultColumns = [
-    { title: 'الشركة', key: 'company', width: 100, render: (_, r) => r.company_name || '—' },
-    { title: 'الموديل', key: 'model', width: 140, render: (_, r) => r.model_name || '—' },
-    { title: 'المادة / Index', key: 'idx', width: 150, render: (_, r) => indexMaterialText(r.material, r.index_value) },
-    { title: 'الفئة', key: 'category', width: 100, render: (_, r) => r.category || '—' },
-    { title: 'التصميم', key: 'design', width: 120, render: (_, r) => r.design_variant || '—' },
-    { title: 'الطلاء', key: 'coating', width: 120, render: (_, r) => r.coating_name || r.coating_code || '—' },
-    { title: 'التقنية / اللون', key: 'tech', width: 120, render: (_, r) => r.color_variant || '—' },
-    { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.od.best]}</Tag> },
-    { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.os.best]}</Tag> },
-    { title: 'حل الزوج', key: 'pair', width: 130, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
-    { title: 'سعر الزوج', key: 'price', width: 220, render: (_, r) => <PairPrice pf={r.pair_fulfillment} /> },
-    { title: 'الدرجة', key: 'score', width: 64, render: (_, r) => r.match_score?.toFixed(1) },
+    { title: 'الشركة', key: 'company', width: 115, render: (_, r) => r.company_name || '—' },
+    { title: 'المنتج / الموديل', key: 'model', width: 185, render: (_, r) => <div>{r.model_name || '—'}<div style={{ fontSize: 12, color: '#666' }}>{r.design_variant}</div></div> },
+    { title: 'المادة / Index', key: 'idx', width: 145, render: (_, r) => indexMaterialText(r.material, r.index_value) },
+    { title: 'التقنية / الطلاء', key: 'tech', width: 200, render: (_, r) => [r.coating_name || r.coating_code, r.treatment_band, r.color_variant].filter(Boolean).join(' / ') || '—' },
+    { title: 'التوفر / التصنيع', key: 'pair', width: 160, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{r.manufacturing_location === 'egypt' && r.pair_fulfillment.status === 'rx' ? 'تصنيع داخل مصر' : PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
+    { title: 'سعر الزوج', key: 'price', width: 240, render: (_, r) => <PairPrice pf={r.pair_fulfillment} /> },
   ];
+
+  const renderSellerTable = (section) => <div>
+    <ManufacturerCoverage groups={[section]} />
+    <Table dataSource={section.results} columns={resultColumns} rowKey={rowKey} size="small"
+      pagination={section.results.length > 15 ? { pageSize: 15, showSizeChanger: false } : false}
+      scroll={{ x: 1080 }}
+      expandable={{ expandedRowRender: (r) => <div>
+        <div>الفئة: {r.category} — الدرجة: {r.match_score?.toFixed(1)}</div>
+        <PairMatrix od={r.od} os={r.os} />
+        <PairAnswer pf={r.pair_fulfillment} manufacturingLocation={r.manufacturing_location} />
+        <details><summary>تفاصيل الكتالوج والتوافق</summary>{r.reason}</details>
+      </div> }} />
+  </div>;
 
   const rowKey = (r) => `${r.lens_model_id}-${r.variant_id}-${r.coating_id}`;
 
@@ -581,7 +597,7 @@ const Prescriptions = () => {
     <>
       <b>{r.company_name} — {r.model_name}</b>
       {r.seller_recommendation_reason && <div>متوافق مع وصفة العينين والاحتياج المحدد</div>}
-      <PairAnswer pf={r.pair_fulfillment} />
+      <PairAnswer pf={r.pair_fulfillment} manufacturingLocation={r.manufacturing_location} />
       <Collapse ghost><Panel header="تفاصيل العدسة والتوافق" key="details">
       {r.seller_recommendation_reason && (
         <Alert type="info" message={r.seller_recommendation_reason} style={{ marginBottom: 10 }} />
@@ -626,8 +642,6 @@ const Prescriptions = () => {
   );
 
   const sd = searchData;
-  const best = sd?.best_match;
-  const bestIsActionable = isActionableBestMatch(best);
   const headline = sd ? sellerHeadline(sd) : null;
 
   return (
@@ -724,10 +738,20 @@ const Prescriptions = () => {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>احتياج العميل</div>
-          <Select aria-label="احتياج العميل" style={{ width: '100%', maxWidth: 450 }}
-            value={customerNeed} options={CUSTOMER_NEED_OPTIONS} disabled={searching}
-            onChange={(value) => changeCriteria(setCustomerNeed, value)} />
-          <div style={{ color: '#666', marginTop: 6 }}>نوصي فقط بما يثبته الكتالوج. عند غياب دليل كافٍ لا نعرض اختياراً تخمينياً.</div>
+          <Space wrap role="group" aria-label="احتياج العميل">
+            {CUSTOMER_NEED_OPTIONS.map(({ value, label }) => (
+              <Button key={value} aria-pressed={customerNeeds.includes(value)}
+                type={customerNeeds.includes(value) ? 'primary' : 'default'}
+                onClick={() => changeCriteria(setCustomerNeeds, customerNeeds.includes(value)
+                  ? customerNeeds.filter((need) => need !== value) : [...customerNeeds, value])}>
+                {label}
+              </Button>
+            ))}
+          </Space>
+          <div style={{ color: '#666', marginTop: 6 }}>
+            {customerNeeds.length ? 'يجب أن تحقق العدسة جميع الاحتياجات المحددة حسب الكتالوج.'
+              : 'بدون احتياج إضافي — بدون شرط تكنولوجي، وليس شرط العدسة الشفافة فقط.'}
+          </div>
         </div>
 
         <Radio.Group value={mode} onChange={(e) => changeCriteria(setMode, e.target.value)} style={{ marginBottom: 12 }}>
@@ -830,13 +854,13 @@ const Prescriptions = () => {
 
         {!searching && sd && (
           <div style={{ marginTop: 16 }}>
-            <Alert
+            {sd.exact_total === 0 && <Alert
               type={ANSWER_TYPE[headline.code] || 'warning'}
               showIcon
               message={headline.title}
               description={headline.detail}
               style={{ marginBottom: 12 }}
-            />
+            />}
             {sd.derived_search_rx && (
               <Card size="small" title="قوة القراءة المستخدمة في البحث" style={{ marginBottom: 12, borderColor: '#1677ff' }}>
                 <div style={{ display: 'flex', gap: 24 }}>
@@ -866,63 +890,21 @@ const Prescriptions = () => {
             </Descriptions>
             </Panel></Collapse>
 
-            {bestIsActionable && (
-              <Card size="small" title="⭐ أفضل خيار للزوج" style={{ marginBottom: 12, borderColor: '#52c41a', borderWidth: 2 }}>
-                {renderResultCard(best)}
-              </Card>
-            )}
-
-            {!bestIsActionable && sd.exact_total > 0 && (
-              <Alert type="warning" showIcon style={{ marginBottom: 12 }}
-                message="لا توجد توصية تستوفي التوفر المثبت والسعر النهائي؛ راجع التفاصيل أدناه." />
-            )}
-            {(sd.seller_alternatives || []).filter(isActionableBestMatch).map((r, i) => (
-              <Card key={`seller-${rowKey(r)}`} size="small" title={`بديل ${i + 1} — يحقق نفس الاحتياج`}
-                style={{ marginBottom: 12, borderColor: '#1677ff' }}>
-                {renderResultCard(r)}
-              </Card>
-            ))}
-            {bestIsActionable && (sd.seller_alternatives || []).length < 2 && (
-              <div style={{ color: '#666', marginBottom: 12 }}>لا يوجد بديلان إضافيان يستوفيان جميع الشروط في الكتالوج الحالي.</div>
-            )}
-            {sd.exact_total === 0 && <Empty description="لا توجد نتيجة مطابقة تماماً" />}
-
-            <Collapse activeKey={activePanelKeys} onChange={setActivePanelKeys}>
-              {sd.groups.map((grp) => (
-                <Panel
-                  key={grp.key}
-                  header={
-                    <span>
-                      {grp.label} <Tag>{grp.count}</Tag>
-                      <span style={{ color: '#888', fontSize: 12, marginRight: 8 }}>{grp.catalog_note}</span>
-                    </span>
-                  }
-                >
-                  {grp.count === 0 ? (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="لا شيء في هذه المجموعة" />
-                  ) : (
-                    <>
-                      <Table
-                        dataSource={grp.results}
-                        columns={resultColumns}
-                        rowKey={rowKey}
-                        size="small"
-                        pagination={grp.count > 15 ? { pageSize: 15 } : false}
-                        scroll={{ x: 1280 }}
-                        expandable={{
-                          expandedRowRender: (r) => (
-                            <Row gutter={16} style={{ padding: 8 }}>
-                              <Col><PairMatrix od={r.od} os={r.os} /></Col>
-                              <Col flex="auto"><PairAnswer pf={r.pair_fulfillment} /></Col>
-                            </Row>
-                          ),
-                        }}
-                      />
-                    </>
-                  )}
-                </Panel>
+            <div aria-label="نتائج العدسات المطابقة">
+              <h3>نتائج العدسات المطابقة — {sd.exact_total} نتيجة</h3>
+              {sellerSections(sd).map((section) => (
+                <Card key={section.key} size="small" data-seller-section={section.key}
+                  title={`${section.label} — ${section.results.length} نتيجة`} style={{ marginBottom: 16 }}>
+                  {section.tiers ? <>
+                    <ManufacturerCoverage groups={[section]} />
+                    {section.tiers.map((tier) => <div key={tier.key} data-manufacturing-tier={tier.key}>
+                      <h4>{tier.label} — {tier.results.length} نتيجة</h4>
+                      {renderSellerTable(tier)}
+                    </div>)}
+                  </> : renderSellerTable(section)}
+                </Card>
               ))}
-            </Collapse>
+            </div>
 
             {sd.availability_intelligence && sd.availability_intelligence.length > 0 && (
               <>

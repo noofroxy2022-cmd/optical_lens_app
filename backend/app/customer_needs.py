@@ -8,6 +8,26 @@ No inference from material enum, index alone, brand substring or frame type.
 """
 import math
 
+# Explicit business evidence supplied for V1.4.1. This does not classify other
+# manufacturers as foreign, and does not impose an order between these two.
+LOCAL_EGYPT_MANUFACTURERS = frozenset({"SCOPE", "PLATINUM"})
+
+
+def local_manufacturing(result):
+    return (result.category in ("progressive", "bifocal")
+            and result.pair_fulfillment.status == "rx"
+            and result.company_name in LOCAL_EGYPT_MANUFACTURERS)
+
+
+def seller_order(result):
+    """Called only after actionable(): availability, price, then score."""
+    status = result.pair_fulfillment.status
+    if result.category in ("progressive", "bifocal"):
+        tier = 0 if local_manufacturing(result) else 1
+    else:
+        tier = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}[status]
+    return tier, result.pair_fulfillment.price_pair, -float(result.match_score)
+
 TECHNOLOGY = {
     "screens_blue_light": "blue_light",
     "photochromic_gray": "photo_gray",
@@ -75,6 +95,8 @@ def seller_reason(result, need, technology):
     pf = result.pair_fulfillment
     route = {"stock_egypt": "STOCK مصر حسب الكتالوج",
              "stock_outside": "STOCK خارج مصر حسب الكتالوج", "rx": "متاح للتصنيع RX"}[pf.status]
+    if local_manufacturing(result):
+        route = "تصنيع داخل مصر"
     bits = ["متوافق مع وصفة العينين", route]
     if need and need != "none":
         bits.append("احتياج مثبت: " + LABELS[need])

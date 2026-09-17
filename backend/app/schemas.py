@@ -584,6 +584,9 @@ class MatchResponse(BaseModel):
 
 # ===== V1.0.1 product search (availability-first, targeted filters, alternatives) =====
 class ProductSearchRequest(BaseModel):
+    # New primary controls; every selected capability is required on the same offer.
+    # None preserves scalar callers; [] means no additional restriction.
+    customer_needs: Optional[List[Literal["blue_light", "photo_gray", "photo_brown", "impact_resistant"]]] = None
     customer_need: Optional[str] = None
     """Two modes:
       - "automatic"  -> every lens optically valid for the prescription
@@ -735,6 +738,7 @@ class PerEyeProductResult(BaseModel):
     match_score: float = Field(..., ge=0, le=100)
     reason: str
     seller_recommendation_reason: Optional[str] = None
+    manufacturing_location: Optional[Literal["egypt"]] = None
     od: EyeAvailability
     os: EyeAvailability
     pair_fulfillment: PairFulfillment
@@ -778,6 +782,7 @@ class DerivedSearchRx(BaseModel):
 
 
 class ProductSearchResponse(BaseModel):
+    customer_needs: Optional[List[str]] = None
     customer_need: Optional[str] = None
     seller_alternatives: List[PerEyeProductResult] = []
     prescription: PrescriptionResponse

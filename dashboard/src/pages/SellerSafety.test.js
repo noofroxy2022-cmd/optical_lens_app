@@ -47,13 +47,6 @@ const click = async (label) => {
   expect(el).toBeTruthy(); await act(async () => { el.click(); }); await settle();
 };
 const mountSearch = async () => { await act(async () => root.render(<Prescriptions />)); await settle(); await click('بحث سريع'); };
-const selectNeed = async (label) => {
-  await act(async () => Simulate.mouseDown(document.querySelector('[aria-label="احتياج العميل"]').closest('.ant-select').querySelector('.ant-select-selector')));
-  await settle();
-  const option = Array.from(document.querySelectorAll('.ant-select-item-option')).find((x) => x.textContent === label);
-  expect(option).toBeTruthy(); await act(async () => option.click()); await settle();
-};
-
 test('confirmed price is explicitly final and never halved', () => {
   act(() => root.render(<PairPrice pf={pf} />));
   expect(text()).toContain('سعر الزوج النهائي: 2500 EGP / Pair');
@@ -78,30 +71,30 @@ test('headline prefers actionable outside stock over pending Egypt and handles p
   expect(unknown.title).toContain('يحتاج تأكيد'); expect(unknown.detail).not.toContain('داخل مصر');
 });
 test('combined needs have one canonical AND intent; no restriction stays unrestricted', () => {
-  expect(sellerNeedPayload('blue_photo_gray')).toEqual({ customer_need: 'none', technology_intent: 'blue_photo_gray' });
-  expect(sellerNeedPayload('blue_photo_brown').technology_intent).toBe('blue_photo_brown');
-  expect(sellerNeedPayload('none')).toEqual({ customer_need: 'none', technology_intent: 'none' });
+  expect(sellerNeedPayload(['blue_light', 'photo_gray'])).toEqual({ customer_needs: ['blue_light', 'photo_gray'] });
+  expect(sellerNeedPayload(['blue_light', 'photo_brown']).customer_needs).toEqual(['blue_light', 'photo_brown']);
+  expect(sellerNeedPayload([])).toEqual({ customer_needs: [] });
 });
 test('advanced price change clears Best Choice and summary; explicit search repopulates', async () => {
-  await mountSearch(); expect(text()).toContain('⭐ أفضل خيار للزوج');
+  await mountSearch(); expect(text()).toContain('نتائج العدسات المطابقة');
   await click('مرشحات متقدمة');
-  await click('بحث'); expect(text()).toContain('⭐ أفضل خيار للزوج');
+  await click('بحث'); expect(text()).toContain('نتائج العدسات المطابقة');
   await click('إحصاءات البحث والتوصيات الفنية');
   expect(text()).toContain('خيارات الزوج');
   const field = Array.from(document.querySelectorAll('.ant-input-number-input')).find((x) => x.placeholder === 'الكل');
   await act(async () => Simulate.change(field, { target: { value: '2000' } })); await settle();
-  expect(text()).not.toContain('⭐ أفضل خيار للزوج'); expect(text()).not.toContain('خيارات الزوج');
-  await click('بحث'); expect(text()).toContain('⭐ أفضل خيار للزوج');
+  expect(text()).not.toContain('نتائج العدسات المطابقة'); expect(text()).not.toContain('خيارات الزوج');
+  await click('بحث'); expect(text()).toContain('نتائج العدسات المطابقة');
   expect(prescriptionAPI.search.mock.calls.at(-1)[1].filters.max_price).toBe(2000);
 });
 test('use and primary need changes invalidate results; combined need is directly selectable', async () => {
   await mountSearch(); await click('قراءة — عدسة أحادية');
-  expect(text()).not.toContain('⭐ أفضل خيار للزوج'); await click('بحث');
-  await selectNeed('أزرق + فوتوكروميك رمادي');
-  expect(text()).not.toContain('⭐ أفضل خيار للزوج');
+  expect(text()).not.toContain('نتائج العدسات المطابقة'); await click('بحث');
+  await click('حماية من الضوء الأزرق'); await click('Photo Gray');
+  expect(text()).not.toContain('نتائج العدسات المطابقة');
   expect(text()).not.toContain('خيارات متقدمة: تقنية إضافية');
   await click('بحث');
-  expect(prescriptionAPI.search.mock.calls.at(-1)[1]).toMatchObject({ use_mode: 'reading', customer_need: 'none', technology_intent: 'blue_photo_gray' });
+  expect(prescriptionAPI.search.mock.calls.at(-1)[1]).toMatchObject({ use_mode: 'reading', customer_needs: ['blue_light', 'photo_gray'] });
 });
 test('editing uses original values, saves ADD, clears old results and waits for Search', async () => {
   await mountSearch(); await click('قراءة — عدسة أحادية'); await click('بحث');
@@ -115,7 +108,7 @@ test('editing uses original values, saves ADD, clears old results and waits for 
   const calls = prescriptionAPI.search.mock.calls.length;
   await click('حفظ التعديل'); await settle();
   expect(prescriptionAPI.update).toHaveBeenCalledWith(1, expect.objectContaining({ od: { sph: -2, cyl: -1, axis: 90, add: 2 } }));
-  expect(text()).not.toContain('⭐ أفضل خيار للزوج');
+  expect(text()).not.toContain('نتائج العدسات المطابقة');
   expect(prescriptionAPI.search).toHaveBeenCalledTimes(calls);
   await click('بحث'); expect(prescriptionAPI.search).toHaveBeenCalledTimes(calls + 1);
   expect(prescriptionAPI.search.mock.calls.at(-1)[1].use_mode).toBe('reading');
@@ -125,7 +118,7 @@ test.each(['PIXEL Hi Power', 'DIVEL diameter confirmation'])('pending table row 
   prescriptionAPI.search.mockResolvedValue({ data: { ...response, best_match: null,
     groups: [{ key: 'rx', label: 'Pending Catalog', count: 1, results: [{ ...result,
       pair_fulfillment: { ...pf, status: 'rx', price_confirmation_note: note } }] }] } });
-  await mountSearch(); await click('Pending Catalog 1');
+  await mountSearch();
   const row = document.querySelector('.ant-table-row[data-row-key="1-1-1"]')
     || Array.from(document.querySelectorAll('.ant-table-row')).find((el) => el.textContent.includes('Current Lens'));
   expect(row).toBeTruthy();
@@ -154,7 +147,7 @@ test('a late search response cannot restore results after criteria change', asyn
   const field = Array.from(document.querySelectorAll('.ant-input-number-input')).find((x) => x.placeholder === 'الكل');
   await act(async () => Simulate.change(field, { target: { value: '2000' } }));
   await act(async () => resolve({ data: response })); await settle();
-  expect(text()).not.toContain('⭐ أفضل خيار للزوج');
+  expect(text()).not.toContain('نتائج العدسات المطابقة');
   expect(text()).not.toContain('خيارات الزوج');
 });
 
@@ -171,4 +164,74 @@ test('zero cylinder allows blank Axis for both eyes without sending zero', async
   const sent = prescriptionAPI.update.mock.calls[0][1];
   expect(sent.od).toMatchObject({ cyl: 0, axis: null });
   expect(sent.os).toMatchObject({ cyl: 0, axis: null });
+});
+
+
+test('exact manufacturer coverage is visible above paginated tables', async () => {
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response, best_match: null,
+    groups: [{ key: 'rx', label: 'Hidden RX', count: 3, results: [
+      { ...result, company_name: 'PIXEL' }, { ...result, company_name: 'PIXEL' },
+      { ...result, company_name: 'DIVEL', pair_fulfillment: { ...pf, price_confirmation_note: 'Diameter' } },
+    ] }] } });
+  await mountSearch();
+  const coverage = document.querySelector('[aria-label="نتائج مطابقة أخرى"]');
+  expect(coverage.textContent).toContain('PIXEL 2');
+  expect(coverage.textContent).toContain('DIVEL 1 — يحتاج تأكيد');
+  expect(coverage.textContent).not.toContain('PIXEL 2 — يحتاج تأكيد');
+  expect(document.querySelector('[data-seller-section="rx"] .ant-table-row').textContent).toContain('Current Lens');
+});
+
+test.each([
+  ['حماية من الضوء الأزرق', 'blue_light'], ['Photo Gray', 'photo_gray'],
+  ['Photo Brown', 'photo_brown'], ['مقاومة للكسر', 'impact_resistant'],
+])('four visible need toggles: %s sends canonical list and deselects to unrestricted', async (label, need) => {
+  await mountSearch();
+  const buttons = document.querySelector('[role="group"][aria-label="احتياج العميل"]').querySelectorAll('button');
+  expect(buttons).toHaveLength(4);
+  expect(prescriptionAPI.search.mock.calls.at(-1)[1]).toMatchObject({ customer_needs: [] });
+  await click(label); expect(text()).not.toContain('نتائج العدسات المطابقة');
+  await click('بحث');
+  const payload = prescriptionAPI.search.mock.calls.at(-1)[1];
+  expect(payload.customer_needs).toEqual([need]);
+  expect(payload.technology_intent).toBeUndefined();
+  expect(payload.customer_need).toBeUndefined();
+  await click(label); await click('بحث');
+  expect(prescriptionAPI.search.mock.calls.at(-1)[1].customer_needs).toEqual([]);
+});
+
+test('need change while request is pending rejects its late response', async () => {
+  await mountSearch();
+  let resolve;
+  prescriptionAPI.search.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  await click('بحث'); await click('حماية من الضوء الأزرق'); await click('مقاومة للكسر');
+  await act(async () => resolve({ data: response })); await settle();
+  expect(text()).not.toContain('نتائج العدسات المطابقة');
+  await click('بحث');
+  expect(prescriptionAPI.search.mock.calls.at(-1)[1].customer_needs).toEqual(['blue_light', 'impact_resistant']);
+});
+
+test('local manufacturing label comes from the result; generic RX is not called foreign', () => {
+  const local = { ...result, manufacturing_location: 'egypt', pair_fulfillment: { ...pf, status: 'rx' } };
+  expect(sellerHeadline({ ...response, best_match: local }).title).toContain('تصنيع داخل مصر');
+  expect(sellerHeadline({ ...response, best_match: { ...local, manufacturing_location: null } }).title).not.toContain('خارج مصر');
+});
+
+test('primary tables replace recommendation cards and paginate without hiding manufacturer counts', async () => {
+  const rows = Array.from({ length: 20 }, (_, i) => ({ ...result, variant_id: i + 1,
+    company_name: i === 19 ? 'DIVEL' : 'PIXEL', model_name: `Catalog Lens ${i + 1}`,
+    pair_fulfillment: { ...pf, status: 'stock_egypt', source_pricing_ids: [i + 1],
+      price_confirmation_note: i === 19 ? 'Diameter confirmation' : null } }));
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response, exact_total: 20,
+    best_match: rows[0], seller_alternatives: rows.slice(1, 3),
+    groups: [{ key: 'stock_egypt', count: 20, results: rows }] } });
+  await mountSearch();
+  const section = document.querySelector('[data-seller-section="stock_egypt"]');
+  expect(section.textContent).toContain('STOCK داخل مصر — 20 نتيجة');
+  expect(section.textContent).toContain('PIXEL 19');
+  expect(section.textContent).toContain('DIVEL 1 — يحتاج تأكيد');
+  expect(section.querySelectorAll('.ant-table-row')).toHaveLength(15);
+  expect(text()).not.toContain('⭐ أفضل خيار للزوج');
+  expect(text()).not.toContain('بديل 1');
+  expect(section.querySelector('thead').textContent).not.toContain('الدرجة');
+  expect(document.querySelectorAll('.ant-table-expanded-row')).toHaveLength(0);
 });
