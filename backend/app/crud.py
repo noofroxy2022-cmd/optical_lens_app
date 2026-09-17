@@ -389,43 +389,40 @@ def delete_power_range(db: Session, range_id: int) -> bool:
 # ===== Prescription =====
 def create_prescription(db: Session, prescription: schemas.PrescriptionCreate,
                        image_path=None, ocr_confidence=None) -> models.Prescription:
-    data = prescription.model_dump()
-    od = data.pop("od")
-    os = data.pop("os")
-
-    # تطبيق Transposition
-    from app.lens_matcher import TranspositionEngine
-    trans = TranspositionEngine()
-
-    od_trans = trans.transpose(od["sph"], od.get("cyl", 0.0), od.get("axis", 0))
-    os_trans = trans.transpose(os["sph"], os.get("cyl", 0.0), os.get("axis", 0))
-
-    transposition_applied = (od.get("cyl", 0) > 0) or (os.get("cyl", 0) > 0)
-
     db_prescription = models.Prescription(
-        **data,
-        od_sph_original=od["sph"],
-        od_cyl_original=od.get("cyl", 0.0),
-        od_axis_original=od.get("axis", 0),
-        od_sph=od_trans[0],
-        od_cyl=od_trans[1],
-        od_axis=od_trans[2],
-        od_add=od.get("add", 0.0),
-        os_sph_original=os["sph"],
-        os_cyl_original=os.get("cyl", 0.0),
-        os_axis_original=os.get("axis", 0),
-        os_sph=os_trans[0],
-        os_cyl=os_trans[1],
-        os_axis=os_trans[2],
-        os_add=os.get("add", 0.0),
-        transposition_applied=transposition_applied,
-        image_path=image_path,
-        ocr_confidence=ocr_confidence
-    )
+        **_prescription_values(prescription), image_path=image_path,
+        ocr_confidence=ocr_confidence)
     db.add(db_prescription)
     db.commit()
     db.refresh(db_prescription)
     return db_prescription
+
+
+def _prescription_values(prescription: schemas.PrescriptionCreate):
+    """Normalize original input once for both create and edit; never Reading Rx."""
+    from app.lens_matcher import TranspositionEngine
+    data = prescription.model_dump()
+    eyes = {eye: data.pop(eye) for eye in ("od", "os")}
+    for eye, values in eyes.items():
+        normalized = TranspositionEngine.transpose(values["sph"], values["cyl"], values["axis"])
+        for field, value in zip(("sph", "cyl", "axis"), normalized):
+            data[f"{eye}_{field}_original"] = values[field]
+            data[f"{eye}_{field}"] = value
+        data[f"{eye}_add"] = values["add"]
+    data["transposition_applied"] = any(values["cyl"] > 0 for values in eyes.values())
+    return data
+
+
+def update_prescription(db: Session, prescription_id: int,
+                        prescription: schemas.PrescriptionCreate):
+    stored = get_prescription(db, prescription_id)
+    if stored is None:
+        return None
+    for field, value in _prescription_values(prescription).items():
+        setattr(stored, field, value)
+    db.commit()
+    db.refresh(stored)
+    return stored
 
 def get_prescription(db: Session, prescription_id: int) -> Optional[models.Prescription]:
     return db.query(models.Prescription).filter(models.Prescription.id == prescription_id).first()

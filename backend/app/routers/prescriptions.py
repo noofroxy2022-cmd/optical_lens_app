@@ -25,6 +25,15 @@ def create_prescription(prescription: schemas.PrescriptionCreate, db: Session = 
     return crud.create_prescription(db, prescription)
 
 
+@router.put("/{prescription_id}", response_model=schemas.PrescriptionResponse)
+def update_prescription(prescription_id: int, prescription: schemas.PrescriptionCreate,
+                        db: Session = Depends(get_db)):
+    stored = crud.update_prescription(db, prescription_id, prescription)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
+    return stored
+
+
 @router.post("/upload", response_model=schemas.OCRResponse)
 async def upload_prescription_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """رفع صورة + OCR + Transposition"""

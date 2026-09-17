@@ -54,6 +54,7 @@ export const prescriptionAPI = {
   getAll: () => api.get('/prescriptions/'),
   getById: (id) => api.get(`/prescriptions/${id}`),
   create: (data) => api.post('/prescriptions/', data),
+  update: (id, data) => api.put(`/prescriptions/${id}`, data),
   match: (id, { filters = null, preferStock = true, preferAspherical = true } = {}) =>
     api.post(`/prescriptions/${id}/match`, filters, {
       params: { prefer_stock: preferStock, prefer_aspherical: preferAspherical },

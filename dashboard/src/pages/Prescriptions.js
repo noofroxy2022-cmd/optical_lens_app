@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Table, Button, Modal, Descriptions, Tag, message, Popconfirm, Form, Input, InputNumber,
   Row, Col, Card, Empty, Alert, Radio, Select, Collapse, Divider, Space,
@@ -71,11 +71,44 @@ const PairMatrix = ({ od, os }) => (
   </table>
 );
 
+export const priceNeedsConfirmation = (pf) => Boolean(
+  pf.price_confirmation_note || pf.needs_review
+  || pf.technology_addon?.unit_status === 'UNIT_UNRESOLVED'
+  || !['stock_egypt', 'stock_outside', 'stock_market_unknown', 'rx'].includes(pf.status)
+  || pf.provenance !== 'single_route' || pf.price_pair == null || !Number.isFinite(Number(pf.price_pair)) || Number(pf.price_pair) <= 0
+);
+
+export const PairPrice = ({ pf }) => {
+  const pending = priceNeedsConfirmation(pf);
+  const base = pf.technology_addon?.base_price ?? pf.price_pair;
+  return pending ? <div>
+    <b style={{ color: '#ad6800' }}>بانتظار تأكيد السعر</b>
+    {base != null && <div style={{ fontSize: 12 }}>السعر الأساسي: {base} {pf.currency} / Pair — السعر النهائي غير مؤكد</div>}
+    <div style={{ fontSize: 12 }}>{pf.price_confirmation_note || (pf.needs_review ? 'بحاجة لمراجعة قبل اعتماد السعر' : 'لا يوجد سعر نهائي مؤكد')}</div>
+  </div> : <div><b>سعر الزوج النهائي: </b>{pf.price_pair} {pf.currency} / Pair</div>;
+};
+
+export const sellerNeedPayload = (need) => ({
+  customer_need: ['blue_photo_gray', 'blue_photo_brown'].includes(need) ? 'none' : need,
+  technology_intent: ({ screens_blue_light: 'blue_light', photochromic_gray: 'photo_gray',
+    photochromic_brown: 'photo_brown', blue_photo_gray: 'blue_photo_gray', blue_photo_brown: 'blue_photo_brown' })[need] || 'none',
+});
+
+export const sellerHeadline = (data) => {
+  if (isActionableBestMatch(data.best_match)) {
+    const status = data.best_match.pair_fulfillment.status;
+    return { code: status === 'stock_outside' ? 'stock_out_of_egypt' : status === 'rx' ? 'rx_only' : status,
+      title: `الخيار الموصى به: ${PAIR_STATUS_AR[status]}`, detail: 'سعر الزوج النهائي مؤكد؛ التوفر حسب الكتالوج.' };
+  }
+  if (data.exact_total > 0 || data.availability_intelligence?.length) {
+    return { code: 'pending', title: 'يوجد خيار يحتاج تأكيد — لا توجد توصية جاهزة بسعر نهائي',
+      detail: data.availability_answer.title };
+  }
+  return data.availability_answer;
+};
+
 // "أفضل حل موحد للزوج" + a pair price only when provenance is proven (§4/§8/§2).
 export const PairAnswer = ({ pf }) => {
-  const priced = pf.price_pair != null;
-  const unproven = pf.provenance === 'unproven_mixed';
-  const unknownEligibility = pf.status === 'eligibility_unknown';
   return (
     <div>
       <div>
@@ -85,30 +118,16 @@ export const PairAnswer = ({ pf }) => {
           <span style={{ color: '#888', fontSize: 12 }}>— حسب الكتالوج</span>}
         {pf.needs_review && <Tag color="volcano" style={{ marginRight: 6 }}>بحاجة لمراجعة</Tag>}
       </div>
-      <div style={{ marginTop: 4 }}>
-        {/* eligibility_unknown: never label this line "السعر" - price_pair is
-            always null here (backend never exposes a catalog price as an
-            actionable pair price while power eligibility is unresolved), so
-            this deliberately reads as a compatibility question, not a price. */}
-        <b>{unknownEligibility ? 'توافق الوصفة: ' : pf.price_confirmation_note ? 'السعر بانتظار التأكيد: ' : 'السعر: '}</b>
-        {priced
-          ? <span>{`${pf.price_pair} ${pf.currency || ''} / Pair`}</span>
-          : pf.price_confirmation_note
-            ? <span style={{ color: '#ad6800' }}>بانتظار تأكيد المعمل — لا يوجد سعر نهائي مؤكد</span>
-            : unknownEligibility
-            ? <span style={{ color: '#cf1322' }}>غير مؤكد بسبب نطاق القوة — يحتاج مراجعة قبل اعتماد الطلب</span>
-            : unproven
-              ? <span style={{ color: '#cf1322' }}>غير محسوب — مصدر تسعير غير مثبت (unproven mixed pricing provenance)</span>
-              : <span style={{ color: '#cf1322' }}>السعر المختلط: غير محسوب — غير مثبت في الكتالوج</span>}
-      </div>
+      <PairPrice pf={pf} />
       {/* An unresolved surcharge unit must never display a computed total. */}
       {pf.technology_addon && (
         <div style={{ marginTop: 4, color: '#0958d9', fontSize: 12, background: '#e6f4ff',
                      border: '1px solid #91caff', borderRadius: 4, padding: '4px 8px' }}>
           ℹ️ إضافة لتوفير التكنولوجيا المطلوبة —
           الأساس {pf.technology_addon.base_price} {pf.currency}؛ {pf.technology_addon.label} {pf.technology_addon.addon_price} {pf.currency}
-          {pf.technology_addon.unit_status === 'UNIT_UNRESOLVED'
-            ? ' — وحدة الإضافة بانتظار التأكيد؛ السعر النهائي غير مؤكد'
+          {priceNeedsConfirmation(pf)
+            ? (pf.technology_addon.unit_status === 'UNIT_UNRESOLVED'
+              ? ' — وحدة الإضافة بانتظار التأكيد؛ السعر النهائي غير مؤكد' : ' — السعر النهائي غير مؤكد')
             : ` — الإجمالي ${pf.price_pair} ${pf.currency}`}
         </div>
       )}
@@ -123,7 +142,7 @@ export const PairAnswer = ({ pf }) => {
           ⚠️ {pf.price_confirmation_note}
         </div>
       )}
-      <div style={{ marginTop: 4, color: '#666', fontSize: 12 }}>{pf.reason}</div>
+<details style={{ marginTop: 4, fontSize: 12 }}><summary>تفاصيل التوفر</summary>{pf.reason}</details>
     </div>
   );
 };
@@ -148,29 +167,22 @@ const ANSWER_TYPE = {
 // backend/app/technology_evidence.py); labels are Arabic display text only.
 const USE_MODE_OPTIONS = [
   { value: 'distance', label: 'مسافات' },
-  { value: 'reading', label: 'قراءة' },
+  { value: 'reading', label: 'قراءة — عدسة أحادية' },
   { value: 'bifocal', label: 'Bifocal' },
   { value: 'progressive', label: 'Progressive' },
 ];
 const CUSTOMER_NEED_OPTIONS = [
-  { value: 'none', label: 'بدون احتياج إضافي' },
-  { value: 'screens_blue_light', label: 'الشاشات / ترشيح الضوء الأزرق' },
+  { value: 'none', label: 'بدون احتياج إضافي — بدون شرط تكنولوجي' },
+  { value: 'screens_blue_light', label: 'حماية من الضوء الأزرق' },
   { value: 'photochromic_gray', label: 'فوتوكروميك رمادي' },
   { value: 'photochromic_brown', label: 'فوتوكروميك بني' },
+  { value: 'blue_photo_gray', label: 'أزرق + فوتوكروميك رمادي' },
+  { value: 'blue_photo_brown', label: 'أزرق + فوتوكروميك بني' },
   { value: 'driving', label: 'القيادة' },
   { value: 'sun', label: 'الشمس' },
   { value: 'thinner_lens', label: 'عدسة رقيقة حسب الكتالوج' },
   { value: 'high_impact_resistance', label: 'مقاومة الصدمات حسب الكتالوج' },
   { value: 'best_optical_clarity', label: 'أفضل نقاء بصري — الدليل غير كافٍ', disabled: true },
-];
-
-const TECHNOLOGY_OPTIONS = [
-  { value: 'none', label: 'عادي' },
-  { value: 'blue_light', label: 'حماية من الضوء الأزرق' },
-  { value: 'photo_gray', label: 'Photo Gray' },
-  { value: 'photo_brown', label: 'Photo Brown' },
-  { value: 'blue_photo_gray', label: 'Blue + Photo Gray' },
-  { value: 'blue_photo_brown', label: 'Blue + Photo Brown' },
 ];
 
 // Canonical proven-pair statuses (backend PairFulfillment.status) that may
@@ -194,7 +206,7 @@ const isActionableBestMatch = (best) => (
   && Number(best.pair_fulfillment.price_pair) > 0
   && best.pair_fulfillment.provenance === 'single_route'
   && !best.pair_fulfillment.needs_review
-  && !best.pair_fulfillment.price_confirmation_note
+  && !priceNeedsConfirmation(best.pair_fulfillment)
 );
 
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
@@ -256,7 +268,14 @@ const Prescriptions = () => {
   // Reading power or a manufacturer's own technology naming by hand.
   const [usageMode, setUsageMode] = useState('distance');
   const [customerNeed, setCustomerNeed] = useState('none');
-  const [technologyIntent, setTechnologyIntent] = useState('none');
+  const searchVersion = useRef(0);
+  const [editing, setEditing] = useState(null);
+  const invalidateSearch = () => {
+    searchVersion.current += 1;
+    setSearchData(null);
+    setSearching(false);
+  };
+  const changeCriteria = (setter, value) => { invalidateSearch(); setter(value); };
   const [mode, setMode] = useState('automatic');
   const [companies, setCompanies] = useState([]);
   const [filters, setFilters] = useState({});
@@ -321,20 +340,40 @@ const Prescriptions = () => {
         customer_phone: values.customer_phone || null,
         pd: values.pd ?? null,
         notes: values.notes || null,
-        od: { sph: values.od_sph, cyl: values.od_cyl ?? 0, axis: values.od_axis ?? 0, add: values.od_add ?? 0 },
-        os: { sph: values.os_sph, cyl: values.os_cyl ?? 0, axis: values.os_axis ?? 0, add: values.os_add ?? 0 },
+        od: { sph: values.od_sph, cyl: values.od_cyl ?? 0, axis: values.od_axis ?? null, add: values.od_add ?? 0 },
+        os: { sph: values.os_sph, cyl: values.os_cyl ?? 0, axis: values.os_axis ?? null, add: values.os_add ?? 0 },
       };
-      const res = await prescriptionAPI.create(payload);
-      message.success('تم إنشاء الوصفة');
+      const res = editing ? await prescriptionAPI.update(editing.id, payload) : await prescriptionAPI.create(payload);
+      message.success(editing ? 'تم حفظ الوصفة الأصلية — اضغط بحث لتحديث النتائج' : 'تم إنشاء الوصفة');
       setCreateVisible(false);
       createForm.resetFields();
       await loadPrescriptions();
-      openSearch(res.data);
+      if (editing) {
+        invalidateSearch();
+        setSearchFor(res.data);
+        setSearchVisible(true);
+        setEditing(null);
+      } else openSearch(res.data);
     } catch (error) {
       message.error(errMsg(error, 'فشل إنشاء الوصفة'));
     } finally {
       setCreating(false);
     }
+  };
+
+  const openEdit = (record) => {
+    invalidateSearch();
+    setEditing(record);
+    const fields = { customer_name: record.customer_name, customer_phone: record.customer_phone,
+      pd: record.pd, notes: record.notes };
+    ['od', 'os'].forEach((eye) => {
+      ['sph', 'cyl', 'axis'].forEach((field) => {
+        fields[`${eye}_${field}`] = record[`${eye}_${field}_original`];
+      });
+      fields[`${eye}_add`] = record[`${eye}_add`];
+    });
+    createForm.setFieldsValue(fields);
+    setCreateVisible(true);
   };
 
   const openSearch = (record) => {
@@ -343,16 +382,14 @@ const Prescriptions = () => {
     setMode('automatic');
     setUsageMode('distance');
     setCustomerNeed('none');
-    setTechnologyIntent('none');
     setFilters({});
     setFacets(EMPTY_FACETS);
     setModelNameById({});
     setSearchVisible(true);
-    // explicit null/'none' overrides - never rely on possibly-stale usageMode/
-    // technologyIntent state left over from a previous prescription's session
+    // Explicit defaults avoid stale use/need from a previous prescription.
     // (same lesson as the P1 Collapse fix: this Modal instance persists across
     // openSearch calls, so a closure-read of current state here could be stale).
-    runSearch(record, 'automatic', {}, 'distance', 'none', 'none');
+    runSearch(record, 'automatic', {}, 'distance', 'none');
     refreshFacetOptions({});
   };
 
@@ -420,19 +457,27 @@ const Prescriptions = () => {
   };
 
   const onCompanyChange = async (companyId) => {
+    invalidateSearch();
+    const version = searchVersion.current;
     let next = { ...filters, company_id: companyId };
+    setFilters(next);
     if (companyId) {
       next = await clearIdentityInvalidChildren({ company_id: companyId }, next, { checkProduct: true });
     }
+    if (version !== searchVersion.current) return;
     setFilters(next);
     refreshFacetOptions(next);
   };
 
   const onModelChange = async (modelId) => {
+    invalidateSearch();
+    const version = searchVersion.current;
     let next = { ...filters, lens_model_id: modelId };
+    setFilters(next);
     if (modelId) {
       next = await clearIdentityInvalidChildren({ company_id: filters.company_id, lens_model_id: modelId }, next, { checkProduct: false });
     }
+    if (version !== searchVersion.current) return;
     setFilters(next);
     refreshFacetOptions(next);
   };
@@ -440,6 +485,7 @@ const Prescriptions = () => {
   // Every other catalog-driven field: set the value and refresh what the OTHER
   // dropdowns offer next - never clear any sibling filter. No fixed order.
   const onFilterFieldChange = (key) => (value) => {
+    invalidateSearch();
     const next = { ...filters, [key]: value };
     setFilters(next);
     refreshFacetOptions(next);
@@ -471,23 +517,22 @@ const Prescriptions = () => {
     return out;
   };
 
-  const runSearch = async (record, useMode, rawFilters, usageModeOverride, technologyIntentOverride, needOverride) => {
+  const runSearch = async (record, useMode, rawFilters, usageModeOverride, needOverride) => {
     const m = useMode ?? mode;
     const um = usageModeOverride !== undefined ? usageModeOverride : usageMode;
-    const ti = technologyIntentOverride !== undefined ? technologyIntentOverride : technologyIntent;
+    const version = ++searchVersion.current;
     setSearching(true);
     setSearchData(null);
     try {
-      const payload = { mode: m, customer_need: needOverride !== undefined ? needOverride : customerNeed };
+      const payload = { mode: m, ...sellerNeedPayload(needOverride !== undefined ? needOverride : customerNeed) };
       if (m === 'targeted') payload.filters = rawFilters ?? buildFilterPayload();
       if (um) payload.use_mode = um;
-      if (ti && ti !== 'none') payload.technology_intent = ti;
       const res = await prescriptionAPI.search(record.id, payload);
-      setSearchData(res.data);
+      if (version === searchVersion.current) setSearchData(res.data);
     } catch (error) {
-      message.error(errMsg(error, 'فشل البحث'));
+      if (version === searchVersion.current) message.error(errMsg(error, 'فشل البحث'));
     } finally {
-      setSearching(false);
+      if (version === searchVersion.current) setSearching(false);
     }
   };
 
@@ -526,9 +571,7 @@ const Prescriptions = () => {
     { title: 'OD', key: 'od', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.od.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.od.best]}</Tag> },
     { title: 'OS', key: 'os', width: 70, align: 'center', render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.os.best] || 'default'}>{({ stock_egypt: 'مصر', stock_outside: 'خارج', stock_market_unknown: 'سوق؟', rx: 'RX', unknown: '؟', none: '—' })[r.os.best]}</Tag> },
     { title: 'حل الزوج', key: 'pair', width: 130, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
-    { title: 'سعر الزوج', key: 'price', width: 130, render: (_, r) => (r.pair_fulfillment.price_pair != null
-      ? `${r.pair_fulfillment.price_pair} ${r.pair_fulfillment.currency || ''} / Pair`
-      : <span style={{ color: '#cf1322' }}>{r.pair_fulfillment.status === 'eligibility_unknown' ? 'غير مؤكد (نطاق القوة)' : 'غير محسوب'}</span>) },
+    { title: 'سعر الزوج', key: 'price', width: 220, render: (_, r) => <PairPrice pf={r.pair_fulfillment} /> },
     { title: 'الدرجة', key: 'score', width: 64, render: (_, r) => r.match_score?.toFixed(1) },
   ];
 
@@ -536,6 +579,10 @@ const Prescriptions = () => {
 
   const renderResultCard = (r) => (
     <>
+      <b>{r.company_name} — {r.model_name}</b>
+      {r.seller_recommendation_reason && <div>متوافق مع وصفة العينين والاحتياج المحدد</div>}
+      <PairAnswer pf={r.pair_fulfillment} />
+      <Collapse ghost><Panel header="تفاصيل العدسة والتوافق" key="details">
       {r.seller_recommendation_reason && (
         <Alert type="info" message={r.seller_recommendation_reason} style={{ marginBottom: 10 }} />
       )}
@@ -552,8 +599,8 @@ const Prescriptions = () => {
       </Descriptions>
       <Row gutter={16}>
         <Col><PairMatrix od={r.od} os={r.os} /></Col>
-        <Col flex="auto"><PairAnswer pf={r.pair_fulfillment} /></Col>
       </Row>
+      </Panel></Collapse>
     </>
   );
 
@@ -581,12 +628,13 @@ const Prescriptions = () => {
   const sd = searchData;
   const best = sd?.best_match;
   const bestIsActionable = isActionableBestMatch(best);
+  const headline = sd ? sellerHeadline(sd) : null;
 
   return (
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <h1 style={{ margin: 0 }}>📝 الوصفات الطبية</h1>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateVisible(true)}>وصفة جديدة</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); createForm.resetFields(); setCreateVisible(true); }}>وصفة جديدة</Button>
       </Row>
       <Table dataSource={prescriptions} columns={columns} rowKey="id" loading={loading} />
 
@@ -611,13 +659,16 @@ const Prescriptions = () => {
       </Modal>
 
       {/* إنشاء وصفة - الوصفة أولاً، بيانات العميل اختيارية */}
-      <Modal title="وصفة جديدة" open={createVisible} onCancel={() => setCreateVisible(false)} footer={null} width={720}>
+      <Modal title={editing ? "تعديل الوصفة الأصلية" : "وصفة جديدة"} open={createVisible} onCancel={() => setCreateVisible(false)} footer={null} width={720}>
         <Form form={createForm} layout="vertical" onFinish={handleCreate}>
           <Card size="small" title="العين اليمنى (OD)" style={{ marginBottom: 12 }}>
             <Row gutter={12}>
               <Col span={6}><Form.Item name="od_sph" label="SPH" rules={[{ required: true }]}><InputNumber step={0.25} style={{ width: '100%' }} /></Form.Item></Col>
               <Col span={6}><Form.Item name="od_cyl" label="CYL"><InputNumber step={0.25} style={{ width: '100%' }} /></Form.Item></Col>
-              <Col span={6}><Form.Item name="od_axis" label="AXIS"><InputNumber step={1} min={0} max={180} style={{ width: '100%' }} /></Form.Item></Col>
+              <Col span={6}><Form.Item name="od_axis" label="AXIS" dependencies={['od_cyl']} rules={[({ getFieldValue }) => ({ validator(_, value) {
+                return Number(getFieldValue('od_cyl') || 0) !== 0 && (value == null || value === '')
+                  ? Promise.reject(new Error('أدخل AXIS لهذه العين عند وجود CYL غير صفر')) : Promise.resolve();
+              } })]}><InputNumber step={1} min={0} max={180} style={{ width: '100%' }} /></Form.Item></Col>
               <Col span={6}><Form.Item name="od_add" label="ADD"><InputNumber step={0.25} min={0} max={5} style={{ width: '100%' }} /></Form.Item></Col>
             </Row>
           </Card>
@@ -625,7 +676,10 @@ const Prescriptions = () => {
             <Row gutter={12}>
               <Col span={6}><Form.Item name="os_sph" label="SPH" rules={[{ required: true }]}><InputNumber step={0.25} style={{ width: '100%' }} /></Form.Item></Col>
               <Col span={6}><Form.Item name="os_cyl" label="CYL"><InputNumber step={0.25} style={{ width: '100%' }} /></Form.Item></Col>
-              <Col span={6}><Form.Item name="os_axis" label="AXIS"><InputNumber step={1} min={0} max={180} style={{ width: '100%' }} /></Form.Item></Col>
+              <Col span={6}><Form.Item name="os_axis" label="AXIS" dependencies={['os_cyl']} rules={[({ getFieldValue }) => ({ validator(_, value) {
+                return Number(getFieldValue('os_cyl') || 0) !== 0 && (value == null || value === '')
+                  ? Promise.reject(new Error('أدخل AXIS لهذه العين عند وجود CYL غير صفر')) : Promise.resolve();
+              } })]}><InputNumber step={1} min={0} max={180} style={{ width: '100%' }} /></Form.Item></Col>
               <Col span={6}><Form.Item name="os_add" label="ADD"><InputNumber step={0.25} min={0} max={5} style={{ width: '100%' }} /></Form.Item></Col>
             </Row>
           </Card>
@@ -641,7 +695,7 @@ const Prescriptions = () => {
               <Form.Item name="notes" label="ملاحظات"><Input.TextArea rows={2} /></Form.Item>
             </Panel>
           </Collapse>
-          <Button type="primary" htmlType="submit" block loading={creating} style={{ marginTop: 8 }}>حفظ وبحث</Button>
+          <Button type="primary" htmlType="submit" block loading={creating} style={{ marginTop: 8 }}>{editing ? "حفظ التعديل" : "حفظ وبحث"}</Button>
         </Form>
       </Modal>
 
@@ -649,17 +703,21 @@ const Prescriptions = () => {
       <Modal
         title={`بحث سريع${searchFor ? ` — وصفة #${searchFor.id}` : ''}`}
         open={searchVisible}
-        onCancel={() => setSearchVisible(false)}
+        onCancel={() => { invalidateSearch(); setSearchVisible(false); }}
         footer={null}
         width={1180}
       >
+        {searchFor && <Card size="small" title="الوصفة الأصلية — قبل تحويل القراءة" style={{ marginBottom: 12 }}>
+          {['od', 'os'].map((eye) => <div key={eye}>{eye.toUpperCase()}: SPH {searchFor[`${eye}_sph_original`]} / CYL {searchFor[`${eye}_cyl_original`]} × {searchFor[`${eye}_axis_original`]} — ADD {searchFor[`${eye}_add`] || 0}</div>)}
+          <Button onClick={() => openEdit(searchFor)}>تعديل الوصفة الأصلية</Button>
+        </Card>}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>نوع الاستخدام</div>
           <Radio.Group
             optionType="button"
             value={usageMode}
             disabled={searching}
-            onChange={(e) => { setUsageMode(e.target.value); setSearchData(null); }}
+            onChange={(e) => changeCriteria(setUsageMode, e.target.value)}
             options={USE_MODE_OPTIONS}
           />
         </div>
@@ -668,24 +726,11 @@ const Prescriptions = () => {
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>احتياج العميل</div>
           <Select aria-label="احتياج العميل" style={{ width: '100%', maxWidth: 450 }}
             value={customerNeed} options={CUSTOMER_NEED_OPTIONS} disabled={searching}
-            onChange={(value) => { setCustomerNeed(value); setSearchData(null); }} />
+            onChange={(value) => changeCriteria(setCustomerNeed, value)} />
           <div style={{ color: '#666', marginTop: 6 }}>نوصي فقط بما يثبته الكتالوج. عند غياب دليل كافٍ لا نعرض اختياراً تخمينياً.</div>
         </div>
 
-        <Collapse ghost style={{ marginBottom: 12 }}>
-          <Panel header="خيارات متقدمة: تقنية إضافية" key="technology">
-          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>التكنولوجيا المطلوبة</div>
-          <Radio.Group
-            optionType="button"
-            value={technologyIntent}
-            disabled={searching}
-            onChange={(e) => { setTechnologyIntent(e.target.value); setSearchData(null); }}
-            options={TECHNOLOGY_OPTIONS}
-          />
-          </Panel>
-        </Collapse>
-
-        <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} style={{ marginBottom: 12 }}>
+        <Radio.Group value={mode} onChange={(e) => changeCriteria(setMode, e.target.value)} style={{ marginBottom: 12 }}>
           <Radio value="automatic">بحث تلقائي</Radio>
           <Radio value="targeted">مرشحات متقدمة</Radio>
         </Radio.Group>
@@ -728,7 +773,7 @@ const Prescriptions = () => {
               <Col span={4}>
                 <div>السعر الأقصى</div>
                 <InputNumber style={{ width: '100%' }} placeholder="الكل"
-                  value={filters.max_price} onChange={(v) => setFilters((f) => ({ ...f, max_price: v }))} />
+                  value={filters.max_price} onChange={onFilterFieldChange('max_price')} />
               </Col>
               <Col span={6}>
                 <div>التصميم / design_variant</div>
@@ -786,10 +831,10 @@ const Prescriptions = () => {
         {!searching && sd && (
           <div style={{ marginTop: 16 }}>
             <Alert
-              type={ANSWER_TYPE[sd.availability_answer.code] || 'info'}
+              type={ANSWER_TYPE[headline.code] || 'warning'}
               showIcon
-              message={sd.availability_answer.title}
-              description={sd.availability_answer.detail}
+              message={headline.title}
+              description={headline.detail}
               style={{ marginBottom: 12 }}
             />
             {sd.derived_search_rx && (
@@ -808,6 +853,7 @@ const Prescriptions = () => {
                 البحث يستخدم وصفة الأبعد (Distance) + ADD كما هي، بدون تحويل لقوة قراءة.
               </div>
             ) : null}
+            <Collapse ghost><Panel header="إحصاءات البحث والتوصيات الفنية" key="stats">
             <Descriptions size="small" column={5} bordered style={{ marginBottom: 12 }}>
               <Descriptions.Item label="خيارات الزوج"><span style={{ whiteSpace: 'nowrap' }}>{sd.exact_total}</span></Descriptions.Item>
               <Descriptions.Item label="زوج STOCK مصر"><span style={{ whiteSpace: 'nowrap' }}>{sd.stock_egypt_count}</span></Descriptions.Item>
@@ -818,6 +864,7 @@ const Prescriptions = () => {
               <Descriptions.Item label="توصية Index" span={3}>{sd.index_recommendation}</Descriptions.Item>
               <Descriptions.Item label="توصية Aspherical" span={2}>{sd.aspherical_recommendation}</Descriptions.Item>
             </Descriptions>
+            </Panel></Collapse>
 
             {bestIsActionable && (
               <Card size="small" title="⭐ أفضل خيار للزوج" style={{ marginBottom: 12, borderColor: '#52c41a', borderWidth: 2 }}>

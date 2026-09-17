@@ -43,7 +43,7 @@ test('PIXEL provisional base price is explicitly pending confirmation', () => {
     ...base, price_pair: '10500', price_confirmation_note: 'Hi Power confirmation required',
   }} />));
   expect(container.textContent).toContain('10500');
-  expect(container.textContent).toContain('السعر بانتظار التأكيد');
+  expect(container.textContent).toContain('بانتظار تأكيد السعر');
   expect(container.textContent).toContain('Hi Power confirmation required');
   expect(container.textContent).not.toContain('11500');
 });

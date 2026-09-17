@@ -1,7 +1,7 @@
 """
 مخططات Pydantic النهائية
 """
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from decimal import Decimal
@@ -400,8 +400,20 @@ class FilterOptionsResponse(BaseModel):
 class EyePrescription(BaseModel):
     sph: float = Field(..., ge=-30.0, le=30.0)
     cyl: Optional[float] = Field(0.0, ge=-10.0, le=10.0)
-    axis: Optional[int] = Field(0, ge=0, le=180)
+    axis: Optional[int] = Field(None, ge=0, le=180)
     add: Optional[float] = Field(0.0, ge=0.0, le=5.0)
+
+    @model_validator(mode="after")
+    def require_explicit_axis(self):
+        if self.cyl and self.axis is None:
+            raise ValueError("أدخل AXIS لهذه العين عند وجود CYL غير صفر")
+        # Missing axis is harmless only for zero cylinder. Explicit 0/180
+        # remain valid under the existing transposition convention.
+        self.cyl = self.cyl or 0.0
+        self.add = self.add or 0.0
+        if self.axis is None:
+            self.axis = 0
+        return self
 
 class PrescriptionBase(BaseModel):
     customer_name: Optional[str] = None
