@@ -680,7 +680,8 @@ def _identity_key(p: models.VariantPricing):
 
 def _stock_egypt_range_unverified(
     db: Session, category: Optional[str], filters: Optional[schemas.LensFilters],
-    technology_intent: Optional[str],
+    technology_intent: Optional[str], customer_need: Optional[str],
+    selected_needs: Optional[List[str]],
 ) -> List[schemas.PerEyeProductResult]:
     """Informational-only list: STOCK rows whose market IS proven Egypt (the
     P0 confirmed business fact) but that print NO catalog PowerRange at all -
@@ -714,17 +715,24 @@ def _stock_egypt_range_unverified(
         if filters.index_value is not None:
             q = q.filter(models.LensVariant.index_value == filters.index_value)
 
+    required_caps = (technology_evidence.missing_capabilities(technology_intent, set())
+                     | set(selected_needs or []))
     out: List[schemas.PerEyeProductResult] = []
     for vp, v, m, coating in q.all():
         if market_is_egypt(vp.market_scope) is not True:
             continue
         if filters is not None and not _passes_extra_identity(v, filters):
             continue
+        company_name = m.company.name if m.company else None
+        if not customer_needs.proves(customer_need, company_name, v.treatment_band):
+            continue
         caps = technology_evidence.proven_capabilities(
-            company_name=m.company.name if m.company else None,
+            company_name=company_name,
             coating_name=(coating.name if coating else None),
-            treatment_band=v.treatment_band, color_variant=v.color_variant)
-        if not technology_evidence.satisfies(technology_intent, caps):
+            treatment_band=v.treatment_band, color_variant=v.color_variant,
+            model_name=m.name, index_value=v.index_value,
+            material=getattr(v.material, "value", v.material))
+        if not required_caps.issubset(caps):
             continue   # never claim an unproven technology for an unproven-range row
         out.append(schemas.PerEyeProductResult(
             company_id=m.company_id, company_name=(m.company.name if m.company else ""),
@@ -1297,7 +1305,9 @@ def search(db: Session, prescription: models.Prescription,
     _search_category = derived_category
     if filters is not None and filters.category is not None:
         _search_category = getattr(filters.category, "value", filters.category)
-    unverified = _stock_egypt_range_unverified(db, _search_category, filters, req.technology_intent)
+    unverified = _stock_egypt_range_unverified(
+        db, _search_category, filters, req.technology_intent,
+        req.customer_need, req.customer_needs)
 
     return schemas.ProductSearchResponse(
         prescription=schemas.PrescriptionResponse.model_validate(prescription),

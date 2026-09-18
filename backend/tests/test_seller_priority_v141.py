@@ -167,3 +167,34 @@ def test_pending_local_manufacturing_retains_location_without_recommendation(db)
     rows = [r for g in result.groups for r in g.results]
     assert len(rows) == 1 and rows[0].manufacturing_location == 'egypt'
     assert not customer_needs.actionable(rows[0])
+
+
+@pytest.mark.parametrize('needs,unproven,proven', [
+    (['impact_resistant'], ('Other', 'Ordinary 1.50', 1.50, None, None, None),
+     ('HOYA', 'Hilux PNX', 1.53, None, None, None)),
+    (['blue_light'], ('Pixel', 'Residual blue tint', 1.50, 'Astro', None, 'Blue'),
+     ('VISALL', 'BlueCut', 1.50, None, 'BlueCut', None)),
+    (['photo_gray'], ('PLATINUM', 'Fixed gray tint', 1.50, None, None, 'Gray'),
+     ('VISALL', 'Photochromic gray', 1.50, None, 'Photochromic', 'Gray')),
+    (['blue_light', 'photo_gray'],
+     ('VISALL', 'Blue only', 1.50, None, 'BlueCut', 'Gray'),
+     ('VISALL', 'Both', 1.50, None, 'Photochromic + BlueCut', 'Gray')),
+])
+def test_no_range_information_respects_customer_needs(db, needs, unproven, proven):
+    def add(row):
+        company, name, index, coating, treatment, color = row
+        _, _, variant, pricing = _stock_product(
+            db, company, name, 'single_vision', -6, 6,
+            coating_code=coating, treatment_band=treatment, color_variant=color)
+        variant.index_value = index
+        for power_range in list(pricing.power_ranges):
+            db.delete(power_range)
+
+    add(unproven)
+    add(proven)
+    db.commit()
+    result = search(db, needs)
+    assert result.exact_total == 0
+    assert [row.model_name for row in result.stock_egypt_unverified] == [proven[1]]
+    assert all(row.pair_fulfillment.price_pair is None
+               for row in result.stock_egypt_unverified)
