@@ -7,7 +7,12 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./optical_lens.db")
+# V1.4.4: normal (no-override) startup uses the certified V1.4.3 release
+# runtime DB - backend/release_runtime.db - never the historical
+# optical_lens.db (kept on disk, untouched, as the pre-release archive) and
+# never the dev-only v12_dev.db (which stays reachable only via an explicit
+# DATABASE_URL override, e.g. .claude/launch.json's "backend" dev config).
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./release_runtime.db")
 
 engine = create_engine(DATABASE_URL)
 
