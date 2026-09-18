@@ -906,6 +906,30 @@ const Prescriptions = () => {
               ))}
             </div>
 
+            {sd.stock_egypt_unverified && sd.stock_egypt_unverified.length > 0 && (
+              <>
+                <Divider />
+                <h3>⚠️ STOCK داخل مصر — نطاق القوة غير مثبت — {sd.stock_egypt_unverified.length} نتيجة</h3>
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                  message="متوفر Stock داخل مصر، لكن توافقه مع هذه الوصفة يحتاج تأكيد PowerRange"
+                  description="هذه المنتجات ليست مطابقة للوصفة، وليست توصية قابلة للتنفيذ، وسعرها المعروض هو سعر الكتالوج فقط — وليس عرض سعر مؤكد لهذه الوصفة." />
+                <ManufacturerCoverage groups={[{ results: sd.stock_egypt_unverified }]} />
+                <Table
+                  dataSource={sd.stock_egypt_unverified}
+                  rowKey={rowKey}
+                  size="small"
+                  pagination={sd.stock_egypt_unverified.length > 15 ? { pageSize: 15, showSizeChanger: false } : false}
+                  columns={[
+                    { title: 'الشركة', key: 'company', width: 115, render: (_, r) => r.company_name || '—' },
+                    { title: 'المنتج / الموديل', key: 'model', width: 185, render: (_, r) => r.model_name || '—' },
+                    { title: 'المادة / Index', key: 'idx', width: 145, render: (_, r) => indexMaterialText(r.material, r.index_value) },
+                    { title: 'التقنية / الطلاء', key: 'tech', width: 200, render: (_, r) => [r.coating_name || r.coating_code, r.treatment_band, r.color_variant].filter(Boolean).join(' / ') || '—' },
+                    { title: 'سعر الكتالوج (معلوماتي فقط)', key: 'price', width: 200, render: (_, r) => (r.catalog_price_pair != null ? `${r.catalog_price_pair} ${r.currency} / Pair` : '—') },
+                  ]}
+                />
+              </>
+            )}
+
             {sd.availability_intelligence && sd.availability_intelligence.length > 0 && (
               <>
                 <Divider />

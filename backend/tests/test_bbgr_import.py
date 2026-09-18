@@ -9,11 +9,22 @@ manufacturing-eligibility domain rule end to end on a real manufacturer: a
 manufacturing (RX) lens is made to order and is NOT dependent on a printed
 PowerRange by default - EVERY BBGR RX row (127 of 134 total) has zero
 PowerRange and is proven eligible purely by that rule, never by a
-power_eligibility flag and never by a fabricated range. BBGR's 7 STOCK rows
-also print no market (Egypt vs Out Of Egypt) and no Stock PowerRange at all
-- market_scope stays NULL (the generic stock_market_unknown representation),
-and stock compatibility is never claimed proven for any specific
-prescription.
+power_eligibility flag and never by a fabricated range - completely
+unaffected by anything below.
+
+BBGR's 7 STOCK rows: the 6-page catalog itself prints no Stock PowerRange
+anywhere. market_scope IS "Egypt" (P0 Stock-Egypt reconciliation, confirmed
+store-owner business fact: BBGR Stock is physically available inside Egypt;
+the catalog's own "Stock lenses" section - distinct from "RX S.V" - is what
+proves the STOCK/RX split, while the Egypt market itself is the confirmed
+business fact, never a catalog literal-text requirement) - never "Out Of
+Egypt", which BBGR's catalog never states either. Their PowerRange comes
+from a SEPARATE, later, user/store-owner-confirmed total-power business rule
+(total minus -6.00D, total plus +4.00D, max cylinder 2.00D - the project's
+existing G3 total-power/meridian mechanism, the same fields HOYA/PLATINUM
+already use), applied ONLY to these 7 Stock rows via
+app.p0_stock_egypt_evidence.reconcile_bbgr() - never to any BBGR RX row, and
+never widened beyond what was explicitly confirmed.
 """
 import os
 import sys
@@ -90,6 +101,16 @@ def _mk_pricing(db, variant, catalog, *, availability, price, coating=None, mark
     return vp
 
 
+def _mk_range(db, model, variant, pricing, sph_min, sph_max, cyl_min=-10.0, cyl_max=0.0,
+             total_power_min=None, total_power_max=None, max_cyl_abs=None):
+    pr = models.PowerRange(lens_model_id=model.id, variant_id=variant.id, pricing_id=pricing.id,
+                           sph_min=sph_min, sph_max=sph_max, cyl_min=cyl_min, cyl_max=cyl_max,
+                           total_power_min=total_power_min, total_power_max=total_power_max,
+                           max_cyl_abs=max_cyl_abs)
+    db.add(pr); db.commit()
+    return pr
+
+
 def _mk_presc(db, sph=0.0, cyl=0.0, name="p"):
     p = models.Prescription(
         customer_name=name, od_sph_original=sph, od_cyl_original=cyl, od_axis_original=0,
@@ -114,10 +135,19 @@ def bbgr_setup(db):
     bifocal = _mk_model(db, co, "BBGR", models.LensCategory.BIFOCAL)
     diams = _mk_coating(db, "Diam's")
 
-    # --- Page 2A: STOCK, no market stated, no Stock PowerRange ---
+    # --- Page 2A: STOCK; the 6-page catalog itself prints no SPH/CYL/total-
+    # power table anywhere for these rows. market="Egypt" per the P0 Stock-
+    # Egypt reconciliation confirmed business fact (never fabricated from
+    # catalog text, never "Out Of Egypt"). The PowerRange comes from a
+    # SEPARATE, later, user/store-owner-confirmed total-power business rule
+    # (-6.00D minus / +4.00D plus / max 2.00D CYL - the project's existing
+    # G3 total-power/meridian mechanism, same fields HOYA/PLATINUM use),
+    # applied ONLY to these 7 Stock rows, never to any BBGR RX row.
     v_156_diams = _mk_variant(db, sv, 1.56)
     p_stock = _mk_pricing(db, v_156_diams, cat, availability=models.PricingAvailability.STOCK,
-                          price=1050, coating=diams, market_scope=None)
+                          price=1050, coating=diams, market_scope="Egypt")
+    _mk_range(db, sv, v_156_diams, p_stock, sph_min=-6.0, sph_max=4.0, cyl_min=-2.0, cyl_max=0.0,
+              total_power_min=-6.0, total_power_max=4.0, max_cyl_abs=2.0)
 
     # --- Page 2B: RX S.V. - plain 1.59 / 1.59 Polarized / 1.59 TR7 (identity safety) ---
     v_159 = _mk_variant(db, sv, 1.59)
@@ -188,41 +218,52 @@ def test_2_bbgr_rx_row_returns_printed_price(db, bbgr_setup):
     assert resp.best_match.pair_fulfillment.price_pair == Decimal("6200.00")
 
 
-# 3. Stock + zero PowerRange is not claimed prescription-proven.
-def test_3_bbgr_stock_no_range_not_proven(db, bbgr_setup):
+# 3. BBGR Stock's confirmed total-power G3 range (-6.00D/+4.00D/max 2.00D
+# CYL) correctly proves eligibility for a Rx inside the envelope, using the
+# project's REAL meridian check (never a naive SPH -6..+4 box): SPH -2.00 /
+# CYL -1.00 has meridians {-2.00, -3.00}, both inside [-6.00, +4.00], with
+# abs(CYL)=1.00 <= 2.00 -> eligible. A Rx genuinely OUTSIDE the confirmed
+# envelope (SPH -8.00, meridian -8.00 < -6.00) stays ineligible - the rule
+# is never invented wider than what was confirmed.
+def test_3_bbgr_stock_total_power_range_proves_eligibility_inside_envelope(db, bbgr_setup):
     p = bbgr_setup["p_stock"]
-    assert list(p.power_ranges) == []
-    presc = _mk_presc(db, -2.0, -1.0, name="t3")
-    status = product_search._row_eye_status(p, presc, "od")
-    assert status == "ineligible"
+    assert len(list(p.power_ranges)) == 1
+    presc_inside = _mk_presc(db, -2.0, -1.0, name="t3-inside")
+    assert product_search._row_eye_status(p, presc_inside, "od") == "eligible"
+    presc_outside = _mk_presc(db, -8.0, 0.0, name="t3-outside")
+    assert product_search._row_eye_status(p, presc_outside, "od") == "ineligible"
 
 
-# 9. BBGR Stock row can display price/catalog product but does not falsely
-# claim prescription stock compatibility.
-def test_9_bbgr_stock_row_discoverable_not_falsely_proven(db, bbgr_setup):
+# 9. BBGR Stock row is now a genuine confirmed prescription match (its
+# printed price becomes the proven pair price) once the Rx falls inside the
+# confirmed total-power envelope - no longer merely "discoverable".
+def test_9_bbgr_stock_row_confirmed_match_inside_envelope(db, bbgr_setup):
     sv = bbgr_setup["sv"]
     presc = _mk_presc(db, -2.0, -1.0, name="t9")
     resp = _targeted(db, presc, lens_model_id=sv.id, index_value=1.56, coating="Diam's")
-    assert resp.exact_total > 0   # discoverable
+    assert resp.exact_total > 0
     found = [r for g in resp.groups for r in g.results if r.coating_code == "Diam's"]
     assert found
     r = found[0]
-    assert r.pair_fulfillment.status != "stock_egypt"
-    assert r.pair_fulfillment.status != "stock_out_of_egypt"
-    assert r.pair_fulfillment.price_pair is None   # never a falsely-proven pair price
+    assert r.pair_fulfillment.status == "stock_egypt"
+    assert r.pair_fulfillment.price_pair == Decimal("1050.00")
     # the row's OWN catalog price is intact in the DB, never lost or zeroed
     p = db.query(models.VariantPricing).filter(
         models.VariantPricing.variant_id == bbgr_setup["v_156_diams"].id).first()
     assert p.price_pair == Decimal("1050.00")
 
 
-# BBGR stock market representation: NULL market_scope, never Egypt/Out Of Egypt.
-def test_bbgr_stock_market_unknown_never_egypt_or_ooe(db, bbgr_setup):
+# P0 Stock-Egypt reconciliation + BBGR total-power fix: BBGR stock market IS
+# "Egypt" (confirmed store-owner business fact), never "Out Of Egypt", AND
+# its confirmed total-power range now proves eligibility for a Rx inside the
+# envelope - the row routes AND matches as stock_egypt.
+def test_bbgr_stock_routes_and_matches_egypt_inside_envelope(db, bbgr_setup):
     p = bbgr_setup["p_stock"]
-    assert p.market_scope is None
+    assert p.market_scope == "Egypt"
+    assert product_search._row_route(p) == "stock_egypt"
     presc = _mk_presc(db, -2.0, -1.0, name="market")
     resp = _targeted(db, presc, lens_model_id=bbgr_setup["sv"].id, index_value=1.56, coating="Diam's")
-    assert resp.availability_answer.code not in ("stock_egypt", "stock_out_of_egypt")
+    assert resp.availability_answer.code == "stock_egypt"
 
 
 # 6/L. Identity safety: 1.59 / 1.59 Polarized / 1.59 TR7 are three distinct

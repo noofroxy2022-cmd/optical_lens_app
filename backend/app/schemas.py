@@ -738,6 +738,13 @@ class PerEyeProductResult(BaseModel):
     reason: str
     seller_recommendation_reason: Optional[str] = None
     manufacturing_location: Optional[Literal["egypt"]] = None
+    # P0: the row's OWN catalog price, shown ONLY as informational detail for
+    # a stock_egypt_range_unverified entry (ProductSearchResponse.
+    # stock_egypt_unverified) - deliberately separate from
+    # pair_fulfillment.price_pair, which stays None/provenance="none" for
+    # these rows since their prescription compatibility is never proven.
+    # None for every ordinary (proven) result.
+    catalog_price_pair: Optional[Decimal] = None
     od: EyeAvailability
     os: EyeAvailability
     pair_fulfillment: PairFulfillment
@@ -799,6 +806,13 @@ class ProductSearchResponse(BaseModel):
     exact_total: int
     best_match: Optional[PerEyeProductResult] = None
     groups: List[LensSearchGroup] = []
+    # P0: Stock rows whose market IS proven Egypt but that print NO catalog
+    # PowerRange at all (e.g. SEIKO/BBGR today - generic, not hardcoded to
+    # any manufacturer). Entirely separate from exact_total/groups/
+    # best_match - never a prescription match, never actionable, never a
+    # confirmed price for this Rx. Each entry's own catalog price is still
+    # shown via PerEyeProductResult.catalog_price_pair for transparency.
+    stock_egypt_unverified: List[PerEyeProductResult] = []
     stock_egypt_count: int = 0                   # full-pair STOCK Egypt
     stock_out_of_egypt_count: int = 0            # full-pair STOCK Out Of Egypt
     stock_market_unknown_count: int = 0          # full-pair STOCK, catalog market unspecified

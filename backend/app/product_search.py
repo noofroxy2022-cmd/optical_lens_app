@@ -678,6 +678,75 @@ def _identity_key(p: models.VariantPricing):
             p.coating_id, p.currency)
 
 
+def _stock_egypt_range_unverified(
+    db: Session, category: Optional[str], filters: Optional[schemas.LensFilters],
+    technology_intent: Optional[str],
+) -> List[schemas.PerEyeProductResult]:
+    """Informational-only list: STOCK rows whose market IS proven Egypt (the
+    P0 confirmed business fact) but that print NO catalog PowerRange at all -
+    so prescription compatibility can never be proven either way. Generic:
+    ANY manufacturer's Stock-Egypt row with zero PowerRange qualifies, not a
+    hardcoded SEIKO/BBGR list. Deliberately entirely separate from `options`/
+    `exact`/`groups`/`best_match` - never counted as a match, never
+    actionable, never a confirmed price for this prescription. Customer-need/
+    technology_intent still gate this list exactly like the main pipeline -
+    an unproven-range row is never allowed to claim an unproven technology
+    capability either."""
+    q = (
+        db.query(models.VariantPricing, models.LensVariant, models.LensModel, models.Coating)
+        .join(models.LensVariant, models.LensVariant.id == models.VariantPricing.variant_id)
+        .join(models.LensModel, models.LensModel.id == models.LensVariant.lens_model_id)
+        .outerjoin(models.Coating, models.Coating.id == models.VariantPricing.coating_id)
+        .filter(
+            models.VariantPricing.availability == _STOCK,
+            models.VariantPricing.effective_to.is_(None),
+            models.LensModel.is_active.is_(True),
+            models.LensModel.is_deleted.is_(False),
+            models.LensVariant.is_active.is_(True),
+            ~models.VariantPricing.power_ranges.any(),
+        )
+    )
+    if category:
+        q = q.filter(models.LensModel.category == category)
+    if filters is not None:
+        if filters.company_id is not None:
+            q = q.filter(models.LensModel.company_id == filters.company_id)
+        if filters.index_value is not None:
+            q = q.filter(models.LensVariant.index_value == filters.index_value)
+
+    out: List[schemas.PerEyeProductResult] = []
+    for vp, v, m, coating in q.all():
+        if market_is_egypt(vp.market_scope) is not True:
+            continue
+        if filters is not None and not _passes_extra_identity(v, filters):
+            continue
+        caps = technology_evidence.proven_capabilities(
+            company_name=m.company.name if m.company else None,
+            coating_name=(coating.name if coating else None),
+            treatment_band=v.treatment_band, color_variant=v.color_variant)
+        if not technology_evidence.satisfies(technology_intent, caps):
+            continue   # never claim an unproven technology for an unproven-range row
+        out.append(schemas.PerEyeProductResult(
+            company_id=m.company_id, company_name=(m.company.name if m.company else ""),
+            lens_model_id=m.id, model_name=m.name,
+            category=getattr(m.category, "value", m.category),
+            variant_id=v.id, index_value=v.index_value,
+            material=getattr(v.material, "value", v.material),
+            design_variant=v.design_variant, color_variant=v.color_variant,
+            design_tier=v.design_tier, treatment_band=v.treatment_band,
+            coating_id=vp.coating_id, coating_code=(coating.code if coating else None),
+            coating_name=(coating.name if coating else None),
+            currency=vp.currency, match_score=0,
+            reason="Stock داخل مصر - نطاق القوة غير مثبت في الكتالوج",
+            catalog_price_pair=vp.price_pair,
+            od=schemas.EyeAvailability(), os=schemas.EyeAvailability(),
+            pair_fulfillment=schemas.PairFulfillment(
+                status="stock_egypt_range_unverified", price_pair=None, currency=vp.currency,
+                source_pricing_ids=[vp.id], provenance="none", needs_review=True,
+                reason="متوفر Stock داخل مصر، لكن توافقه مع هذه الوصفة يحتاج تأكيد PowerRange")))
+    return out
+
+
 def _per_eye_results(db: Session, prescription: models.Prescription,
                      filters: Optional[schemas.LensFilters], req: schemas.ProductSearchRequest,
                      rec_index: float, need_asph: bool,
@@ -1225,6 +1294,11 @@ def search(db: Session, prescription: models.Prescription,
     for r in ordered:
         counts[_STATUS_TO_GROUP[r.pair_fulfillment.status]] += 1
 
+    _search_category = derived_category
+    if filters is not None and filters.category is not None:
+        _search_category = getattr(filters.category, "value", filters.category)
+    unverified = _stock_egypt_range_unverified(db, _search_category, filters, req.technology_intent)
+
     return schemas.ProductSearchResponse(
         prescription=schemas.PrescriptionResponse.model_validate(prescription),
         mode="targeted" if targeted else "automatic",
@@ -1244,4 +1318,5 @@ def search(db: Session, prescription: models.Prescription,
         eligibility_unknown_count=counts["eligibility_unknown"],
         rx_count=counts["rx"], split_count=counts["split"],
         alternatives=alternatives, alternatives_note=alt_note,
-        availability_intelligence=intel, availability_intelligence_note=intel_note)
+        availability_intelligence=intel, availability_intelligence_note=intel_note,
+        stock_egypt_unverified=unverified)
