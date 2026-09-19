@@ -360,10 +360,16 @@ def scope_setup(db):
             v.design_variant = "New Bifocal (Line-Free)"
     db.commit()
 
-    _build_matrix(db, co, cat, "SCOPE Office", models.LensCategory.SINGLE_VISION, OFFICE_ROWS,
+    # Occupational/Office (Special Lenses architecture, 2026-09-19): SCOPE
+    # Office Doctor/Officestar are the owner-confirmed Occupational/Office
+    # subtype - see app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS.
+    _build_matrix(db, co, cat, "SCOPE Office", models.LensCategory.OFFICE, OFFICE_ROWS,
                   ["Doctor", "Officestar"], OFFICE_PRICES, registry=reg)
 
-    _build_matrix(db, co, cat, "SCOPE Young", models.LensCategory.SINGLE_VISION, ROW26,
+    # Young/Anti-Fatigue (Special Lenses architecture, 2026-09-19): SCOPE
+    # Young/Shabab is the owner-confirmed Young/Anti-Fatigue subtype - see
+    # app/catalog_corrections.py ANTI_FATIGUE_MODELS.
+    _build_matrix(db, co, cat, "SCOPE Young", models.LensCategory.ANTI_FATIGUE, ROW26,
                   ["Shabab"], YOUNG_PRICES, registry=reg)
 
     _build_matrix(db, co, cat, "SCOPE Single Vision", models.LensCategory.SINGLE_VISION, ROW26,
@@ -384,7 +390,10 @@ def scope_setup(db):
                   {"Diving (Progressive)": {"D1": 6000}}, registry=reg)
 
     myo_before = len(reg)
-    _build_matrix(db, co, cat, "SCOPE Myoblock", models.LensCategory.SINGLE_VISION, MYOBLOCK_ROWS,
+    # Myopia Control (Special Lenses architecture, 2026-09-19): SCOPE
+    # Myoblock/Metavision is the owner-confirmed Myopia Control subtype - see
+    # app/catalog_corrections.py MYOPIA_CONTROL_MODELS.
+    _build_matrix(db, co, cat, "SCOPE Myoblock", models.LensCategory.MYOPIA_CONTROL, MYOBLOCK_ROWS,
                   ["Metavision (Myoblock)"], MYOBLOCK_PRICES, registry=reg)
     for (section, col, row_key), (lm, v, vp) in reg.items():
         if section == "SCOPE Myoblock":

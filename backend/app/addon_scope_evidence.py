@@ -3,9 +3,10 @@
 These are applicability keys, NOT price-unit evidence. No database reads,
 substring matching, inferred colour meanings, or prerequisite composition.
 None is an explicitly absent field in a catalog identity, never a wildcard.
-HOYA's importer stores occupational/bifocal models as progressive and leaves
-several commercial subdesigns unexpanded. Preserve those exact model identities;
-do not invent new subdesign aliases or change catalog data here.
+HOYA's importer used to store occupational/bifocal models as progressive (now
+corrected to office/bifocal respectively, per app/catalog_corrections.py) and
+leaves several commercial subdesigns unexpanded. Preserve those exact model
+identities; do not invent new subdesign aliases or change catalog data here.
 """
 
 
@@ -52,21 +53,31 @@ def _catalog_identities():
             hoya(name, category, index, base)
             if model in ("Balansis", "iD LifeStyle", "iD MyStyle", "iD MySelf") and index != 1.74:
                 hoya(name, category, index, base, "Sensity 2")
-    # p.26 occupational; p.27 bifocal. Category below is the current importer
-    # representation, not a claim that bifocals are optically progressive.
+    # p.26 occupational; p.27 bifocal. Category-classification review
+    # (2026-09-19, Special Lenses architecture): occupational is now the
+    # real, already-supported "office" identity (models.LensCategory.OFFICE)
+    # - see app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS - not the
+    # stale "progressive" importer quirk any more.
     for model, indexes, coating in (
         ("Supereader B", (1.5, 1.6), aqua),
         ("WorkSmart", (1.5, 1.53, 1.6), super_hv),
         ("iD WorkStyle", (1.5, 1.53, 1.6), uv),
     ):
         for index in indexes:
-            hoya(model + (" PNX" if index == 1.53 else ""), "progressive", index, coating)
+            hoya(model + (" PNX" if index == 1.53 else ""), "office", index, coating)
+    # Category-classification review (2026-09-19): Hoya_Price_List_2025_
+    # Updated.pdf p.27 explicitly headers this "Bi-Focal Lenses (RX)" -
+    # never "Progressive Lenses (RX)" - and models.LensCategory.BIFOCAL
+    # already exists and is used by 4 other manufacturers, so "progressive"
+    # here (unlike the Occupational group above, which has no working
+    # alternative category wired into product_search yet) was corrected to
+    # the real, already-supported "bifocal" identity.
     for design, index, color in (("Flat Top S28", 1.5, None),
                                  ("Curve Top C28", 1.5, None),
                                  ("Curve Top C28", 1.6, None),
                                  ("Flat Top", 1.5, "Sensity 2"),
                                  ("Curve Top", 1.5, "Sensity 2")):
-        hoya("Bi-Focal", "progressive", index, aqua, color, design)
+        hoya("Bi-Focal", "bifocal", index, aqua, color, design)
 
     # pixel_phase4_test.pdf p.16 only. G/B strings are identity keys ONLY.
     pixel_bases = {

@@ -31,6 +31,13 @@ class LensCategory(str, PyEnum):
     PROGRESSIVE = "progressive"
     OFFICE = "office"
     DIGITAL = "digital"
+    # Special Lenses architecture (owner-confirmed, 2026-09-19): proven
+    # Special Lenses subtypes, same pattern as OFFICE - a seller/search
+    # grouping ("Special Lenses") over real, distinct optical categories,
+    # never a single catch-all "SPECIAL" value. See app/catalog_corrections.py
+    # for the exact per-manufacturer catalog evidence.
+    ANTI_FATIGUE = "anti_fatigue"
+    MYOPIA_CONTROL = "myopia_control"
 
 class MaterialType(str, PyEnum):
     CR39 = "CR39"

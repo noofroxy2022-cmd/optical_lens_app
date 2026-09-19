@@ -1070,6 +1070,15 @@ _USE_MODE_CATEGORY = {
     "reading": "single_vision",
     "bifocal": "bifocal",
     "progressive": "progressive",
+    # Special Lenses architecture (owner-confirmed, 2026-09-19): each proven
+    # Special Lenses subtype gets its own use_mode -> category entry here.
+    # "Special Lenses" itself is a seller/search grouping, never a
+    # LensCategory - see catalog_corrections.py's OCCUPATIONAL_OFFICE_MODELS/
+    # ANTI_FATIGUE_MODELS/MYOPIA_CONTROL_MODELS docstrings. A future proven
+    # subtype adds one more entry here, never a redesign of this mechanism.
+    "office": "office",
+    "anti_fatigue": "anti_fatigue",
+    "myopia_control": "myopia_control",
 }
 
 
@@ -1137,11 +1146,29 @@ def search(db: Session, prescription: models.Prescription,
         if use_mode not in _USE_MODE_CATEGORY:
             return _validation_response(prescription, req, use_mode,
                 "نوع استخدام غير معروف",
-                f"القيمة '{use_mode}' غير معروفة. استخدم distance / reading / bifocal / progressive.")
+                f"القيمة '{use_mode}' غير معروفة. استخدم distance / reading / bifocal / progressive / "
+                "office / anti_fatigue / myopia_control.")
         derived_category = _USE_MODE_CATEGORY[use_mode]
 
         if use_mode == "distance":
             # ADD must NEVER affect Single Vision Distance eligibility.
+            search_prescription = _SearchRx(prescription, od_add=0.0, os_add=0.0)
+        elif use_mode in ("office", "anti_fatigue", "myopia_control"):
+            # Special Lenses subtypes (Special Lenses architecture,
+            # 2026-09-19): a DISTINCT branch per proven subtype, never folded
+            # into the bifocal/progressive "Distance Rx + ADD, ADD required"
+            # rule below. None of the catalog-proven products behind these
+            # three subtypes carry a printed ADD-power corridor (see
+            # app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS /
+            # ANTI_FATIGUE_MODELS / MYOPIA_CONTROL_MODELS for the exact
+            # per-manufacturer catalog evidence), so ADD is forced to 0 here,
+            # same mechanism/reason as Single Vision Distance above: an
+            # unrelated ADD already on the prescription must never affect
+            # eligibility for a subtype whose catalog proves no ADD range.
+            # Never infer an ADD range that isn't printed - if a future
+            # proven product for one of these subtypes DOES carry a real
+            # ADD/boost corridor, that product needs its own branch, not a
+            # silent change to this shared one.
             search_prescription = _SearchRx(prescription, od_add=0.0, os_add=0.0)
         elif use_mode == "reading":
             if _add_missing(prescription.od_add) or _add_missing(prescription.os_add):

@@ -23,7 +23,7 @@ checks the RAW/current value still equals the audit-proven wrong one before
 firing), so re-running ingestion any number of times is safe.
 """
 from decimal import Decimal
-from typing import Optional, Tuple
+from typing import Dict, FrozenSet, Optional, Tuple
 
 from app import models
 
@@ -63,6 +63,130 @@ def _corrected_material(company_name: Optional[str], model_name: Optional[str],
     if company_name == "HOYA" and (model_name or "").strip().lower() == "mineral":
         return models.MaterialType.GLASS
     return material_enum
+
+
+# Special Lenses architecture (owner-confirmed, 2026-09-19): the seller/search
+# top-level grouping "Special Lenses" is NOT a new LensCategory - it is a
+# seller/search grouping over catalog-proven subtype categories that already
+# fit the existing schema. "Occupational / Office" is the first proven
+# subtype family; models.LensCategory.OFFICE already existed in the schema
+# (models.py, unused until now) and required no migration. Future proven
+# families (Young/Anti-Fatigue, Myopia Control, ...) get their own new
+# LensCategory member the same way, never a schema redesign.
+OCCUPATIONAL_OFFICE_MODELS: Dict[str, FrozenSet[str]] = {
+    # Hoya_Price_List_2025_Updated.pdf pp.25-26, headed "Occupational Lenses
+    # (RX)" - never "Progressive Lenses (RX)". Currently stored as
+    # category=PROGRESSIVE (a known pre-existing importer quirk, see
+    # addon_scope_evidence.py / progressive_add_evidence.py's own
+    # excluded-model lists, which document this exact gap).
+    "HOYA": frozenset({
+        "Supereader B", "WorkSmart", "WorkSmart PNX",
+        "iD WorkStyle", "iD WorkStyle PNX",
+    }),
+    # SCOPE catalog: "Office Design / Indoor" section with explicit near/
+    # intermediate working-distance descriptions. Currently stored as
+    # category=SINGLE_VISION.
+    "SCOPE": frozenset({
+        "SCOPE Office Doctor", "SCOPE Office Officestar",
+    }),
+}
+
+# SCOPE.pdf p.9 "Young Lenses / عدسات ضد الإجهاد للشباب": explicit catalog
+# text - designed for ages 18-40, relieves strain/headache from heavy
+# electronic-device use and prolonged reading; improves reading/intermediate
+# vision (especially the lower lens area) while remaining usable at distance/
+# driving. Currently stored as category=SINGLE_VISION. Strict scope: ONLY
+# this proven SCOPE product - PLATINUM "Young" (bare price table, no catalog
+# description) and BBGR "Anti-Fatigue"/"Extenso" (bare price table, no
+# catalog description; owner already confirmed BBGR identity is not to be
+# changed) are deliberately excluded for insufficient evidence, and ZEISS
+# "SmartLife Young" is deliberately excluded because ZEISS's OWN catalog
+# heading classifies it as Single Vision, not a Special Lenses subtype.
+ANTI_FATIGUE_MODELS: Dict[str, FrozenSet[str]] = {
+    "SCOPE": frozenset({"SCOPE Young Shabab"}),
+}
+
+# Owner clarification (2026-09-19): "Myopia Control" is ONE generic,
+# functional Special Lenses subtype - never a manufacturer/product name.
+# Different manufacturers use different commercial names for products
+# serving this same function (SCOPE "Myoblock/Metavision", ZEISS "MyoCare" /
+# "MyoCare S" / "MyoActive", ...); all proven members map to the SAME
+# models.LensCategory.MYOPIA_CONTROL / use_mode="myopia_control" - never a
+# per-product category such as a hypothetical "MYOBLOCK" or "MYOCARE". This
+# dict is exactly the extension point for a later manufacturer: add one more
+# `"COMPANY": frozenset({"Exact Product Name", ...})` entry once THAT
+# product's own catalog evidence (or explicit owner confirmation) proves it
+# belongs here - never a substring/name-pattern match on "Myo" or similar,
+# and never a seller-UI or category redesign.
+#
+# SCOPE.pdf pp.13-15 "Myoblock Lenses / عدسات مايوبلوك لإيقاف تدهور النظر
+# عند الأطفال" ("...to stop vision deterioration in children") and "myoblock
+# reduces the myopia progression": explicit myopia-control purpose. Printed
+# power range (Sph -0.50 to -10.00, Cyl to -4.00) is representable via the
+# existing PowerRange sph/cyl fields - no new eligibility mechanism. Currently
+# stored as category=SINGLE_VISION. Strict scope for THIS batch: ONLY this
+# proven, already-ingested SCOPE product. PLATINUM "MYO D" (bare price table,
+# no catalog description - open owner question, not resolved) is deliberately
+# excluded. ZEISS MyoCare/MyoCare S/MyoActive are PROVEN members of this same
+# functional Myopia Control subtype (per the owner's clarification above) but
+# are NOT currently ingested at all - a separate ingestion task, not a
+# category question - and MyoActive's own catalog prints "Available from 1st
+# October 2026", after the current project date; do not add them here until
+# that separate ingestion happens.
+MYOPIA_CONTROL_MODELS: Dict[str, FrozenSet[str]] = {
+    "SCOPE": frozenset({"SCOPE Myoblock Metavision (Myoblock)"}),
+}
+
+
+def corrected_category(company_name: Optional[str], model_name: Optional[str],
+                        category_enum: models.LensCategory) -> models.LensCategory:
+    """HOYA "Bi-Focal" (category-classification review, 2026-09-19).
+
+    Hoya_Price_List_2025_Updated.pdf p.27 explicitly headers this product
+    "Bi-Focal Lenses (RX)" - never "Progressive Lenses (RX)". The prior
+    category=PROGRESSIVE was already self-documented as wrong, not
+    intentional, in addon_scope_evidence.py's own comment ("Category below
+    is the current importer representation, not a claim that bifocals are
+    optically progressive"). models.LensCategory.BIFOCAL already exists and
+    is actively used by 4 other manufacturers (Pixel, BBGR, PLATINUM, SCOPE)
+    - not a novel schema usage.
+
+    Deliberately narrow: matches ONLY this one HOYA model by exact name.
+    Never touches HOYA's genuine "...Progressive Lenses (RX)" families
+    (Amplitude Plus, Balansis, Daynamic, iD LifeStyle/MyStyle/MySelf), and
+    never touches "Mineral" (left for separate review: the catalog proves it
+    mixes a plain and a genuinely-progressive sub-line under one model, a
+    distinct problem). Idempotent: a row already BIFOCAL is returned
+    unchanged.
+
+    Occupational/Office (Special Lenses architecture, 2026-09-19): HOYA's
+    Supereader B / WorkSmart(+PNX) / iD WorkStyle(+PNX) and SCOPE's Office
+    Doctor / Office Officestar are the SAME owner-confirmed "Occupational /
+    Office" Special Lenses subtype (see OCCUPATIONAL_OFFICE_MODELS above for
+    the exact catalog citations). Deliberately does NOT touch: ZEISS (catalog
+    has an Office Lenses section but no rows are currently ingested), PLATINUM
+    "Office" (weaker evidence per the 2026-09-19 audit), or BBGR "Anti-Fatigue"
+    (no preserved per-product identity in the DB). Idempotent: a row already
+    OFFICE is returned unchanged.
+
+    Young/Anti-Fatigue and Myopia Control (Special Lenses architecture,
+    2026-09-19): SCOPE's Young/Shabab and Myoblock/Metavision are each their
+    own proven, distinct Special Lenses subtype (see ANTI_FATIGUE_MODELS /
+    MYOPIA_CONTROL_MODELS above for the exact catalog citations) - never
+    folded into OFFICE or into each other, since each is a materially
+    different catalog-proven purpose. Idempotent: a row already in its target
+    category is returned unchanged.
+    """
+    if (company_name == "HOYA" and (model_name or "").strip().lower() == "bi-focal"
+            and category_enum == models.LensCategory.PROGRESSIVE):
+        return models.LensCategory.BIFOCAL
+    if model_name in OCCUPATIONAL_OFFICE_MODELS.get(company_name, frozenset()):
+        return models.LensCategory.OFFICE
+    if model_name in ANTI_FATIGUE_MODELS.get(company_name, frozenset()):
+        return models.LensCategory.ANTI_FATIGUE
+    if model_name in MYOPIA_CONTROL_MODELS.get(company_name, frozenset()):
+        return models.LensCategory.MYOPIA_CONTROL
+    return category_enum
 
 
 _PIXEL_ASPHERICAL_INDEXES = frozenset({1.56, 1.61, 1.67})

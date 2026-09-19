@@ -48,10 +48,14 @@ POSITIVE = [
     identity("HOYA", model_name="Balansis PNX", category="progressive", index_value=1.53,
              coating_name="Super Hi Vision", color_variant="Sensity 2"),
     *[identity("HOYA", model_name=model, category="progressive", coating_name="Long Life UV Control")
-      for model in ("iD LifeStyle", "iD MyStyle", "iD MySelf", "iD WorkStyle")],
-    identity("HOYA", model_name="WorkSmart", category="progressive", coating_name="Super Hi Vision"),
-    identity("HOYA", model_name="Supereader B", category="progressive"),
-    identity("HOYA", model_name="Bi-Focal", category="progressive", design_variant="Curve Top C28"),
+      for model in ("iD LifeStyle", "iD MyStyle", "iD MySelf")],
+    # Occupational/Office (Special Lenses architecture, 2026-09-19): these
+    # three were reclassified progressive -> office; see
+    # app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS.
+    identity("HOYA", model_name="iD WorkStyle", category="office", coating_name="Long Life UV Control"),
+    identity("HOYA", model_name="WorkSmart", category="office", coating_name="Super Hi Vision"),
+    identity("HOYA", model_name="Supereader B", category="office"),
+    identity("HOYA", model_name="Bi-Focal", category="bifocal", design_variant="Curve Top C28"),
     identity("Pixel"),
     identity("Pixel", index_value=1.74, color_variant="Transition/G/B", design_variant="High Definition"),
     identity("Maxxee"),
@@ -72,7 +76,14 @@ def test_proven_identity_reaches_only_pending_seller_completion(db, args):
     assert offer is not None and offer.unit_status == te.UNIT_UNRESOLVED
     make_product(db, args)
     p = _mk_presc(db, -2, -2, od_add=2, os_add=2)
-    response = seller(db, p, mode="progressive" if args["category"] == "progressive" else "distance")
+    # Category-classification review (2026-09-19): this used to assume only
+    # "progressive" or "distance" ever appeared here - true before HOYA
+    # Bi-Focal's category correction (progressive -> bifocal) and the
+    # Occupational/Office correction (progressive -> office) added the
+    # "bifocal" and "office" entries to POSITIVE above.
+    _mode = {"progressive": "progressive", "bifocal": "bifocal",
+             "office": "office"}.get(args["category"], "distance")
+    response = seller(db, p, mode=_mode)
     assert response.exact_total == 1
     assert response.best_match is None and not response.seller_alternatives
     r = results(response)[0]

@@ -834,6 +834,7 @@ def _prepare_extraction_row(ext) -> dict:
     company = ext.catalog.company if ext.catalog is not None else None
     company_name = company.name if company is not None else None
     coating_name = (ext.coating.code if ext.coating_id and ext.coating else None) or ext.extracted_coating
+    category_enum = catalog_corrections.corrected_category(company_name, name, category_enum)
     material_enum, design_type_enum, is_asph = catalog_corrections.corrected_identity(
         company_name=company_name, model_name=name, category=category_enum.value,
         index_value=idx, design_variant=design_variant,
@@ -1279,7 +1280,8 @@ def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
     # Catalog Truth Audit (2026-09-18) Section A corrections (A1/A2/A3/A6) -
     # same single centralized source as _prepare_extraction_row, applied here
     # too so this identity match keeps finding the (also-corrected) existing
-    # LensVariant rather than a stale pre-correction identity.
+    # LensVariant/LensModel rather than a stale pre-correction identity.
+    category_enum = catalog_corrections.corrected_category(company.name, name, category_enum)
     material_enum, design_type_enum, is_asph = catalog_corrections.corrected_identity(
         company_name=company.name, model_name=name, category=category_enum.value,
         index_value=idx, design_variant=design_variant,

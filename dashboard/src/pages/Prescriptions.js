@@ -171,6 +171,8 @@ const CATEGORY_LABELS = {
   bifocal: 'Bifocal',
   office: 'Office',
   digital: 'Digital',
+  anti_fatigue: 'Anti-Fatigue',
+  myopia_control: 'Myopia Control',
 };
 
 const ANSWER_TYPE = {
@@ -181,12 +183,28 @@ const ANSWER_TYPE = {
 // V1.2 core-workflow: customer-facing use-mode / technology-intent labels.
 // Values sent to the backend are the canonical English tokens (see
 // backend/app/technology_evidence.py); labels are Arabic display text only.
-const USE_MODE_OPTIONS = [
+//
+// Special Lenses (owner-confirmed, 2026-09-19): the seller-facing top level
+// is exactly Single Vision / Bifocal / Progressive / Special Lenses - no
+// subtype (Occupational/Office, Young/Anti-Fatigue, Myopia Control, ...) is
+// ever an independent top-level peer; each is an entry in
+// SPECIAL_SUBTYPE_OPTIONS below. 'special' is a pure UI grouping value - it
+// is NEVER sent to the backend; selecting a subtype always sends that
+// subtype's own already-working use_mode. A future catalog-proven subtype is
+// one more entry in SPECIAL_SUBTYPE_OPTIONS, never a form redesign.
+const TOP_LEVEL_USE_MODE_OPTIONS = [
   { value: 'distance', label: 'مسافات' },
   { value: 'reading', label: 'قراءة — عدسة أحادية' },
   { value: 'bifocal', label: 'Bifocal' },
   { value: 'progressive', label: 'Progressive' },
+  { value: 'special', label: 'Special Lenses' },
 ];
+const SPECIAL_SUBTYPE_OPTIONS = [
+  { value: 'office', label: 'Occupational / Office' },
+  { value: 'anti_fatigue', label: 'Young / Anti-Fatigue' },
+  { value: 'myopia_control', label: 'Myopia Control' },
+];
+const SPECIAL_SUBTYPE_VALUES = SPECIAL_SUBTYPE_OPTIONS.map((o) => o.value);
 const CUSTOMER_NEED_OPTIONS = [
   { value: 'blue_light', label: 'حماية من الضوء الأزرق' },
   { value: 'photo_gray', label: 'Photo Gray' },
@@ -250,7 +268,11 @@ export const sellerRowOrder = (a, b) => {
 };
 
 export const sellerSections = (data) => {
-  const multi = ['progressive', 'bifocal'].includes(data.use_mode);
+  // Special Lenses subtypes (office/anti_fatigue/myopia_control, 2026-09-19)
+  // are each proven RX-only just like bifocal/progressive - see
+  // app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS/
+  // ANTI_FATIGUE_MODELS/MYOPIA_CONTROL_MODELS.
+  const multi = ['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'].includes(data.use_mode);
   const groups = data.groups || [];
   const labels = { stock_egypt: 'STOCK داخل مصر', stock_out_of_egypt: 'STOCK خارج مصر',
     rx: 'RX / تصنيع', stock_market_unknown: 'STOCK — مكان التوفر غير محدد' };
@@ -741,11 +763,24 @@ const Prescriptions = () => {
           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>نوع الاستخدام</div>
           <Radio.Group
             optionType="button"
-            value={usageMode}
+            value={SPECIAL_SUBTYPE_VALUES.includes(usageMode) ? 'special' : usageMode}
             disabled={searching}
-            onChange={(e) => changeCriteria(setUsageMode, e.target.value)}
-            options={USE_MODE_OPTIONS}
+            onChange={(e) => changeCriteria(setUsageMode,
+              e.target.value === 'special' ? SPECIAL_SUBTYPE_OPTIONS[0].value : e.target.value)}
+            options={TOP_LEVEL_USE_MODE_OPTIONS}
           />
+          {SPECIAL_SUBTYPE_VALUES.includes(usageMode) && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 'bold', marginBottom: 4 }}>نوع العدسة الخاصة</div>
+              <Radio.Group
+                optionType="button"
+                value={usageMode}
+                disabled={searching}
+                onChange={(e) => changeCriteria(setUsageMode, e.target.value)}
+                options={SPECIAL_SUBTYPE_OPTIONS}
+              />
+            </div>
+          )}
         </div>
 
         <div style={{ marginBottom: 12 }}>

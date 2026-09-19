@@ -247,3 +247,51 @@ test.each([null, 0, 2])('ADD preserves blank versus explicit numeric value: %s',
   expect(prescriptionAPI.update.mock.calls[0][1].od.add).toBe(add);
   expect(prescriptionAPI.update.mock.calls[0][1].os.add).toBe(add);
 });
+
+// Special Lenses top-level grouping (owner-confirmed, 2026-09-19): Occupational/
+// Office must not appear as an independent fifth top-level peer - it is a
+// subtype revealed only after "Special Lenses" is chosen.
+test('A: top-level use-mode choices are exactly distance/reading/Bifocal/Progressive/Special Lenses', async () => {
+  await mountSearch();
+  const labels = Array.from(document.querySelectorAll('.ant-radio-button-wrapper')).map((el) => el.textContent.trim());
+  expect(labels).toEqual(['مسافات', 'قراءة — عدسة أحادية', 'Bifocal', 'Progressive', 'Special Lenses']);
+  expect(text()).not.toContain('Special Lenses — Occupational/Office');
+  expect(text()).not.toContain('Occupational / Office');
+});
+
+// Special Lenses subtypes (owner-confirmed, 2026-09-19): Young/Anti-Fatigue
+// and Myopia Control join Occupational/Office as proven subtypes. "Myopia
+// Control" is the one generic functional subtype label - never a
+// manufacturer/product name (e.g. never "Myoblock" or "MyoCare") - so a
+// future manufacturer's proven myopia-control product reaches the seller
+// through this SAME subtype without any UI change.
+test('B+C: selecting Special Lenses reveals exactly the three proven subtypes', async () => {
+  await mountSearch();
+  await click('Special Lenses');
+  const labels = Array.from(document.querySelectorAll('.ant-radio-button-wrapper')).map((el) => el.textContent.trim());
+  expect(labels).toEqual(['مسافات', 'قراءة — عدسة أحادية', 'Bifocal', 'Progressive', 'Special Lenses',
+    'Occupational / Office', 'Young / Anti-Fatigue', 'Myopia Control']);
+});
+
+test.each([
+  ['Occupational / Office', 'office'],
+  ['Young / Anti-Fatigue', 'anti_fatigue'],
+  ['Myopia Control', 'myopia_control'],
+])('D: selecting %s sends the existing use_mode=%s, never a new special use_mode', async (label, use_mode) => {
+  await mountSearch();
+  await click('Special Lenses'); await click(label); await click('بحث');
+  expect(prescriptionAPI.search.mock.calls.at(-1)[1].use_mode).toBe(use_mode);
+});
+
+test.each(['Bifocal', 'Progressive', 'مسافات'])(
+  'E: subtype selector is hidden again after switching back to an ordinary top-level choice: %s', async (label) => {
+    await mountSearch();
+    await click('Special Lenses');
+    expect(text()).toContain('Occupational / Office');
+    expect(text()).toContain('Young / Anti-Fatigue');
+    expect(text()).toContain('Myopia Control');
+    await click(label);
+    expect(text()).not.toContain('Occupational / Office');
+    expect(text()).not.toContain('Young / Anti-Fatigue');
+    expect(text()).not.toContain('Myopia Control');
+  });

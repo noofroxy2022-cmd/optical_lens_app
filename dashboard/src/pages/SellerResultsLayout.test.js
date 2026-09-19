@@ -41,7 +41,7 @@ test('final pair price sorts ascending regardless of index, reproducing the repo
   expect(sorted.map((r) => r.pair_fulfillment.price_pair)).toEqual([600, 1800, 2250, 3750]);
 });
 
-test.each(['progressive', 'bifocal'])('local tier before other RX, price ascending not brand or index: %s', (use_mode) => {
+test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'])('local tier before other RX, price ascending not brand or index: %s', (use_mode) => {
   const rows = [row(1, 1.5, 1, { company_name: 'HOYA' }),
     row(2, 1.56, 100, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
     row(3, 1.5, 300, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),

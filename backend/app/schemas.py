@@ -19,6 +19,8 @@ class LensCategory(str, Enum):
     PROGRESSIVE = "progressive"
     OFFICE = "office"
     DIGITAL = "digital"
+    ANTI_FATIGUE = "anti_fatigue"
+    MYOPIA_CONTROL = "myopia_control"
 
 class MaterialType(str, Enum):
     CR39 = "CR39"
