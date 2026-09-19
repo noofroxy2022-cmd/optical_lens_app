@@ -930,8 +930,8 @@ def _order_key(r: schemas.PerEyeProductResult):
     price = pf.price_pair
     return (_STATUS_ORDER.get(pf.status, 3),
             0 if pf.provenance == "single_route" else 1,   # proven-price pairs first within a tier
-            -float(r.match_score),
-            Decimal(str(price)) if price is not None else Decimal("999999999"))
+            Decimal(str(price)) if price is not None else Decimal("999999999"),
+            -float(r.match_score))
 
 
 _GROUP_DEFS = [

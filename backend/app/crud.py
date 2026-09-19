@@ -6,7 +6,7 @@ from sqlalchemy import and_, or_, func
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import List, Optional
-from app import models, schemas
+from app import models, schemas, catalog_corrections
 
 
 # ===== Company =====
@@ -827,6 +827,21 @@ def _prepare_extraction_row(ext) -> dict:
     if errors:
         return {"errors": errors}
 
+    # Catalog Truth Audit (2026-09-18) Section A corrections (A1/A2/A3/A6) -
+    # see app/catalog_corrections.py, the single centralized source. Applied
+    # here so a clean rebuild reproduces them automatically; never a manual
+    # SQL step or scattered per-manufacturer branching in this function.
+    company = ext.catalog.company if ext.catalog is not None else None
+    company_name = company.name if company is not None else None
+    coating_name = (ext.coating.code if ext.coating_id and ext.coating else None) or ext.extracted_coating
+    material_enum, design_type_enum, is_asph = catalog_corrections.corrected_identity(
+        company_name=company_name, model_name=name, category=category_enum.value,
+        index_value=idx, design_variant=design_variant,
+        material_enum=material_enum, design_type_enum=design_type_enum, is_asph=is_asph)
+    market_scope, price = catalog_corrections.corrected_pricing(
+        company_name=company_name, coating_name=coating_name, index_value=idx,
+        availability=availability.value, is_asph=is_asph, market_scope=market_scope, price=price)
+
     return {
         "row": {
             "ext": ext,
@@ -1261,12 +1276,30 @@ def attach_range_to_existing_pricing(db: Session, extraction_id: int) -> dict:
     treatment_band = md.get("treatment_band") or ext.extracted_treatment_band or None
     market_scope = md.get("market_scope") or ext.extracted_market_scope or None
 
+    # Catalog Truth Audit (2026-09-18) Section A corrections (A1/A2/A3/A6) -
+    # same single centralized source as _prepare_extraction_row, applied here
+    # too so this identity match keeps finding the (also-corrected) existing
+    # LensVariant rather than a stale pre-correction identity.
+    material_enum, design_type_enum, is_asph = catalog_corrections.corrected_identity(
+        company_name=company.name, model_name=name, category=category_enum.value,
+        index_value=idx, design_variant=design_variant,
+        material_enum=material_enum, design_type_enum=design_type_enum, is_asph=is_asph)
+
     avail_raw = _norm(md.get("availability") or ext.extracted_availability)
     if avail_raw not in ("stock", "rx"):
         return {"error": f"extraction {extraction_id}: invalid availability {avail_raw!r} (STOCK/RX only)"}
     availability = (
         models.PricingAvailability.STOCK if avail_raw == "stock" else models.PricingAvailability.RX
     )
+
+    # Same centralized market_scope correction (A4) as _prepare_extraction_row,
+    # applied here too so the VariantPricing match below uses the corrected,
+    # persisted value - never a stale pre-correction one recomputed
+    # independently from this extraction's own raw data.
+    coating_name = (ext.coating.code if ext.coating_id and ext.coating else None) or ext.extracted_coating
+    market_scope, _ = catalog_corrections.corrected_pricing(
+        company_name=company.name, coating_name=coating_name, index_value=idx,
+        availability=avail_raw, is_asph=is_asph, market_scope=market_scope, price=None)
 
     # Coating is deliberately NOT required here (see docstring): a graphical
     # range chart never varies by coating, only by treatment_band. Only when

@@ -19,7 +19,7 @@ test.each(['distance', 'reading'])('SV sections have Egypt, OOE, RX then separat
 });
 
 test.each([[], ['blue_light'], ['photo_gray'], ['photo_brown'], ['impact_resistant'], ['blue_light', 'photo_gray']].map((needs) => [needs]))(
-  'index then confirmed price then pending, regardless of need %j or match score', (customer_needs) => {
+  'confirmed price ascending then pending then match score tiebreak, regardless of need %j or index', (customer_needs) => {
     const pending = row(4, 1.5, 1);
     pending.pair_fulfillment.price_confirmation_note = 'Confirm';
     const unresolved = row(5, 1.5, null);
@@ -29,11 +29,19 @@ test.each([[], ['blue_light'], ['photo_gray'], ['photo_brown'], ['impact_resista
     const input = [...rows];
     const sorted = sellerSections({ use_mode: 'distance', customer_needs,
       groups: [group('stock_egypt', rows)] })[0].results;
-    expect(sorted.map((r) => r.variant_id)).toEqual([7, 6, 4, 5, 2, 1]);
+    // price ascending (10, 20, 700, 850) regardless of differing index_value,
+    // then the two pending rows last, tiebroken by match_score (4 > 5).
+    expect(sorted.map((r) => r.variant_id)).toEqual([1, 2, 7, 6, 4, 5]);
     expect(rows).toEqual(input); // never reorder/mutate the response or prices
   });
 
-test.each(['progressive', 'bifocal'])('local tier before other RX, index/price not brand: %s', (use_mode) => {
+test('final pair price sorts ascending regardless of index, reproducing the reported Egypt Stock bug', () => {
+  const rows = [row(1, 1.6, 2250), row(2, 1.5, 3750), row(3, 1.67, 600), row(4, 1.53, 1800)];
+  const sorted = sellerSections({ use_mode: 'distance', groups: [group('stock_egypt', rows)] })[0].results;
+  expect(sorted.map((r) => r.pair_fulfillment.price_pair)).toEqual([600, 1800, 2250, 3750]);
+});
+
+test.each(['progressive', 'bifocal'])('local tier before other RX, price ascending not brand or index: %s', (use_mode) => {
   const rows = [row(1, 1.5, 1, { company_name: 'HOYA' }),
     row(2, 1.56, 100, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
     row(3, 1.5, 300, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
@@ -41,7 +49,7 @@ test.each(['progressive', 'bifocal'])('local tier before other RX, index/price n
   const sections = sellerSections({ use_mode, groups: [group('stock_egypt', []), group('rx', rows)] });
   expect(sections.map((s) => s.key)).toEqual(['rx']);
   expect(sections[0].tiers.map((t) => t.key)).toEqual(['local', 'other']);
-  expect(sections[0].tiers[0].results.map((r) => r.variant_id)).toEqual([4, 3, 2]);
+  expect(sections[0].tiers[0].results.map((r) => r.variant_id)).toEqual([2, 4, 3]);
   expect(sections[0].tiers[1].results.map((r) => r.variant_id)).toEqual([1]);
 });
 

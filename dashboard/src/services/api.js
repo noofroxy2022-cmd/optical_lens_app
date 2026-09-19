@@ -64,7 +64,8 @@ export const prescriptionAPI = {
   // technology_intent are passed straight through when present - the caller
   // (Prescriptions.js) already omits them entirely when not selected.
   search: (id, { mode = 'automatic', filters = null, preferStock = true, preferAspherical = true,
-                 includeAlternatives = true, use_mode, technology_intent, customer_need } = {}) =>
+                 includeAlternatives = true, use_mode, technology_intent, customer_need,
+                 customer_needs } = {}) =>
     api.post(`/prescriptions/${id}/search`, {
       mode,
       filters,
@@ -74,6 +75,7 @@ export const prescriptionAPI = {
       ...(use_mode !== undefined ? { use_mode } : {}),
       ...(technology_intent !== undefined ? { technology_intent } : {}),
       ...(customer_need !== undefined ? { customer_need } : {}),
+      ...(customer_needs !== undefined ? { customer_needs } : {}),
     }),
   delete: (id) => api.delete(`/prescriptions/${id}`),
 };

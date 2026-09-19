@@ -115,19 +115,48 @@ def test_scalar_and_list_are_conjunctive_and_no_unsafe_fallback(db):
 
 
 @pytest.mark.parametrize('company,model,index,term,expected', [
+    # Owner-confirmed central rule (audit.md Section G item 3): every Index
+    # 1.53 and every Index 1.59 is impact-resistant, for ANY manufacturer -
+    # the narrower HOYA-PNX/SCOPE-HiFlex named mechanisms below still apply
+    # as additional OR-branches, never replaced.
     ('HOYA', 'Nulux PNX', 1.53, None, True),
-    ('HOYA', 'Nulux PNX extra', 1.53, None, False),
-    ('HOYA', 'Nulux PNX', 1.59, None, False),
-    ('Other', 'Nulux PNX', 1.53, None, False),
-    ('Other', 'Trivex', 1.53, None, False),
-    ('Other', 'Polycarbonate', 1.59, None, False),
-    ('PLATINUM', 'Unknown 1.59', 1.59, None, False),
+    ('HOYA', 'Nulux PNX extra', 1.53, None, True),
+    ('HOYA', 'Nulux PNX', 1.59, None, True),
+    ('Other', 'Nulux PNX', 1.53, None, True),
+    ('Other', 'Trivex', 1.53, None, True),
+    ('Other', 'Polycarbonate', 1.59, None, True),
+    ('PLATINUM', 'Unknown 1.59', 1.59, None, True),
     ('SCOPE', 'SCOPE SV Standard', 1.56, 'HiFlex Impact-Resistant', True),
+    # 1.56 is NOT part of the blanket rule - only SCOPE's proven HiFlex terms
+    # qualify at that index; a bare 1.56 elsewhere stays unproven.
+    ('SCOPE', 'SCOPE SV Standard', 1.56, None, False),
+    ('Other', 'Trivex', 1.5, None, False),
+    ('Other', 'Polycarbonate', 1.6, None, False),
+    ('Other', 'Unknown', 1.67, None, False),
 ])
 def test_impact_uses_proven_identity_not_index_material_or_fuzzy_name(company, model, index, term, expected):
     caps = te.proven_capabilities(company, None, term, None, model_name=model,
                                   index_value=index, material='polycarbonate')
     assert ('impact_resistant' in caps) == expected
+
+
+def test_order_key_sorts_price_ahead_of_match_score():
+    """audit.md Section G item 1: `_order_key` must sort price ascending
+    ahead of match_score within a tier, matching the stated seller rule and
+    the two other ranking paths (compute_alternatives, seller_order)."""
+    def row(price, score):
+        return schemas.PerEyeProductResult(
+            company_id=1, lens_model_id=1, model_name='M', variant_id=1,
+            index_value=1.5, match_score=score, reason='r',
+            od=schemas.EyeAvailability(), os=schemas.EyeAvailability(),
+            pair_fulfillment=schemas.PairFulfillment(
+                status='stock_egypt', price_pair=Decimal(str(price)), currency='EGP',
+                source_pricing_ids=[1], provenance='single_route', reason='r'))
+
+    expensive_high_score = row(3000, 99)
+    cheap_low_score = row(1000, 1)
+    ordered = sorted([expensive_high_score, cheap_low_score], key=ps._order_key)
+    assert [r.pair_fulfillment.price_pair for r in ordered] == [Decimal('1000'), Decimal('3000')]
 
 
 def test_blue_and_impact_are_strict_and(db):

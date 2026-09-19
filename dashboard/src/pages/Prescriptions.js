@@ -220,12 +220,22 @@ const isActionableBestMatch = (best) => (
 
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
 
-// Maps PairFulfillment.status (the proven pair-level route) to the matching
-// LensSearchGroup.key so the decision-relevant group can be opened by default.
-// Presentation order is independent of recommendation score and selected needs.
+// Maps PairFulfillment.status to a tier rank for sellerRowOrder below -
+// mirrors backend product_search._STATUS_ORDER/_order_key exactly, so the
+// frontend never re-derives its own notion of availability priority.
+const _STATUS_TIER = { stock_egypt: 0, stock_outside: 1, stock_market_unknown: 2, rx: 3,
+  split: 4, eligibility_unknown: 5, unavailable: 5 };
+
+// Single central presentation-order rule for every seller results section:
+// availability tier, then the confirmed final pair price ascending (a
+// pending/unconfirmed price never outranks a proven one), then match_score
+// as the tiebreak - independent of selected needs. Index_value plays no part
+// here; sorting by it first (the prior bug) fragmented one price-ordered tier
+// into per-index runs, e.g. an Egypt Stock section showing 2250, 3750, 600,
+// 1800 instead of ascending price.
 export const sellerRowOrder = (a, b) => {
-  const index = Number(a.index_value) - Number(b.index_value);
-  if (index) return index;
+  const tier = (_STATUS_TIER[a.pair_fulfillment.status] ?? 3) - (_STATUS_TIER[b.pair_fulfillment.status] ?? 3);
+  if (tier) return tier;
   const pendingA = priceNeedsConfirmation(a.pair_fulfillment);
   const pendingB = priceNeedsConfirmation(b.pair_fulfillment);
   if (pendingA !== pendingB) return pendingA ? 1 : -1;
@@ -233,6 +243,8 @@ export const sellerRowOrder = (a, b) => {
     const price = Number(a.pair_fulfillment.price_pair) - Number(b.pair_fulfillment.price_pair);
     if (price) return price;
   }
+  const score = Number(b.match_score) - Number(a.match_score);
+  if (score) return score;
   const identity = (r) => `${r.company_name}|${r.lens_model_id}|${r.variant_id}|${r.coating_id}|${r.pair_fulfillment.source_pricing_ids?.join(',')}`;
   return identity(a).localeCompare(identity(b));
 };

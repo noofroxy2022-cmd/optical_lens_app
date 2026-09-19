@@ -32,6 +32,12 @@ TECHNOLOGY = {
     "screens_blue_light": "blue_light",
     "photochromic_gray": "photo_gray",
     "photochromic_brown": "photo_brown",
+    # RECONCILED (Catalog Truth Audit, 2026-09-18, Section G item 3): defers
+    # entirely to technology_evidence's single central impact-resistance rule
+    # (proven_capabilities), instead of the SCOPE-only gate this need used to
+    # get via `proves()`/SCOPE_ROWS below - that hardcoded gate blocked even
+    # HOYA's already-proven PNX-1.53 lenses from ever satisfying this need.
+    "high_impact_resistance": "impact_resistant",
 }
 LABELS = {
     "none": "بدون احتياج إضافي",
@@ -49,11 +55,6 @@ SCOPE_ROWS = {
     "sun": {"Sun Gray", "Sun Gray with Revo Mirror (Blue/Silver/Gold)",
             "Sun Polarized Gray-Brown-Green"},
     "thinner_lens": {"Non Water-Tintable Thin"},
-    "high_impact_resistance": {
-        "HiFlex Impact-Resistant", "HiFlex Relax Impact-Resistant Blue Light",
-        "HiFlex PhotoGray Impact-Resistant",
-        "HiFlex PhotoGray Relax Impact-Resistant Blue Light",
-    },
 }
 
 

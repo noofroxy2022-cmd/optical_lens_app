@@ -42,8 +42,16 @@ _SCOPE_IMPACT_TERMS = frozenset({
     "HiFlex PhotoGray Impact-Resistant",
     "HiFlex PhotoGray Relax Impact-Resistant Blue Light",
 })
-# A generic Trivex/polycarbonate enum or 1.53/1.59 is deliberately insufficient.
-# PLATINUM.pdf p.2 prints only 1.59: do not broaden it into impact proof.
+# RECONCILED (Catalog Truth Audit, 2026-09-18, Section G item 3): owner has
+# now confirmed the blanket rule as an ADDITIONAL OR-branch alongside the two
+# named mechanisms above, never replacing them - "Impact Resistant = every
+# Index 1.53 and every Index 1.59, plus SCOPE HiFlex 1.56. Not generalized to
+# other indices without evidence/confirmation." This is the single central
+# rule for IMPACT_RESISTANT; every caller (technology_intent gating AND the
+# "high_impact_resistance" customer need) must resolve it from here alone -
+# see customer_needs.TECHNOLOGY, which now maps that need onto this capability
+# instead of maintaining its own separate manufacturer gate.
+_BLANKET_IMPACT_INDEXES = frozenset({1.53, 1.59})
 
 # Canonical customer-facing intents (Phase 3). "none" always passes.
 INTENTS = (
@@ -53,6 +61,7 @@ INTENTS = (
     "photo_brown",
     "blue_photo_gray",
     "blue_photo_brown",
+    "impact_resistant",
 )
 
 # intent -> required capability set (AND semantics - every bit must be proven
@@ -64,6 +73,7 @@ _REQUIRED: Dict[str, FrozenSet[str]] = {
     "photo_brown": frozenset({PHOTO_BROWN}),
     "blue_photo_gray": frozenset({BLUE_LIGHT, PHOTO_GRAY}),
     "blue_photo_brown": frozenset({BLUE_LIGHT, PHOTO_BROWN}),
+    "impact_resistant": frozenset({IMPACT_RESISTANT}),
 }
 
 # (company_name, field, exact_value) -> proven capability set.
@@ -385,7 +395,8 @@ def proven_capabilities(company_name: Optional[str], coating_name: Optional[str]
     if not company_name:
         return set()
     caps: Set[str] = set()
-    if ((company_name == "HOYA" and model_name in _HOYA_PNX_MODELS and index_value == 1.53)
+    if (index_value in _BLANKET_IMPACT_INDEXES
+            or (company_name == "HOYA" and model_name in _HOYA_PNX_MODELS and index_value == 1.53)
             or (company_name == "SCOPE" and treatment_band in _SCOPE_IMPACT_TERMS
                 and index_value == 1.56)):
         caps.add(IMPACT_RESISTANT)

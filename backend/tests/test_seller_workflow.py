@@ -127,3 +127,21 @@ def test_scope_need_end_to_end(db, need):
     assert r.exact_total == 1
     assert r.best_match.company_name == "SCOPE"
     assert term in r.best_match.seller_recommendation_reason
+
+
+def test_high_impact_resistance_need_routes_through_central_capability_rule(db):
+    """audit.md Section G item 3: the "high_impact_resistance" seller need
+    must no longer be gated by a hardcoded SCOPE-only check
+    (customer_needs.proves); it must defer entirely to
+    technology_evidence.proven_capabilities' single central impact-resistance
+    rule, exactly like screens_blue_light/photochromic_* already do."""
+    _rx_product(db, "SCOPE", "HiFlexProven", schemas.LensCategory.SINGLE_VISION, -6, 6,
+                index_value=1.56, treatment_band="HiFlex Impact-Resistant")
+    _rx_product(db, "PLATINUM", "IndexProven", schemas.LensCategory.SINGLE_VISION, -6, 6,
+                index_value=1.59)
+    _rx_product(db, "Other", "Unproven", schemas.LensCategory.SINGLE_VISION, -6, 6,
+                index_value=1.5)
+    r = search(db, _mk_presc(db, -2, -2), "high_impact_resistance")
+    assert r.exact_total == 2
+    assert {x.model_name for g in r.groups for x in g.results} == {"HiFlexProven", "IndexProven"}
+    assert "high_impact_resistance" not in customer_needs.SCOPE_ROWS

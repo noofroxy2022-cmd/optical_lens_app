@@ -20,3 +20,10 @@ test('legacy search does not opt into seller workflow implicitly', () => {
   prescriptionAPI.search(19);
   expect(client.post.mock.calls[0][1]).not.toHaveProperty('customer_need');
 });
+
+test.each([['photo_gray'], ['impact_resistant']])(
+  'seller request forwards plural customer_needs %j in the POST body', (need) => {
+    prescriptionAPI.search(19, { customer_needs: [need], use_mode: 'distance' });
+    expect(client.post).toHaveBeenCalledWith('/prescriptions/19/search',
+      expect.objectContaining({ customer_needs: [need], use_mode: 'distance' }));
+  });

@@ -3741,13 +3741,14 @@ def test_b2_full_registered_hoya_api_e2e(db):
         # pricing route(s) are its source_pricing_ids.
         ids = [tuple(sorted(x.pair_fulfillment.source_pricing_ids)) for x in r]
         assert len(ids) == len(set(ids)), label                            # deduped
-        # availability-first ordering (V1.0.2 design): tier (stock_egypt <
-        # stock_outside < rx), then a proven single-route price over an
-        # unproven-mixed one, then best match_score, then price.
+        # availability-first ordering: tier (stock_egypt < stock_outside < rx),
+        # then a proven single-route price over an unproven-mixed one, then
+        # price ascending, then best match_score (audit.md Section G item 1:
+        # price sorts ahead of match_score within a tier).
         _tier = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}
         keys = [(_tier[x.pair_fulfillment.status],
                 0 if x.pair_fulfillment.provenance == "single_route" else 1,
-                -x.match_score, x.pair_fulfillment.price_pair) for x in r]
+                x.pair_fulfillment.price_pair, -x.match_score) for x in r]
         assert keys == sorted(keys), label                                  # sorted
         for x in r:
             pf = x.pair_fulfillment
