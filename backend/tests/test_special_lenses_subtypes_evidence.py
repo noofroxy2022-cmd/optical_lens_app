@@ -104,7 +104,15 @@ def test_corrected_category_is_idempotent_for_both_new_subtypes():
     ("PLATINUM", "PLATINUM MYO D"),
     ("BBGR", "BBGR"),  # BBGR Anti-Fatigue/Extenso live under the generic "BBGR" model name
     ("ZEISS", "SmartLife Young"),
-    ("ZEISS", "MyoCare"), ("ZEISS", "MyoCare S"), ("ZEISS", "MyoActive"),
+    # ZEISS MyoActive stays a negative: proven Myopia Management, but not
+    # ingested (future-dated "Available from 1st October 2026", and its own
+    # power-range chart has no per-product split proven separately from
+    # MyoCare/MyoCare S RX) - see app/zeiss_myopia_control_evidence.py.
+    # MyoCare/MyoCare S themselves are no longer negatives here: owner-
+    # confirmed and ingested 2026-09-19/20 - see
+    # test_zeiss_myopia_control_evidence.py, now the source of truth for
+    # those two models' category.
+    ("ZEISS", "MyoActive"),
 ])
 def test_corrected_category_never_touches_strict_negative_products(company, model_name):
     assert catalog_corrections.corrected_category(

@@ -124,17 +124,25 @@ ANTI_FATIGUE_MODELS: Dict[str, FrozenSet[str]] = {
 # reduces the myopia progression": explicit myopia-control purpose. Printed
 # power range (Sph -0.50 to -10.00, Cyl to -4.00) is representable via the
 # existing PowerRange sph/cyl fields - no new eligibility mechanism. Currently
-# stored as category=SINGLE_VISION. Strict scope for THIS batch: ONLY this
-# proven, already-ingested SCOPE product. PLATINUM "MYO D" (bare price table,
-# no catalog description - open owner question, not resolved) is deliberately
-# excluded. ZEISS MyoCare/MyoCare S/MyoActive are PROVEN members of this same
-# functional Myopia Control subtype (per the owner's clarification above) but
-# are NOT currently ingested at all - a separate ingestion task, not a
-# category question - and MyoActive's own catalog prints "Available from 1st
-# October 2026", after the current project date; do not add them here until
-# that separate ingestion happens.
+# stored as category=SINGLE_VISION. PLATINUM "MYO D" (bare price table, no
+# catalog description - open owner question, not resolved) is deliberately
+# excluded.
+#
+# ZEISS_Main_Catalog.pdf pp.51-52 "ZEISS MyoCare Lenses": MyoCare (C.A.R.E.,
+# 7mm central zone, +4.6D defocus) and MyoCare S (C.A.R.E., 9mm central zone,
+# +3.8D defocus) - two catalog-proven distinct optical designs, both ingested
+# (owner-confirmed 2026-09-19/20) via app/zeiss_myopia_control_evidence.py's
+# reconcile(), which creates them directly with this category (they are new
+# products, not a reclassification of an existing wrong-categoried row).
+# Listed here too so a future re-import via the standard extraction path
+# would resolve to the same category. ZEISS MyoActive remains PROVEN but NOT
+# added here: its own catalog page prints "Available from 1st October 2026"
+# (after the current project date) and its power-range chart is combined
+# with MyoCare/MyoCare S RX 1.6/1.59 with no per-product split proven
+# separately - a separate ingestion task, not a category question.
 MYOPIA_CONTROL_MODELS: Dict[str, FrozenSet[str]] = {
     "SCOPE": frozenset({"SCOPE Myoblock Metavision (Myoblock)"}),
+    "ZEISS": frozenset({"MyoCare", "MyoCare S"}),
 }
 
 
