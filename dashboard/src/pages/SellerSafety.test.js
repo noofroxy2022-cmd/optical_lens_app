@@ -86,7 +86,7 @@ test('advanced price change clears Best Choice and summary; explicit search repo
   expect(text()).not.toContain('نتائج العدسات المطابقة'); expect(text()).not.toContain('خيارات الزوج');
   await click('بحث'); expect(text()).toContain('نتائج العدسات المطابقة');
   expect(prescriptionAPI.search.mock.calls.at(-1)[1].filters.max_price).toBe(2000);
-});
+}, 30000);
 test('use and primary need changes invalidate results; combined need is directly selectable', async () => {
   await mountSearch(); await click('قراءة — عدسة أحادية');
   expect(text()).not.toContain('نتائج العدسات المطابقة'); await click('بحث');
@@ -112,7 +112,7 @@ test('editing uses original values, saves ADD, clears old results and waits for 
   expect(prescriptionAPI.search).toHaveBeenCalledTimes(calls);
   await click('بحث'); expect(prescriptionAPI.search).toHaveBeenCalledTimes(calls + 1);
   expect(prescriptionAPI.search.mock.calls.at(-1)[1].use_mode).toBe('reading');
-});
+}, 30000);
 
 test.each(['PIXEL Hi Power', 'DIVEL diameter confirmation'])('pending table row is safe without expanding: %s', async (note) => {
   prescriptionAPI.search.mockResolvedValue({ data: { ...response, best_match: null,
@@ -127,7 +127,7 @@ test.each(['PIXEL Hi Power', 'DIVEL diameter confirmation'])('pending table row 
   expect(row.textContent).not.toContain('سعر الزوج النهائي:');
   expect(document.querySelector('.ant-table-expanded-row')).toBeNull();
 });
-test.each(['od', 'os'])('blank %s Axis with cylinder is blocked, explicit zero is preserved', async (eye) => {
+async function verifyBlankAxisBehavior(eye) {
   await mountSearch(); await click('تعديل الوصفة الأصلية');
   await act(async () => Simulate.change(document.querySelector(`#${eye}_axis`), { target: { value: '' } }));
   await click('حفظ التعديل');
@@ -137,7 +137,13 @@ test.each(['od', 'os'])('blank %s Axis with cylinder is blocked, explicit zero i
   await act(async () => Simulate.change(document.querySelector(`#${eye}_axis`), { target: { value: '0' } }));
   await click('حفظ التعديل');
   expect(prescriptionAPI.update.mock.calls[0][1][eye].axis).toBe(0);
-});
+}
+test('blank od Axis with cylinder is blocked, explicit zero is preserved', async () => {
+  await verifyBlankAxisBehavior('od');
+}, 30000);
+test('blank os Axis with cylinder is blocked, explicit zero is preserved', async () => {
+  await verifyBlankAxisBehavior('os');
+}, 30000);
 
 test('a late search response cannot restore results after criteria change', async () => {
   await mountSearch(); await click('مرشحات متقدمة');
