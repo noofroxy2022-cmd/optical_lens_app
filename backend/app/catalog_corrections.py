@@ -161,11 +161,12 @@ def corrected_category(company_name: Optional[str], model_name: Optional[str],
 
     Deliberately narrow: matches ONLY this one HOYA model by exact name.
     Never touches HOYA's genuine "...Progressive Lenses (RX)" families
-    (Amplitude Plus, Balansis, Daynamic, iD LifeStyle/MyStyle/MySelf), and
-    never touches "Mineral" (left for separate review: the catalog proves it
-    mixes a plain and a genuinely-progressive sub-line under one model, a
-    distinct problem). Idempotent: a row already BIFOCAL is returned
-    unchanged.
+    (Amplitude Plus, Balansis, Daynamic, iD LifeStyle/MyStyle/MySelf).
+    "Mineral" - once left for separate review because the catalog proved it
+    mixes a plain and a genuinely-progressive sub-line under one model - is
+    now resolved by the dedicated model-split in
+    app/hoya_mineral_summit_evidence.py (owner-confirmed 2026-09-20), not by
+    this function. Idempotent: a row already BIFOCAL is returned unchanged.
 
     Occupational/Office (Special Lenses architecture, 2026-09-19): HOYA's
     Supereader B / WorkSmart(+PNX) / iD WorkStyle(+PNX) and SCOPE's Office

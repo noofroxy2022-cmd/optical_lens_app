@@ -30,7 +30,7 @@ PowerRange row, before this fix:
       (6)/PNX(2), Balansis(7)/PNX(2), Daynamic(6)/PNX(2), iD LifeStyle(7)/
       PNX(2), iD MyStyle(7)/PNX(2), iD MySelf(7)/PNX(2) - THE PROVEN GAP
       this module fixes.
-    * 23 rows OUT OF SCOPE, stored under category=PROGRESSIVE only as a
+    * 13 rows OUT OF SCOPE, stored under category=PROGRESSIVE only as a
       known pre-existing importer quirk (see addon_scope_evidence.py's own
       comment: "HOYA's importer stores occupational/bifocal models as
       progressive"), never touched:
@@ -42,11 +42,26 @@ PowerRange row, before this fix:
           with fixed reading-DISTANCE specs ("Reading From 40cm To 120cm",
           "(Space-Screen-Close)"), not a continuous ADD-power corridor -
           a materially different product type from "Progressive lenses".
-        - "Mineral" (10 rows) - catalog page headed only "Lenses (RX)"
-          (p.28), never "Progressive Lenses (RX)" - no catalog evidence
-          it is a Progressive design at all.
 
-No other manufacturer currently has any category=PROGRESSIVE row.
+RESOLVED (Special Lenses architecture / HOYA Mineral split, owner-confirmed
+2026-09-20): the original audit above also excluded "Mineral" (10 rows) as
+out of scope, reasoning the page is headed only "Mineral Lenses (RX)", never
+"Progressive Lenses (RX)". That page-header-level reading was correct but
+incomplete: the page's own row-level printed names prove it actually mixes
+TWO optical designs under one importer LensModel - 4 plain Single Vision
+rows and 6 rows explicitly named "... Summit Progressive Multi Coat". See
+app/hoya_mineral_summit_evidence.py for the full citation and the split
+that resolves this: the 4 plain rows stay under HOYA "Mineral"
+(category=SINGLE_VISION, permanently out of this module's PROGRESSIVE-only
+query - no exclusion-list entry needed any more), and the 6 Summit rows move
+to a new "Mineral Summit Progressive" LensModel (category=PROGRESSIVE) -
+which, being genuinely Progressive and not listed in _EXCLUDED_MODEL_NAMES,
+receives the same owner-confirmed +0.75/+3.50 rule as HOYA's other 12
+genuine Progressive families the next time this module runs (order
+dependency: hoya_mineral_summit_evidence.reconcile() must run first).
+
+No other manufacturer currently has any category=PROGRESSIVE row this
+module's exclusion list needs to know about.
 """
 from typing import Dict, FrozenSet
 
@@ -60,12 +75,16 @@ DEFAULT_PROGRESSIVE_ADD_MAX = 3.50
 # company -> LensModel names that are stored as category=PROGRESSIVE but are
 # catalog-proven NOT to be genuine Progressive-ADD-corridor products (see
 # module docstring for the exact page evidence per name). Never touched.
+# "Mineral" no longer appears here (2026-09-20): the plain rows are now
+# SINGLE_VISION (out of this query entirely) after the split in
+# app/hoya_mineral_summit_evidence.py; the genuinely-Progressive "Mineral
+# Summit Progressive" rows are deliberately NOT excluded - they receive the
+# rule below like any other genuine HOYA Progressive family.
 _EXCLUDED_MODEL_NAMES: Dict[str, FrozenSet[str]] = {
     "HOYA": frozenset({
         "Bi-Focal",
         "Supereader B", "WorkSmart", "WorkSmart PNX",
         "iD WorkStyle", "iD WorkStyle PNX",
-        "Mineral",
     }),
 }
 
@@ -76,7 +95,10 @@ def reconcile(db: Session) -> dict:
     set. Never touches a row that already has any explicit add_min or
     add_max (more-specific catalog evidence always wins), never touches
     Bifocal or any other category, never touches the HOYA
-    occupational/bifocal/Mineral rows misfiled under category=PROGRESSIVE.
+    occupational/bifocal rows misfiled under category=PROGRESSIVE. Correctly
+    DOES reach "Mineral Summit Progressive" once
+    hoya_mineral_summit_evidence.reconcile() has split it out - it is a
+    genuine Progressive family, not an exclusion.
     Returns the count of rows updated; safe to call on every startup/rebuild.
     """
     rows = (

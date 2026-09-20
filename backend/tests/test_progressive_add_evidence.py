@@ -22,10 +22,20 @@ for full evidence citations):
   - HOYA's "Bi-Focal" (headed "Bi-Focal Lenses (RX)", p.27) and "Occupational"
     families (Supereader B, WorkSmart(+PNX), iD WorkStyle(+PNX); headed
     "Occupational Lenses (RX)", p.25-26, with fixed reading-distance specs,
-    not a continuous ADD corridor) and "Mineral" (headed only "Lenses (RX)",
-    p.28 - never proven "Progressive") are stored under category=PROGRESSIVE
-    (a known pre-existing importer quirk) but are explicitly OUT of the
-    owner's "Progressive only" rule and are never touched by this module.
+    not a continuous ADD corridor) are stored under category=PROGRESSIVE (a
+    known pre-existing importer quirk) but are explicitly OUT of the owner's
+    "Progressive only" rule and are never touched by this module.
+
+RESOLVED (HOYA Mineral split, owner-confirmed 2026-09-20): "Mineral" was the
+other family previously excluded here as unproven-Progressive. The catalog
+(p.28, "Mineral Lenses (RX)") actually mixes 4 plain Single Vision rows with
+6 rows explicitly named "... Summit Progressive Multi Coat" under one
+importer LensModel. app/hoya_mineral_summit_evidence.py now splits them: the
+4 plain rows stay HOYA "Mineral" (category=SINGLE_VISION, permanently
+outside this module's PROGRESSIVE-only query), and the 6 Summit rows move to
+a new "Mineral Summit Progressive" LensModel (category=PROGRESSIVE) that IS
+a genuine Progressive family and correctly receives this module's rule -
+see test_hoya_mineral_summit_evidence.py, now the source of truth for both.
 
 Deliberately synthetic where isolating the rule (no PDF parsing); the live
 release_runtime.db result is verified separately.
@@ -56,7 +66,7 @@ _HOYA_PROGRESSIVE_FAMILIES = {
     "iD MySelf": 7, "iD MySelf PNX": 2,
 }
 _HOYA_EXCLUDED_FAMILIES = {
-    "Bi-Focal": 5, "Mineral": 10, "Supereader B": 2,
+    "Bi-Focal": 5, "Supereader B": 2,
     "WorkSmart": 2, "WorkSmart PNX": 1, "iD WorkStyle": 2, "iD WorkStyle PNX": 1,
 }
 
@@ -169,7 +179,7 @@ def test_is_idempotent(db):
 
 # --------------------------------------------------------------- HOYA exclusions
 @pytest.mark.parametrize("name", sorted(_HOYA_EXCLUDED_FAMILIES))
-def test_hoya_occupational_bifocal_and_mineral_are_never_touched(db, name):
+def test_hoya_occupational_and_bifocal_are_never_touched(db, name):
     co = _mk_company(db, "HOYA")
     m = _mk_model(db, co, name)  # category=PROGRESSIVE, matching the real importer quirk
     v = _mk_variant(db, m)
