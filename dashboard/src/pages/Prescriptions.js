@@ -18,8 +18,6 @@ const errMsg = (error, fallback) => {
   return error?.response?.data?.message || fallback;
 };
 
-const availLabel = (v) => (v === 'stock' ? <Tag color="green">STOCK</Tag> : <Tag color="orange">RX</Tag>);
-
 // CR39 presentation rule: ordinary CR39 is not a selling point - show only the
 // index. Named materials (PNX, EYAS, EYNOA, polycarbonate, trivex, high-index …)
 // stay visible. DB is unchanged; this is display-only.
@@ -51,6 +49,30 @@ const PAIR_STATUS_COLOR = {
   eligibility_unknown: 'default',
 };
 const yn = (b) => (b ? <span style={{ color: '#52c41a' }}>✅</span> : <span style={{ color: '#cf1322' }}>❌</span>);
+
+// F4: alternatives (frozen-matcher LensMatchResult) carry raw `availability`
+// ("stock"/"rx") + `market_scope` instead of the already-routed
+// PairFulfillment.status primary results use. This mirrors
+// backend product_search.market_is_egypt/_row_route EXACTLY on those SAME
+// two fields - never derived from company/product name, never collapsing an
+// unspecified/Out-Of-Egypt market into Egypt or into a generic "STOCK".
+const marketIsEgypt = (marketScope) => {
+  const s = (marketScope || '').toString().trim().toLowerCase();
+  if (!s) return null;
+  if (s.includes('out') && s.includes('egypt')) return false;
+  if (['egypt', 'eg', 'مصر'].includes(s)) return true;
+  if (s.includes('egypt')) return true;
+  return false;
+};
+const alternativeRoute = (r) => {
+  if (r.availability === 'stock') {
+    const eg = marketIsEgypt(r.market_scope);
+    if (eg === true) return 'stock_egypt';
+    if (eg === false) return 'stock_outside';
+    return 'stock_market_unknown';
+  }
+  return 'rx';
+};
 
 // OD/OS × (Egypt / Outside / RX) verified-availability matrix (§8).
 const PairMatrix = ({ od, os }) => (
@@ -322,8 +344,15 @@ const Prescriptions = () => {
   const [customerNeeds, setCustomerNeeds] = useState([]);
   const searchVersion = useRef(0);
   const [editing, setEditing] = useState(null);
+  // F5: explicit "criteria changed - search again" notice. Only ever shown
+  // after a search has genuinely completed at least once for the CURRENT
+  // prescription/session (hasSearchedRef) - never on the initial, not-yet-
+  // searched state, so it is never inferred from searchData===null alone.
+  const [resultsStale, setResultsStale] = useState(false);
+  const hasSearchedRef = useRef(false);
   const invalidateSearch = () => {
     searchVersion.current += 1;
+    if (hasSearchedRef.current) setResultsStale(true);
     setSearchData(null);
     setSearching(false);
   };
@@ -422,6 +451,8 @@ const Prescriptions = () => {
   const openSearch = (record) => {
     setSearchFor(record);
     setSearchData(null);
+    setResultsStale(false);
+    hasSearchedRef.current = false;
     setMode('automatic');
     setUsageMode('distance');
     setCustomerNeeds([]);
@@ -571,7 +602,11 @@ const Prescriptions = () => {
       if (m === 'targeted') payload.filters = rawFilters ?? buildFilterPayload();
       if (um) payload.use_mode = um;
       const res = await prescriptionAPI.search(record.id, payload);
-      if (version === searchVersion.current) setSearchData(res.data);
+      if (version === searchVersion.current) {
+        setSearchData(res.data);
+        hasSearchedRef.current = true;
+        setResultsStale(false);
+      }
     } catch (error) {
       if (version === searchVersion.current) message.error(errMsg(error, 'فشل البحث'));
     } finally {
@@ -605,7 +640,11 @@ const Prescriptions = () => {
   // ---- V1.0.2 exact result = one commercial option (PerEyeProductResult) ----
   const resultColumns = [
     { title: 'الشركة', key: 'company', width: 115, render: (_, r) => r.company_name || '—' },
-    { title: 'المنتج / الموديل', key: 'model', width: 185, render: (_, r) => <div>{r.model_name || '—'}<div style={{ fontSize: 12, color: '#666' }}>{r.design_variant}</div></div> },
+    { title: 'المنتج / الموديل', key: 'model', width: 185, render: (_, r) => <div>
+      {isPrimaryRow(r) && <Tag color="blue" style={{ marginBottom: 2 }}>الخيار المقترح</Tag>}
+      <div>{r.model_name || '—'}</div>
+      <div style={{ fontSize: 12, color: '#666' }}>{r.design_variant}</div>
+    </div> },
     { title: 'المادة / Index', key: 'idx', width: 145, render: (_, r) => indexMaterialText(r.material, r.index_value) },
     { title: 'التقنية / الطلاء', key: 'tech', width: 200, render: (_, r) => [r.coating_name || r.coating_code, r.treatment_band, r.color_variant].filter(Boolean).join(' / ') || '—' },
     { title: 'التوفر / التصنيع', key: 'pair', width: 160, render: (_, r) => <Tag color={PAIR_STATUS_COLOR[r.pair_fulfillment.status]}>{r.manufacturing_location === 'egypt' && r.pair_fulfillment.status === 'rx' ? 'تصنيع داخل مصر' : PAIR_STATUS_AR[r.pair_fulfillment.status]}</Tag> },
@@ -655,28 +694,51 @@ const Prescriptions = () => {
   );
 
   // ---- alternatives still carry a frozen-matcher LensMatchResult ----
-  const renderLensMatchCard = (r) => (
-    <Descriptions size="small" column={3} bordered>
-      <Descriptions.Item label="الشركة">{r.lens_model?.company?.name || '—'}</Descriptions.Item>
-      <Descriptions.Item label="الموديل">{r.lens_model?.name}</Descriptions.Item>
-      <Descriptions.Item label="المادة / Index">{indexMaterialText(r.variant?.material, r.variant?.index_value)}</Descriptions.Item>
-      <Descriptions.Item label="الفئة">{r.lens_model?.category}</Descriptions.Item>
-      <Descriptions.Item label="التصميم">{r.design_variant || r.variant?.design_variant || '—'}</Descriptions.Item>
-      <Descriptions.Item label="الطلاء">{r.coating_name || r.coating_code || '—'}</Descriptions.Item>
-      <Descriptions.Item label="التقنية / اللون">{r.color_variant || r.variant?.color_variant || '—'}</Descriptions.Item>
-      <Descriptions.Item label="سعر التجزئة (زوج)">{`${r.price_pair} ${r.currency}`}</Descriptions.Item>
-      <Descriptions.Item label="التوفر">
-        {availLabel(r.availability)}{' '}
-        <span style={{ color: '#888', fontSize: 12 }}>{r.availability === 'stock' ? '— حسب الكتالوج' : '— RX / تصنيع'}</span>
-      </Descriptions.Item>
-      <Descriptions.Item label="السوق">{r.market_scope || '—'}</Descriptions.Item>
-      <Descriptions.Item label="الدرجة">{r.match_score?.toFixed(1)}</Descriptions.Item>
-      <Descriptions.Item label="السبب" span={2}>{r.reason}</Descriptions.Item>
-    </Descriptions>
-  );
+  // F4/F7: primary line (identity + pair price + full 4-tier availability,
+  // same PAIR_STATUS_AR/PAIR_STATUS_COLOR language as primary results) stays
+  // immediately visible; secondary technical fields move into the same
+  // Collapse/Panel pattern already used by renderResultCard above. No field
+  // is removed - every value below still renders, only its visual priority
+  // changed. The alternative's own proposal reason/relaxed-filter tags are
+  // unchanged (rendered by the caller, outside this function).
+  const renderLensMatchCard = (r) => {
+    const route = alternativeRoute(r);
+    return (
+      <div>
+        <div>
+          <b>{r.lens_model?.company?.name || '—'} — {r.lens_model?.name}</b>{' '}
+          <Tag color={PAIR_STATUS_COLOR[route]}>{PAIR_STATUS_AR[route]}</Tag>
+        </div>
+        <div><b>سعر الزوج: </b>{r.price_pair} {r.currency} / Pair</div>
+        <Collapse ghost><Panel header="تفاصيل العدسة والتوافق" key="details">
+          <Descriptions size="small" column={3} bordered>
+            <Descriptions.Item label="المادة / Index">{indexMaterialText(r.variant?.material, r.variant?.index_value)}</Descriptions.Item>
+            <Descriptions.Item label="الفئة">{r.lens_model?.category}</Descriptions.Item>
+            <Descriptions.Item label="التصميم">{r.design_variant || r.variant?.design_variant || '—'}</Descriptions.Item>
+            <Descriptions.Item label="الطلاء">{r.coating_name || r.coating_code || '—'}</Descriptions.Item>
+            <Descriptions.Item label="التقنية / اللون">{r.color_variant || r.variant?.color_variant || '—'}</Descriptions.Item>
+            <Descriptions.Item label="السوق">{r.market_scope || '—'}</Descriptions.Item>
+            <Descriptions.Item label="الدرجة">{r.match_score?.toFixed(1)}</Descriptions.Item>
+            <Descriptions.Item label="السبب" span={2}>{r.reason}</Descriptions.Item>
+          </Descriptions>
+        </Panel></Collapse>
+      </div>
+    );
+  };
 
   const sd = searchData;
   const headline = sd ? sellerHeadline(sd) : null;
+  // F3: identifies the SAME row the backend already proved as `best_match`
+  // (ACTIONABLE_PAIR_STATUSES + proven single-route price - isActionableBestMatch),
+  // by its exact pricing-row identity, so at most one row across every
+  // rendered table ever receives the visual cue - never a new ranking, never
+  // applied to alternatives/availability-intelligence/unverified tables.
+  const isPrimaryRow = (r) => {
+    if (!sd || !isActionableBestMatch(sd.best_match)) return false;
+    const ids = sd.best_match.pair_fulfillment.source_pricing_ids;
+    const rowIds = r?.pair_fulfillment?.source_pricing_ids;
+    return !!ids?.length && !!rowIds?.length && ids.join(',') === rowIds.join(',');
+  };
 
   return (
     <div>
@@ -896,6 +958,11 @@ const Prescriptions = () => {
         <Button type="primary" onClick={() => runSearch(searchFor, mode, mode === 'targeted' ? buildFilterPayload() : undefined)} loading={searching}>
           بحث
         </Button>
+
+        {!searching && resultsStale && (
+          <Alert type="info" showIcon style={{ marginTop: 12 }}
+            message="تم تغيير معايير البحث. اضغط بحث لعرض النتائج المحدثة." />
+        )}
 
         {searching && <div style={{ padding: 32, textAlign: 'center' }}>جاري البحث...</div>}
 

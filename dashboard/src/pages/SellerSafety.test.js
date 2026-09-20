@@ -301,3 +301,85 @@ test.each(['Bifocal', 'Progressive', 'مسافات'])(
     expect(text()).not.toContain('Young / Anti-Fatigue');
     expect(text()).not.toContain('Myopia Control');
   });
+
+// F5: explicit "criteria changed - search again" notice, only after a real
+// prior search, cleared by a fresh search - never inferred from
+// searchData===null alone (never shown on the untouched first-search state).
+test('F5: stale-results notice appears only after a completed search is invalidated by a criteria change, and clears on fresh search', async () => {
+  await mountSearch();
+  expect(text()).toContain('نتائج العدسات المطابقة');
+  expect(text()).not.toContain('تم تغيير معايير البحث');
+
+  await click('حماية من الضوء الأزرق'); // any criteria change invalidates
+  expect(text()).not.toContain('نتائج العدسات المطابقة');
+  expect(text()).toContain('تم تغيير معايير البحث. اضغط بحث لعرض النتائج المحدثة.');
+
+  await click('بحث');
+  expect(text()).toContain('نتائج العدسات المطابقة');
+  expect(text()).not.toContain('تم تغيير معايير البحث');
+});
+
+// F3: the row matching the backend-proven `best_match` (by exact
+// pricing-row identity) receives the promotion tag exactly once, and only
+// that row - sellerSections/sellerRowOrder output itself is untouched.
+test('F3: exactly one actionable result is visually promoted, matching best_match identity', async () => {
+  const promoted = { ...result }; // pair_fulfillment=pf, source_pricing_ids:[1] - same identity as response.best_match
+  const other = { ...result, company_name: 'OtherCo', model_name: 'Other Lens', variant_id: 2,
+    pair_fulfillment: { ...pf, source_pricing_ids: [2] } };
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response,
+    groups: [{ key: 'stock_outside', results: [other, promoted] }] } });
+  await mountSearch();
+  const tags = Array.from(document.querySelectorAll('.ant-tag')).filter((t) => t.textContent.trim() === 'الخيار المقترح');
+  expect(tags).toHaveLength(1);
+  expect(tags[0].closest('tr').textContent).toContain('Current Lens');
+  expect(tags[0].closest('tr').textContent).not.toContain('Other Lens');
+});
+
+// F4: alternatives must show the SAME 4-tier availability language as primary
+// results, derived only from `availability`+`market_scope` - Out Of Egypt (and
+// unknown market) must never collapse into a generic/Egypt STOCK tag.
+test('F4: alternatives distinguish Stock Egypt / Stock Out of Egypt / unknown market / RX', async () => {
+  const altBase = { lens_model: { name: 'Alt Lens', company: { name: 'AltCo' }, category: 'single_vision' },
+    variant: { material: 'CR39', index_value: 1.5 }, match_score: 80, reason: 'match reason', currency: 'EGP' };
+  const alts = [
+    { ...altBase, availability: 'stock', market_scope: 'Egypt', price_pair: '1001', source_pricing_id: 1 },
+    { ...altBase, availability: 'stock', market_scope: 'Out Of Egypt', price_pair: '1002', source_pricing_id: 2 },
+    { ...altBase, availability: 'stock', market_scope: null, price_pair: '1003', source_pricing_id: 3 },
+    { ...altBase, availability: 'rx', market_scope: null, price_pair: '1004', source_pricing_id: 4 },
+  ].map((r) => ({ result: r, proximity_reason: 'قريب من الطلب', relaxed_filters: [] }));
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response, exact_total: 0, groups: [],
+    availability_answer: { code: 'none', title: 'لا يوجد', detail: null }, alternatives: alts } });
+  await mountSearch(); await click('مرشحات متقدمة'); await click('بحث');
+
+  const cardFor = (price) => Array.from(document.querySelectorAll('.ant-card')).find((c) => c.textContent.includes(price));
+  const egypt = cardFor('1001'); const outside = cardFor('1002'); const unknown = cardFor('1003'); const rx = cardFor('1004');
+  expect(egypt.textContent).toContain('STOCK داخل مصر');
+  expect(outside.textContent).toContain('STOCK خارج مصر');
+  expect(outside.textContent).not.toContain('STOCK داخل مصر');
+  expect(unknown.textContent).toContain('مكان التوفر غير محدد');
+  expect(rx.textContent).toContain('RX / تصنيع');
+});
+
+// F7: alternative's primary info (identity/price/availability) stays
+// immediately visible; secondary technical detail moves behind the same
+// collapsed-panel pattern already used elsewhere - nothing is removed.
+test('F7: alternative primary info is immediate, secondary detail is collapsed but reachable', async () => {
+  const alt = { lens_model: { name: 'Alt Lens', company: { name: 'AltCo' }, category: 'single_vision' },
+    variant: { material: 'CR39', index_value: 1.5 }, match_score: 80,
+    reason: 'سبب فريد للاختبار السبعة', currency: 'EGP',
+    availability: 'stock', market_scope: 'Egypt', price_pair: '1500', source_pricing_id: 1 };
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response, exact_total: 0, groups: [],
+    availability_answer: { code: 'none', title: 'لا يوجد', detail: null },
+    alternatives: [{ result: alt, proximity_reason: 'قريب من الطلب', relaxed_filters: ['coating'] }] } });
+  await mountSearch(); await click('مرشحات متقدمة'); await click('بحث');
+
+  expect(text()).toContain('AltCo — Alt Lens');
+  expect(text()).toContain('سعر الزوج: 1500 EGP / Pair');
+  expect(text()).toContain('STOCK داخل مصر');
+  expect(text()).toContain('سبب الاقتراح: قريب من الطلب');
+  expect(text()).toContain('مختلف: coating');
+  expect(text()).not.toContain('سبب فريد للاختبار السبعة');
+
+  await click('تفاصيل العدسة والتوافق');
+  expect(text()).toContain('سبب فريد للاختبار السبعة');
+});
