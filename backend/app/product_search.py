@@ -260,8 +260,56 @@ def _applicable_ranges(p: models.VariantPricing, applicability_key: Optional[str
     return [pr for pr in ranges if pr.applicability_key == applicability_key]
 
 
+def _check_range_with_add_policy(pr: "models.PowerRange", prescription: models.Prescription,
+                                  eye: str, add_neutral_if_unproven: bool) -> bool:
+    """Wraps the FROZEN `lens_matcher.check_power_range` (never modified) with
+    ONE additive, product_search-layer ADD policy - Special Lenses
+    architecture, owner-confirmed 2026-09-20/21. The decision is made per
+    RANGE from that range's OWN proven data, never from a manufacturer/model
+    name (no hardcoding).
+
+    A range that itself proves a real ADD/addition-power corridor (add_min
+    AND add_max both printed - e.g. ZEISS Office Lenses' catalog-proven
+    0.75-3.50 dpt) ALWAYS requires the eye's own ADD to be entered and
+    inside that corridor: a missing/zero ADD is a hard reject here, never
+    silently un-checked the way an ordinary unset ADD elsewhere would be.
+    This is independent of `add_neutral_if_unproven` - once a range proves a
+    corridor, it is never treated as ADD-optional.
+
+    A range with NO add_min/add_max at all keeps behaving exactly as before
+    this fix existed, based on which use_mode family called it:
+      - `add_neutral_if_unproven=True` (the "office"/Special-Lenses-Office
+        use_mode): the eye's real ADD - whatever it is - is never consulted
+        for THIS range, matching the pre-existing Occupational/Office
+        ADD-neutral guarantee exactly for every manufacturer that proves no
+        ADD corridor (an unrelated ADD already on the prescription must never
+        affect their eligibility).
+      - `add_neutral_if_unproven=False` (every other use_mode, unchanged
+        since V1.2): the frozen matcher's own existing fail-closed "does not
+        support ADD" rule applies exactly as it always has, UNTOUCHED - the
+        mandatory-corridor branch below is gated on `add_neutral_if_unproven`
+        precisely so a row that happens to carry add_min/add_max (e.g. a
+        Progressive/Bifocal row, or any other pre-existing catalog data) is
+        never affected outside the "office" use_mode. Several other
+        use_modes (distance/reading/anti_fatigue/myopia_control) deliberately
+        zero the prescription's ADD upstream in `search()` for their own
+        unrelated, pre-existing reasons; without this gate that forced zero
+        would be misread as "missing ADD" and wrongly reject those rows.
+    """
+    if add_neutral_if_unproven:
+        if pr.add_min is not None and pr.add_max is not None:
+            add = prescription.od_add if eye == "od" else prescription.os_add
+            if not add or add <= 0 or not (pr.add_min <= add <= pr.add_max):
+                return False
+            return lens_matcher.check_power_range(pr, prescription, eye)[0]
+        neutral = _SearchRx(prescription, od_add=0.0, os_add=0.0)
+        return lens_matcher.check_power_range(pr, neutral, eye)[0]
+    return lens_matcher.check_power_range(pr, prescription, eye)[0]
+
+
 def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription, eye: str,
-                    applicability_key: Optional[str] = None) -> str:
+                    applicability_key: Optional[str] = None,
+                    add_neutral_if_unproven: bool = False) -> str:
     """Tri-state optical eligibility of ONE pricing row for ONE eye:
     "eligible" | "ineligible" | "unknown".
 
@@ -296,7 +344,8 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
     (harmless, unreachable from here) rather than removed in this pass."""
     ranges = _applicable_ranges(p, applicability_key)
     if ranges:
-        ok = any(lens_matcher.check_power_range(pr, prescription, eye)[0] for pr in ranges)
+        ok = any(_check_range_with_add_policy(pr, prescription, eye, add_neutral_if_unproven)
+                for pr in ranges)
         return "eligible" if ok else "ineligible"
     if list(p.power_ranges):
         return "ineligible"       # split row that doesn't offer the requested subtype at all
@@ -306,13 +355,15 @@ def _row_eye_status(p: models.VariantPricing, prescription: models.Prescription,
 
 
 def _row_covers_eye(p: models.VariantPricing, prescription: models.Prescription, eye: str,
-                    applicability_key: Optional[str] = None) -> bool:
+                    applicability_key: Optional[str] = None,
+                    add_neutral_if_unproven: bool = False) -> bool:
     """Backward-compatible boolean view: True only for a PROVEN-eligible row."""
-    return _row_eye_status(p, prescription, eye, applicability_key) == "eligible"
+    return _row_eye_status(p, prescription, eye, applicability_key, add_neutral_if_unproven) == "eligible"
 
 
 def _row_eye_proving_keys(p: models.VariantPricing, prescription: models.Prescription,
-                          eye: str, applicability_key: Optional[str] = None) -> frozenset:
+                          eye: str, applicability_key: Optional[str] = None,
+                          add_neutral_if_unproven: bool = False) -> frozenset:
     """Which PowerRange.applicability_key value(s) prove this eye eligible for
     this ONE pricing row - None for an ordinary undifferentiated range (the
     overwhelming majority: HOYA, and every non-split ZEISS row). A row can
@@ -337,11 +388,13 @@ def _row_eye_proving_keys(p: models.VariantPricing, prescription: models.Prescri
     if not ranges:
         if list(p.power_ranges):
             return frozenset()   # split row, requested subtype not offered here
-        return frozenset({None}) if _row_eye_status(p, prescription, eye) == "eligible" else frozenset()
+        return (frozenset({None})
+                if _row_eye_status(p, prescription, eye, add_neutral_if_unproven=add_neutral_if_unproven) == "eligible"
+                else frozenset())
     return frozenset(
         pr.applicability_key
         for pr in ranges
-        if lens_matcher.check_power_range(pr, prescription, eye)[0]
+        if _check_range_with_add_policy(pr, prescription, eye, add_neutral_if_unproven)
     )
 
 
@@ -349,13 +402,14 @@ _DIAMETER_NOTE_RE = re.compile(r"(?:Ø|diameter_mm=)\s*(\d+)")
 
 
 def _row_matching_ranges(p: models.VariantPricing, prescription: models.Prescription,
-                         eye: str, applicability_key: Optional[str] = None) -> List["models.PowerRange"]:
+                         eye: str, applicability_key: Optional[str] = None,
+                         add_neutral_if_unproven: bool = False) -> List["models.PowerRange"]:
     """Every PowerRange of `p` that actually proves ONE eye eligible for this
     prescription (never just a pass/fail bool) - used only to inspect what
     catalog EVIDENCE (e.g. a printed diameter) backed the proof, never to
     change eligibility itself."""
     ranges = _applicable_ranges(p, applicability_key)
-    return [pr for pr in ranges if lens_matcher.check_power_range(pr, prescription, eye)[0]]
+    return [pr for pr in ranges if _check_range_with_add_policy(pr, prescription, eye, add_neutral_if_unproven)]
 
 
 def _extract_diameter_mm(notes: Optional[str]) -> Optional[int]:
@@ -371,12 +425,14 @@ def _extract_diameter_mm(notes: Optional[str]) -> Optional[int]:
 
 
 def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Prescription,
-                      eye: str, applicability_key: Optional[str] = None) -> str:
+                      eye: str, applicability_key: Optional[str] = None,
+                      add_neutral_if_unproven: bool = False) -> str:
     """Tri-state aggregation across every row of one route for one eye:
     "eligible" if ANY row is proven eligible (an eligible row always wins over
     an unknown one elsewhere in the same route); else "unknown" if ANY row is
     unresolved; else "ineligible"."""
-    statuses = [_row_eye_status(p, prescription, eye, applicability_key) for p in rows]
+    statuses = [_row_eye_status(p, prescription, eye, applicability_key, add_neutral_if_unproven)
+                for p in rows]
     if any(s == "eligible" for s in statuses):
         return "eligible"
     if any(s == "unknown" for s in statuses):
@@ -385,13 +441,15 @@ def _route_eye_status(rows: List[models.VariantPricing], prescription: models.Pr
 
 
 def _route_covers_eye(rows: List[models.VariantPricing], prescription: models.Prescription,
-                      eye: str, applicability_key: Optional[str] = None) -> bool:
-    return _route_eye_status(rows, prescription, eye, applicability_key) == "eligible"
+                      eye: str, applicability_key: Optional[str] = None,
+                      add_neutral_if_unproven: bool = False) -> bool:
+    return _route_eye_status(rows, prescription, eye, applicability_key, add_neutral_if_unproven) == "eligible"
 
 
 def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
                       prescription: models.Prescription, eye: str,
-                      applicability_key: Optional[str] = None) -> schemas.EyeAvailability:
+                      applicability_key: Optional[str] = None,
+                      add_neutral_if_unproven: bool = False) -> schemas.EyeAvailability:
     # .get(..., []) - Phase 3C added the "stock_market_unknown" tier after
     # several existing callers (and their tests) already built a `routes`
     # dict with only the original 3 keys; treating an absent tier as "no
@@ -399,10 +457,10 @@ def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
     # caller that has not been updated to the 4-tier shape, without ever
     # hiding a real row (every REAL row still lands in some route bucket
     # wherever `routes` is actually built from `_row_route`, e.g. _per_eye_results).
-    se = _route_eye_status(routes.get("stock_egypt", []), prescription, eye, applicability_key)
-    so = _route_eye_status(routes.get("stock_outside", []), prescription, eye, applicability_key)
-    su = _route_eye_status(routes.get("stock_market_unknown", []), prescription, eye, applicability_key)
-    rx = _route_eye_status(routes.get("rx", []), prescription, eye, applicability_key)
+    se = _route_eye_status(routes.get("stock_egypt", []), prescription, eye, applicability_key, add_neutral_if_unproven)
+    so = _route_eye_status(routes.get("stock_outside", []), prescription, eye, applicability_key, add_neutral_if_unproven)
+    su = _route_eye_status(routes.get("stock_market_unknown", []), prescription, eye, applicability_key, add_neutral_if_unproven)
+    rx = _route_eye_status(routes.get("rx", []), prescription, eye, applicability_key, add_neutral_if_unproven)
     best = ("stock_egypt" if se == "eligible" else
             "stock_outside" if so == "eligible" else
             "stock_market_unknown" if su == "eligible" else
@@ -418,7 +476,8 @@ def _eye_availability(routes: Dict[str, List[models.VariantPricing]],
 
 def _diameter_confirmation_note(candidates: List[Tuple[models.VariantPricing, Optional[str]]],
                                 prescription: models.Prescription,
-                                applicability_key: Optional[str]) -> Optional[str]:
+                                applicability_key: Optional[str],
+                                add_neutral_if_unproven: bool = False) -> Optional[str]:
     """When 2+ same-identity/same-tier candidate rows all prove eligible for
     the SAME prescription at DIFFERENT prices, and their proving PowerRange
     evidence records DIFFERENT diameters, the cheaper price is not
@@ -440,7 +499,7 @@ def _diameter_confirmation_note(candidates: List[Tuple[models.VariantPricing, Op
         eye_diameters = []
         for eye in ("od", "os"):
             eye_diameters.append({d for pr in _row_matching_ranges(
-                p, prescription, eye, applicability_key)
+                p, prescription, eye, applicability_key, add_neutral_if_unproven)
                 if (d := _extract_diameter_mm(pr.notes)) is not None})
         for d in eye_diameters[0] | eye_diameters[1]:
             prices_by_diameter.setdefault(d, [])
@@ -493,7 +552,8 @@ def _price_confirmation_note(pricing):
 def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
                       od: schemas.EyeAvailability, os_: schemas.EyeAvailability,
                       prescription: models.Prescription,
-                      applicability_key: Optional[str] = None) -> schemas.PairFulfillment:
+                      applicability_key: Optional[str] = None,
+                      add_neutral_if_unproven: bool = False) -> schemas.PairFulfillment:
     od_ok = {"stock_egypt": od.stock_egypt, "stock_outside": od.stock_outside,
              "stock_market_unknown": od.stock_market_unknown, "rx": od.rx}
     os_ok = {"stock_egypt": os_.stock_egypt, "stock_outside": os_.stock_outside,
@@ -505,8 +565,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
         if not (od_ok[tier] and os_ok[tier]):
             continue
         rows = routes.get(tier, [])
-        od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od", applicability_key)]
-        os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os", applicability_key)]
+        od_rows = [p for p in rows if _row_covers_eye(p, prescription, "od", applicability_key, add_neutral_if_unproven)]
+        os_rows = [p for p in rows if _row_covers_eye(p, prescription, "os", applicability_key, add_neutral_if_unproven)]
 
         # (a) ONE VariantPricing row (its OR PowerRanges) covers BOTH eyes -> a
         #     single proven pricing route. Its catalog pair price stands -
@@ -531,10 +591,10 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
         proving_key = None
         candidates = []
         for p in od_rows:
-            if not _row_covers_eye(p, prescription, "os", applicability_key):
+            if not _row_covers_eye(p, prescription, "os", applicability_key, add_neutral_if_unproven):
                 continue
-            common = (_row_eye_proving_keys(p, prescription, "od", applicability_key)
-                     & _row_eye_proving_keys(p, prescription, "os", applicability_key))
+            common = (_row_eye_proving_keys(p, prescription, "od", applicability_key, add_neutral_if_unproven)
+                     & _row_eye_proving_keys(p, prescription, "os", applicability_key, add_neutral_if_unproven))
             if common:
                 candidates.append((p, next(iter(common - {None}), None)))
         if candidates:
@@ -548,7 +608,7 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
             # price is not unconditionally final: which one applies depends
             # on a real commercial dimension (diameter) this matcher cannot
             # evaluate. Never silently hidden behind the cheaper price.
-            diameter_note = _diameter_confirmation_note(candidates, prescription, applicability_key)
+            diameter_note = _diameter_confirmation_note(candidates, prescription, applicability_key, add_neutral_if_unproven)
             combined_note = _price_confirmation_note(both)
             if diameter_note:
                 combined_note = f"{combined_note} | {diameter_note}" if combined_note else diameter_note
@@ -569,8 +629,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
             for b in os_rows:
                 if a.id == b.id or not _same_pricing_offer(a, b):
                     continue
-                common = (_row_eye_proving_keys(a, prescription, "od", applicability_key)
-                         & _row_eye_proving_keys(b, prescription, "os", applicability_key))
+                common = (_row_eye_proving_keys(a, prescription, "od", applicability_key, add_neutral_if_unproven)
+                         & _row_eye_proving_keys(b, prescription, "os", applicability_key, add_neutral_if_unproven))
                 if common:
                     or_candidates.append(((a, b), next(iter(common - {None}), None)))
         if or_candidates:
@@ -608,8 +668,8 @@ def _pair_fulfillment(routes: Dict[str, List[models.VariantPricing]],
     if od.best == "unknown" or os_.best == "unknown":
         unresolved_ids = sorted({
             p.id for tier in _TIERS for p in routes.get(tier, [])
-            if _row_eye_status(p, prescription, "od", applicability_key) == "unknown"
-            or _row_eye_status(p, prescription, "os", applicability_key) == "unknown"
+            if _row_eye_status(p, prescription, "od", applicability_key, add_neutral_if_unproven) == "unknown"
+            or _row_eye_status(p, prescription, "os", applicability_key, add_neutral_if_unproven) == "unknown"
         })
         return schemas.PairFulfillment(
             status="eligibility_unknown", price_pair=None, currency=None,
@@ -761,6 +821,20 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
                      derived_category: Optional[str] = None,
                      technology_intent: Optional[str] = None,
                      ) -> List[schemas.PerEyeProductResult]:
+    # Special Lenses architecture (owner-confirmed, 2026-09-20/21): the ONE
+    # place that decides whether a candidate row with NO add_min/add_max may
+    # be treated as ADD-irrelevant (the existing Occupational/Office
+    # manufacturers' unchanged guarantee) - see _check_range_with_add_policy
+    # for the actual per-row decision, which is otherwise entirely
+    # data-driven (never company/model name). `derived_category` covers
+    # automatic mode; targeted mode folds
+    # the same category into `filters.category` instead (see search()) -
+    # both must be checked here so this flag is correct either way.
+    _effective_category = derived_category
+    if _effective_category is None and filters is not None and filters.category is not None:
+        _effective_category = getattr(filters.category, "value", filters.category)
+    add_neutral_if_unproven = _effective_category == "office"
+
     probe = _probe_filters(filters)
     rows = lens_matcher._current_pricing_candidates(db, probe)
 
@@ -850,9 +924,9 @@ def _per_eye_results(db: Session, prescription: models.Prescription,
                           "rx": eligible_rx}
 
         applicability_key = filters.applicability_key if filters else None
-        od = _eye_availability(routes, prescription, "od", applicability_key)
-        os_ = _eye_availability(routes, prescription, "os", applicability_key)
-        pf = _pair_fulfillment(routes, od, os_, prescription, applicability_key)
+        od = _eye_availability(routes, prescription, "od", applicability_key, add_neutral_if_unproven)
+        os_ = _eye_availability(routes, prescription, "os", applicability_key, add_neutral_if_unproven)
+        pf = _pair_fulfillment(routes, od, os_, prescription, applicability_key, add_neutral_if_unproven)
 
         if addon_price is not None:
             # Only a genuinely proven single-route RX price may be completed
@@ -1153,22 +1227,50 @@ def search(db: Session, prescription: models.Prescription,
         if use_mode == "distance":
             # ADD must NEVER affect Single Vision Distance eligibility.
             search_prescription = _SearchRx(prescription, od_add=0.0, os_add=0.0)
-        elif use_mode in ("office", "anti_fatigue", "myopia_control"):
+        elif use_mode == "office":
+            # Special Lenses - Occupational/Office (Special Lenses
+            # architecture, 2026-09-19; ZEISS ADD-aware update, owner-
+            # confirmed 2026-09-20/21): unlike anti_fatigue/myopia_control
+            # below, "office" candidates are NOT uniformly ADD-neutral any
+            # more - ZEISS Office Lenses print a real, catalog-proven
+            # 0.75-3.50 dpt ADD/addition-power corridor (ZEISS_Main_Catalog.pdf
+            # pp.33-34, "Power range: Office Lenses"), while the other
+            # Occupational/Office manufacturers already ingested (see
+            # app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS) still
+            # prove none at all. A single request-wide zero would either
+            # fabricate an ADD requirement those manufacturers never earned,
+            # or discard ZEISS's real catalog data - neither is acceptable,
+            # and which one applies is only knowable per CANDIDATE ROW, not
+            # once per request. So: no derivation here - the real
+            # prescription ADD (as entered) flows through unchanged, exactly
+            # like bifocal/progressive below, and the actual per-row decision
+            # is made entirely from each candidate's OWN PowerRange data by
+            # `_check_range_with_add_policy` / `add_neutral_if_unproven` in
+            # `_per_eye_results`: a row with no add_min/add_max is evaluated
+            # ADD-neutral (those manufacturers' existing guarantee,
+            # byte-for-byte unchanged - an unrelated ADD already on the
+            # prescription still never affects them); a row that DOES prove a
+            # corridor (ZEISS)
+            # requires the entered ADD and enforces its exact printed range,
+            # missing ADD included. Never a manufacturer/model-name check -
+            # purely data-driven from what each row's own catalog evidence
+            # proves.
+            pass  # search_prescription stays = prescription (no derivation)
+        elif use_mode in ("anti_fatigue", "myopia_control"):
             # Special Lenses subtypes (Special Lenses architecture,
-            # 2026-09-19): a DISTINCT branch per proven subtype, never folded
-            # into the bifocal/progressive "Distance Rx + ADD, ADD required"
-            # rule below. None of the catalog-proven products behind these
-            # three subtypes carry a printed ADD-power corridor (see
-            # app/catalog_corrections.py OCCUPATIONAL_OFFICE_MODELS /
+            # 2026-09-19): unlike "office" above, no catalog-proven product
+            # under EITHER of these two subtypes carries a printed ADD-power
+            # corridor yet (see app/catalog_corrections.py
             # ANTI_FATIGUE_MODELS / MYOPIA_CONTROL_MODELS for the exact
-            # per-manufacturer catalog evidence), so ADD is forced to 0 here,
-            # same mechanism/reason as Single Vision Distance above: an
-            # unrelated ADD already on the prescription must never affect
-            # eligibility for a subtype whose catalog proves no ADD range.
-            # Never infer an ADD range that isn't printed - if a future
-            # proven product for one of these subtypes DOES carry a real
-            # ADD/boost corridor, that product needs its own branch, not a
-            # silent change to this shared one.
+            # per-manufacturer evidence), so the simpler, original mechanism
+            # is kept exactly as-is: ADD is forced to 0 here, same reason as
+            # Single Vision Distance above - an unrelated ADD already on the
+            # prescription must never affect eligibility for a subtype whose
+            # catalog proves no ADD range. Never infer an ADD range that
+            # isn't printed - if a future proven product for one of these two
+            # subtypes DOES carry a real ADD corridor, it needs the SAME
+            # per-row treatment "office" just got above, not a silent change
+            # to this branch.
             search_prescription = _SearchRx(prescription, od_add=0.0, os_add=0.0)
         elif use_mode == "reading":
             if _add_missing(prescription.od_add) or _add_missing(prescription.os_add):

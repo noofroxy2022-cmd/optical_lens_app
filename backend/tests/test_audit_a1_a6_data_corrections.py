@@ -37,10 +37,19 @@ def test_a1_zeiss_1_53_variants_are_trivex():
     # audit.md A1 / Section G item 4: p.8 (3x) prints index 1.53 as
     # "1.53 (Trivex)" with Abbe/Density constants distinct from CR39 - the
     # only ZEISS index with a catalog-proven material correction.
+    #
+    # Count updated 7 -> 13 (Special Lenses architecture, ZEISS Office
+    # Lenses ingestion, owner-confirmed 2026-09-21): the same A1 rule applies
+    # unchanged, automatically, via the existing _TRIVEX_1_53_COMPANIES/
+    # corrected_identity() correction (no new material code) - it now also
+    # covers the 6 new ZEISS "Office" variants at index 1.53 (Clear + Blue
+    # Guard treatment bands, one variant per Individual/Superb/Plus tier =
+    # 2 bands x 3 tiers = 6), on top of the original 7. See
+    # app/zeiss_office_evidence.py for the full ingestion evidence.
     rows = _rows("""select v.id, v.material from lens_variants v
                     join lens_models m on m.id = v.lens_model_id
                     where m.company_id = 2 and v.index_value = 1.53""")
-    assert len(rows) == 7
+    assert len(rows) == 13
     assert all(material == "TRIVEX" for _id, material in rows)
 
 
