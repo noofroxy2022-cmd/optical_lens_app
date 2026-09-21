@@ -14,36 +14,32 @@ LOCAL_EGYPT_MANUFACTURERS = frozenset({"SCOPE", "PLATINUM"})
 
 
 def local_manufacturing(result):
-    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): the Special Lenses
-    # architecture (2026-09-19/20) added "anti_fatigue" as its own RX-tiered
-    # category alongside progressive/bifocal, but this category tuple was
-    # never updated to match - so a genuinely local-Egypt-manufactured
-    # Young/Anti-Fatigue RX result (e.g. SCOPE Young Shabab) could never be
-    # tagged manufacturing_location="egypt" and always fell into the generic
-    # "other RX" tier instead of its own local-manufacturing tier. Scoped
-    # narrowly to the one category this HAT proved affected; "office" and
-    # "myopia_control" were not proven to have local-Egypt RX candidates in
-    # this pass and are deliberately left untouched here.
-    return (result.category in ("progressive", "bifocal", "anti_fatigue")
-            and result.pair_fulfillment.status == "rx"
+    # CENTRALIZED (owner-confirmed HAT fix, 2026-09-21): a company/manufacturing
+    # identity, not a subtype rule. LOCAL_EGYPT_MANUFACTURERS (SCOPE, PLATINUM)
+    # are Egyptian manufacturers - every RX/manufactured lens of theirs, in
+    # every category (progressive, bifocal, anti_fatigue, myopia_control,
+    # office, digital, single_vision, and any future category), is
+    # manufactured inside Egypt. Earlier revisions gated this on an explicit
+    # category tuple ("progressive", "bifocal", then "anti_fatigue" added
+    # 2026-09-21) that had to be hand-extended every time a new RX-eligible
+    # category was introduced - that was the root cause of SCOPE Myopia
+    # Control (and, before that, Young/Anti-Fatigue) rows silently missing
+    # manufacturing_location="egypt". The category tuple is gone; this is now
+    # the single source of truth both UI grouping (product_search.py) and
+    # seller_order() below consume, so they can never drift apart again.
+    return (result.pair_fulfillment.status == "rx"
             and result.company_name in LOCAL_EGYPT_MANUFACTURERS)
 
 
 def seller_order(result):
     """Called only after actionable(): availability, price, then score."""
     status = result.pair_fulfillment.status
-    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): same gap as
-    # local_manufacturing() above - this SEPARATE category tuple (it decides
-    # RANKING, local_manufacturing's own tuple only decides the tag/tier
-    # grouping) also never got "anti_fatigue" added, so best_match/seller_
-    # alternatives ranking silently fell back to flat availability-tier+price
-    # for Young/Anti-Fatigue, treating a local and a foreign RX candidate as
-    # equally-tiered instead of preferring the local one.
-    if result.category in ("progressive", "bifocal", "anti_fatigue"):
-        tier = 0 if local_manufacturing(result) else 1
-    else:
-        tier = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}[status]
-    return tier, result.pair_fulfillment.price_pair, -float(result.match_score)
+    base = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}[status]
+    # Sub-tier only matters within the RX base tier (local_manufacturing()
+    # already requires status == "rx", so it is always False - a fixed,
+    # order-neutral constant - for stock rows).
+    sub = 0 if local_manufacturing(result) else 1
+    return base, sub, result.pair_fulfillment.price_pair, -float(result.match_score)
 
 TECHNOLOGY = {
     "screens_blue_light": "blue_light",
