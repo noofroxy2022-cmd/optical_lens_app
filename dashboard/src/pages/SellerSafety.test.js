@@ -63,6 +63,37 @@ test.each([
   expect(text()).toContain('السعر الأساسي: 2500');
   expect(text()).not.toContain('سعر الزوج النهائي:');
 });
+test('confirmed price renders inside the dedicated confirmed-price badge, amount bold and Pair unit visible', () => {
+  act(() => root.render(<PairPrice pf={pf} />));
+  const badge = document.querySelector('.pair-price-confirmed');
+  expect(badge).toBeTruthy();
+  expect(badge.querySelector('b').textContent).toBe('2500');
+  expect(badge.textContent).toContain('EGP');
+  expect(badge.textContent).toContain('/ Pair');
+});
+test.each([
+  { price_confirmation_note: 'PIXEL Hi Power' },
+  { needs_review: true },
+  { price_pair: null, technology_addon: { unit_status: 'UNIT_UNRESOLVED', base_price: 2500 } },
+])('pending price never receives the confirmed-price badge: %j', (patch) => {
+  act(() => root.render(<PairPrice pf={{ ...pf, ...patch }} />));
+  expect(document.querySelector('.pair-price-confirmed')).toBeNull();
+});
+test('seller results table applies the confirmed badge only to confirmed rows, across the same shared table renderer', async () => {
+  prescriptionAPI.search.mockResolvedValue({ data: { ...response, best_match: null, seller_alternatives: [],
+    groups: [{ key: 'rx', label: 'RX', count: 2, results: [
+      result,
+      { ...result, company_name: 'DIVEL', pair_fulfillment: { ...pf, price_confirmation_note: 'Diameter' } },
+    ] }] } });
+  await mountSearch();
+  const rows = document.querySelectorAll('[data-seller-section="rx"] .ant-table-row');
+  expect(rows).toHaveLength(2);
+  const confirmedRow = Array.from(rows).find((r) => r.textContent.includes('SellerTest'));
+  const pendingRow = Array.from(rows).find((r) => r.textContent.includes('DIVEL'));
+  expect(confirmedRow.querySelector('.pair-price-confirmed')).toBeTruthy();
+  expect(pendingRow.querySelector('.pair-price-confirmed')).toBeNull();
+  expect(pendingRow.textContent).toContain('بانتظار تأكيد السعر');
+});
 test('headline prefers actionable outside stock over pending Egypt and handles pending/unknown', () => {
   expect(sellerHeadline(response).title).toContain('خارج مصر');
   expect(sellerHeadline({ ...response, best_match: null }).title).toContain('يحتاج تأكيد');

@@ -100,6 +100,16 @@ export const priceNeedsConfirmation = (pf) => Boolean(
   || pf.provenance !== 'single_route' || pf.price_pair == null || !Number.isFinite(Number(pf.price_pair)) || Number(pf.price_pair) <= 0
 );
 
+// Confirmed-price badge: restrained gold, amount is the strongest element -
+// visually on par with the existing availability Tags, never neon/bright.
+// Distinct from the pale price_confirmation_note warning box below (#fffbe6/
+// #ffe58f) so a confirmed price can never be mistaken for a pending one.
+const PAIR_PRICE_BADGE_STYLE = {
+  display: 'inline-flex', alignItems: 'baseline', gap: 4,
+  background: '#fff1b8', border: '1px solid #ffd666', borderRadius: 6,
+  padding: '1px 10px', color: '#613400',
+};
+
 export const PairPrice = ({ pf }) => {
   const pending = priceNeedsConfirmation(pf);
   const base = pf.technology_addon?.base_price ?? pf.price_pair;
@@ -107,7 +117,12 @@ export const PairPrice = ({ pf }) => {
     <b style={{ color: '#ad6800' }}>بانتظار تأكيد السعر</b>
     {base != null && <div style={{ fontSize: 12 }}>السعر الأساسي: {base} {pf.currency} / Pair — السعر النهائي غير مؤكد</div>}
     <div style={{ fontSize: 12 }}>{pf.price_confirmation_note || (pf.needs_review ? 'بحاجة لمراجعة قبل اعتماد السعر' : 'لا يوجد سعر نهائي مؤكد')}</div>
-  </div> : <div><b>سعر الزوج النهائي: </b>{pf.price_pair} {pf.currency} / Pair</div>;
+  </div> : <div>
+    <span style={{ color: '#595959' }}>سعر الزوج النهائي: </span>
+    <span className="pair-price-confirmed" style={PAIR_PRICE_BADGE_STYLE}>
+      <b style={{ fontSize: 16 }}>{pf.price_pair}</b> {pf.currency} / Pair
+    </span>
+  </div>;
 };
 
 export const sellerNeedPayload = (needs) => ({ customer_needs: needs });
