@@ -106,7 +106,7 @@ export const priceNeedsConfirmation = (pf) => Boolean(
 // #ffe58f) so a confirmed price can never be mistaken for a pending one.
 const PAIR_PRICE_BADGE_STYLE = {
   display: 'inline-flex', alignItems: 'baseline', gap: 4,
-  background: '#fff1b8', border: '1px solid #ffd666', borderRadius: 6,
+  background: '#FFF7B2', border: '1px solid #F2C94C', borderRadius: 6,
   padding: '1px 10px', color: '#613400',
 };
 
