@@ -151,6 +151,13 @@ def test_included_blue_never_duplicates_addon(db, company, coating, index):
 
 
 def test_pixel_abbreviations_do_not_gain_photo_capabilities():
-    for color in ("Transmatic/G/B", "Transition/G/B", "Polz/G/B", "DWEAR/B"):
+    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): "Transmatic/G/B" and
+    # "Transition/G/B" are proven TR/Transition products and now correctly
+    # DO gain photo_gray+photo_brown - see
+    # test_pixel_transmatic_proves_photo_gray_and_photo_brown in
+    # test_use_mode_technology.py. "Polz/G/B" (Polarized, not photochromic)
+    # and "DWEAR/B" (never described in the catalog) remain unproven and stay
+    # in this negative-safety check.
+    for color in ("Polz/G/B", "DWEAR/B"):
         caps = te.proven_capabilities("Pixel", "Astro", None, color)
         assert te.PHOTO_GRAY not in caps and te.PHOTO_BROWN not in caps

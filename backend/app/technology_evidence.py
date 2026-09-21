@@ -129,6 +129,16 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # "Neva blu" (BBGR coating) is left OUT: no corroborating evidence proves
     # it names a blue-light technology rather than being a coincidental brand
     # name containing "blu" (Phase 4 - explicitly flagged ambiguous).
+    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): "TR7" = BBGR's
+    # Transition line; TR/Transition products across these catalogs are
+    # confirmed available in Gray + Brown. Owner cited direct price-list
+    # evidence (BBGR PRICE LIST 2024, Stock lenses, "1.56 TR7 Neva+" = 5100),
+    # matching the DB's existing 1.56/"Neva+"/Stock/Egypt TR7 row exactly
+    # (price 5100, real PowerRange sph -6/+4 cyl -2/0). Applies to every
+    # "TR7" treatment_band row (Stock and every RX design line) - the
+    # coating name ("Neva+") is this one Stock row's own add-on identity, not
+    # the technology gate itself.
+    ("BBGR", "treatment_band", "TR7"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
 
     # ---- Maxxee ---------------------------------------------------------
     ("Maxxee", "coating", "Blue U.V"): frozenset({BLUE_LIGHT}),
@@ -157,9 +167,17 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     ("PLATINUM", "treatment_band", "G2"): frozenset({BLUE_LIGHT}),
     # "BLU STEEL" is left OUT: sits among PLATINUM's stylistic/tier branding
     # values (X-PERIENCE, X-TEND, Young, HD) with no corroborating note - no
-    # confirmed blue-light meaning. PLATINUM's only colour evidence (plain
-    # "Gray") is tied to Plano-only SUN stock, never photochromic - no
-    # photo_gray/photo_brown entry exists for PLATINUM.
+    # confirmed blue-light meaning.
+    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): "SUN" is PLATINUM's
+    # commercial "Sun Active" line, confirmed photochromic and available
+    # Gray + Brown - an authoritative catalog relationship, not inferred from
+    # the short price-table row name alone. Owner cited direct price-list
+    # evidence (PLATINUM PRICE LIST 2024, STOCK LENSES, "1.56 SUN" = 800),
+    # matching the DB's existing "1.56 SUN" Stock/Egypt row (price 800, real
+    # PowerRange sph -6/+4 cyl -3/0) exactly. Applies to every "Sun"
+    # treatment_band row (Stock and RX) - never to "Sun + Polarized", a
+    # separate treatment_band value with no photochromic evidence of its own.
+    ("PLATINUM", "treatment_band", "Sun"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
 
     # ---- SEIKO ----------------------------------------------------------
     ("SEIKO", "treatment_band", "BLUEBLOCK"): frozenset({BLUE_LIGHT}),
@@ -236,20 +254,22 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # instantly indoors, automatic light-adaptive control) - a textbook
     # photochromic description, not just a brand name -> photochromic
     # CAPABILITY proven. "Transition/G/B" carries the same globally-standard
-    # trademarked photochromic term. However NO page anywhere in this catalog
-    # spells out what the "G"/"B" letters in "Transmatic/G/B",
-    # "Transmatic/B/G", "Transmatic/G", "Transition/G/B" mean (no legend, no
-    # "Gray"/"Brown" word appears anywhere in the extracted text) - unlike
-    # HOYA/SEIKO/VISALL/Maxxee, which all spell the colour out in English.
-    # Per the task's explicit instruction ("do not infer abbreviation meaning
-    # merely from convention... keep only that specific distinction
-    # ambiguous"), photochromic capability is recorded as proven-but-colour-
-    # unresolved (empty set - matches the same pattern as VISALL's bare
-    # "Photochromic" entry) rather than guessing G=Gray/B=Brown.
-    ("Pixel", "color_variant", "Transmatic/G/B"): frozenset(),
-    ("Pixel", "color_variant", "Transmatic/B/G"): frozenset(),
-    ("Pixel", "color_variant", "Transmatic/G"): frozenset(),
-    ("Pixel", "color_variant", "Transition/G/B"): frozenset(),
+    # trademarked photochromic term - "Transmatic"/"Transition" IS this
+    # catalog's own name for the Transition line.
+    # RECONCILED (owner-confirmed HAT-02/HAT fix, 2026-09-21): "TR"/Transition
+    # products across these catalogs are confirmed available in Gray + Brown -
+    # an authoritative catalog relationship, not an inference from the "G"/"B"
+    # letters themselves. Every color_variant value below is a proven
+    # Transmatic/Transition row (per the paragraph above), so each now proves
+    # BOTH photo_gray and photo_brown under that confirmed relationship -
+    # previously left as an unresolved empty set because no legend spelled out
+    # "G"/"B" in the extracted text; the owner's direct catalog evidence
+    # (Pixel "Finished, Single Vision, Out Of Egypt" price rows, e.g. the
+    # 1.61/1.67 Transmatic/G Stock rows) supersedes that ambiguity.
+    ("Pixel", "color_variant", "Transmatic/G/B"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
+    ("Pixel", "color_variant", "Transmatic/B/G"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
+    ("Pixel", "color_variant", "Transmatic/G"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
+    ("Pixel", "color_variant", "Transition/G/B"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
     # "Polz/G/B", "Polz/G/B/G15" are Polarized - explicitly NOT photochromic
     # (same rule as every other manufacturer). "DWEAR/B" is never described
     # anywhere in the catalog - stays fully unmapped, not even proven

@@ -19,7 +19,7 @@ test.each(['distance', 'reading'])('SV sections have Egypt, OOE, RX then separat
 });
 
 test.each([[], ['blue_light'], ['photo_gray'], ['photo_brown'], ['impact_resistant'], ['blue_light', 'photo_gray']].map((needs) => [needs]))(
-  'confirmed price ascending then pending then match score tiebreak, regardless of need %j or index', (customer_needs) => {
+  'HAT-01: index ascending then confirmed price ascending then pending then match score tiebreak, regardless of need %j', (customer_needs) => {
     const pending = row(4, 1.5, 1);
     pending.pair_fulfillment.price_confirmation_note = 'Confirm';
     const unresolved = row(5, 1.5, null);
@@ -29,19 +29,25 @@ test.each([[], ['blue_light'], ['photo_gray'], ['photo_brown'], ['impact_resista
     const input = [...rows];
     const sorted = sellerSections({ use_mode: 'distance', customer_needs,
       groups: [group('stock_egypt', rows)] })[0].results;
-    // price ascending (10, 20, 700, 850) regardless of differing index_value,
-    // then the two pending rows last, tiebroken by match_score (4 > 5).
-    expect(sorted.map((r) => r.variant_id)).toEqual([1, 2, 7, 6, 4, 5]);
+    // index ascending (1.5, 1.53, 1.56) groups first; within index 1.5, price
+    // ascending (700, 850) then the two pending rows last, tiebroken by
+    // match_score (4 > 5); then the 1.53 and 1.56 singletons.
+    expect(sorted.map((r) => r.variant_id)).toEqual([7, 6, 4, 5, 2, 1]);
     expect(rows).toEqual(input); // never reorder/mutate the response or prices
   });
 
-test('final pair price sorts ascending regardless of index, reproducing the reported Egypt Stock bug', () => {
+// HAT-01 (owner-approved 2026-09-21): supersedes the PRIOR fix this test used
+// to lock in (index was then the unintended PRIMARY key, fragmenting one
+// price-ordered tier into disconnected per-index runs). Index ascending is
+// now the deliberate, approved primary grouping; price still strictly
+// ascends within each index.
+test('HAT-01: index ascending then pair price ascending within each index', () => {
   const rows = [row(1, 1.6, 2250), row(2, 1.5, 3750), row(3, 1.67, 600), row(4, 1.53, 1800)];
   const sorted = sellerSections({ use_mode: 'distance', groups: [group('stock_egypt', rows)] })[0].results;
-  expect(sorted.map((r) => r.pair_fulfillment.price_pair)).toEqual([600, 1800, 2250, 3750]);
+  expect(sorted.map((r) => r.pair_fulfillment.price_pair)).toEqual([3750, 1800, 2250, 600]);
 });
 
-test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'])('local tier before other RX, price ascending not brand or index: %s', (use_mode) => {
+test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'])('HAT-01: local tier before other RX, index ascending then price ascending, not brand: %s', (use_mode) => {
   const rows = [row(1, 1.5, 1, { company_name: 'HOYA' }),
     row(2, 1.56, 100, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
     row(3, 1.5, 300, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
@@ -49,7 +55,9 @@ test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control']
   const sections = sellerSections({ use_mode, groups: [group('stock_egypt', []), group('rx', rows)] });
   expect(sections.map((s) => s.key)).toEqual(['rx']);
   expect(sections[0].tiers.map((t) => t.key)).toEqual(['local', 'other']);
-  expect(sections[0].tiers[0].results.map((r) => r.variant_id)).toEqual([2, 4, 3]);
+  // full pre-filter order is index 1.5 asc-price [1,4,3] then index 1.56 [2];
+  // filtering to local (egypt) keeps relative order: 4, 3, 2. Non-local: 1.
+  expect(sections[0].tiers[0].results.map((r) => r.variant_id)).toEqual([4, 3, 2]);
   expect(sections[0].tiers[1].results.map((r) => r.variant_id)).toEqual([1]);
 });
 

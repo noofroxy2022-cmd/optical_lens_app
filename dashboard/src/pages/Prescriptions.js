@@ -267,15 +267,27 @@ const _STATUS_TIER = { stock_egypt: 0, stock_outside: 1, stock_market_unknown: 2
   split: 4, eligibility_unknown: 5, unavailable: 5 };
 
 // Single central presentation-order rule for every seller results section:
-// availability tier, then the confirmed final pair price ascending (a
-// pending/unconfirmed price never outranks a proven one), then match_score
-// as the tiebreak - independent of selected needs. Index_value plays no part
-// here; sorting by it first (the prior bug) fragmented one price-ordered tier
-// into per-index runs, e.g. an Egypt Stock section showing 2250, 3750, 600,
-// 1800 instead of ascending price.
+// availability tier, then refractive index ascending (HAT-01, owner-approved
+// 2026-09-21 - groups same-index options together so the seller scans one
+// index band at a time instead of prices jumping between indices), then the
+// confirmed final pair price ascending within that index (a pending/
+// unconfirmed price never outranks a proven one), then match_score as the
+// tiebreak - independent of selected needs. This supersedes the earlier
+// price-only rule (which existed to fix a DIFFERENT bug: index being used as
+// the ONLY/primary key and fragmenting one tier into disconnected per-index
+// price runs) - index is now the intentional, approved primary grouping, with
+// price still strictly ascending inside each index group. A missing/
+// unparseable index is never allowed to jump ahead of a known one - it always
+// sorts after every row with a real index.
 export const sellerRowOrder = (a, b) => {
   const tier = (_STATUS_TIER[a.pair_fulfillment.status] ?? 3) - (_STATUS_TIER[b.pair_fulfillment.status] ?? 3);
   if (tier) return tier;
+  const aIndex = Number(a.index_value);
+  const bIndex = Number(b.index_value);
+  const aIndexValid = Number.isFinite(aIndex);
+  const bIndexValid = Number.isFinite(bIndex);
+  if (aIndexValid !== bIndexValid) return aIndexValid ? -1 : 1;
+  if (aIndexValid && aIndex !== bIndex) return aIndex - bIndex;
   const pendingA = priceNeedsConfirmation(a.pair_fulfillment);
   const pendingB = priceNeedsConfirmation(b.pair_fulfillment);
   if (pendingA !== pendingB) return pendingA ? 1 : -1;

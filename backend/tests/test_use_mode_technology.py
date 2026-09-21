@@ -306,6 +306,129 @@ def test_photo_brown(db):
     assert companies == {"Maxxee"}
 
 
+def _hat_presc(db):
+    """The exact HAT-02/HAT-fix acceptance prescription: OD/OS SPH -2 / CYL
+    -1 x 90 - distinct from _tech_presc (CYL 0) so eligibility is proven
+    against the real astigmatic case the owner tested with, not a
+    coincidentally-easy spherical one."""
+    return _mk_presc(db, -2.0, -2.0, od_cyl=-1.0, os_cyl=-1.0, od_axis=90, os_axis=90)
+
+
+def test_pixel_transmatic_proves_photo_brown_and_photo_gray_when_power_eligible(db):
+    """RECONCILIATION (owner-confirmed HAT fix, 2026-09-21): Pixel's
+    "Transmatic"/"Transition" line is TR/Transition-equivalent (already
+    proven photochromic by catalog text) and, per the owner's confirmed
+    Transition=Gray+Brown relationship, now proves BOTH colours - mirrors the
+    real DB's 1.61 Transmatic/G Stock Out Of Egypt row (sph -8/0, cyl -2/0,
+    price 5500), which the exact HAT prescription (-2/-1x90) falls inside."""
+    _stock_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-8.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    color_variant="Transmatic/G", price=5500)
+    presc = _hat_presc(db)
+    # search via customer_needs (the real seller-facing field), not the legacy scalar
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp_brown = product_search.search(db, presc, req)
+    assert resp_brown.exact_total == 1
+    assert resp_brown.groups[0].results[0].company_name == "Pixel"
+    req_gray = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_gray"])
+    resp_gray = product_search.search(db, presc, req_gray)
+    assert resp_gray.exact_total == 1
+    assert resp_gray.groups[0].results[0].company_name == "Pixel"
+
+
+def test_platinum_sun_proves_photo_gray_and_photo_brown_not_sun_polarized(db):
+    """RECONCILIATION (owner-confirmed HAT fix, 2026-09-21): PLATINUM "Sun"
+    (commercially "Sun Active") is confirmed photochromic Gray+Brown - mirrors
+    the real DB's "1.56 SUN" Stock/Egypt row (price 800, sph -6/+4, cyl -3/0).
+    "Sun + Polarized" is a DIFFERENT treatment_band with no photochromic
+    evidence of its own and must stay unproven."""
+    _stock_product(db, "PLATINUM", "1.56 SUN", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, cyl_min=-3.0, cyl_max=0.0,
+                    treatment_band="Sun", price=800)
+    _stock_product(db, "PLATINUM", "1.5 POLARIZED", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, cyl_min=-3.0, cyl_max=0.0,
+                    treatment_band="Sun + Polarized", price=650)
+    presc = _hat_presc(db)
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp = product_search.search(db, presc, req)
+    companies_models = {(r.company_name, r.model_name) for grp in resp.groups for r in grp.results}
+    assert ("PLATINUM", "1.56 SUN") in companies_models
+    assert ("PLATINUM", "1.5 POLARIZED") not in companies_models
+
+
+def test_bbgr_tr7_proves_photo_gray_and_photo_brown_when_power_eligible(db):
+    """RECONCILIATION (owner-confirmed HAT fix, 2026-09-21): BBGR "TR7" is
+    BBGR's Transition line, confirmed photochromic Gray+Brown - mirrors the
+    real DB's 1.56/"Neva+"/Stock/Egypt TR7 row (price 5100, sph -6/+4,
+    cyl -2/0), which the exact HAT prescription (-2/-1x90) falls inside."""
+    _stock_product(db, "BBGR", "1.56 TR7", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="TR7", coating_code="Neva+", price=5100)
+    presc = _hat_presc(db)
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp = product_search.search(db, presc, req)
+    assert resp.exact_total == 1
+    assert resp.groups[0].results[0].company_name == "BBGR"
+
+
+def test_bbgr_tr7_power_ineligible_stays_excluded_no_range_invented(db):
+    """Safety companion to the above: the SAME proven TR7 capability must
+    NEVER override a genuine PowerRange miss - eligibility is decided
+    entirely separately from technology capability."""
+    _stock_product(db, "BBGR", "1.56 TR7 (narrow)", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-1.0, sph_max=0.0, cyl_min=-0.5, cyl_max=0.0,  # does NOT cover -2/-1
+                    treatment_band="TR7", coating_code="Neva+", price=5100)
+    presc = _hat_presc(db)
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp = product_search.search(db, presc, req)
+    assert resp.exact_total == 0
+
+
+def test_platinum_g2_and_bbgr_blu_stop_still_never_prove_photo_brown(db):
+    """Negative safety: the fix is scoped to the exact "Sun"/"TR7"
+    treatment_band values - PLATINUM's unrelated blue-light "G2" line and
+    BBGR's unrelated blue-light "Blu stop" line must NOT gain photo_brown
+    merely from company association."""
+    _stock_product(db, "PLATINUM", "1.56 G2", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, treatment_band="G2", color_variant="Gray", price=900)
+    _stock_product(db, "BBGR", "1.56 Blu stop", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, treatment_band="Blu stop", price=900)
+    presc = _hat_presc(db)
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp = product_search.search(db, presc, req)
+    assert resp.exact_total == 0
+
+
+def test_new_evidence_does_not_break_strict_blue_photo_gray_and(db):
+    """Strict AND preserved: a Pixel Transmatic/G row with NO blue-light
+    coating proves photo_gray alone but must still FAIL blue_photo_gray."""
+    _stock_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-8.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    color_variant="Transmatic/G", price=5500)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="photo_gray")
+    assert resp.exact_total == 1
+    resp_and = _search(db, presc, technology_intent="blue_photo_gray")
+    assert resp_and.exact_total == 0
+
+
+def test_new_evidence_rx_suppressed_by_stock_over_rx_fallback(db):
+    """Stock-over-RX preserved: a proven-eligible PLATINUM Sun RX row is
+    correctly suppressed once an actionable Stock alternative exists for the
+    same distance search - the exact HAT-observed rx_count=0 mechanism."""
+    _stock_product(db, "VISALL", "1.56 Photo Gray & Brown", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, treatment_band="Photochromic",
+                    color_variant="Gray / Brown", price=1300)
+    _rx_product(db, "PLATINUM", "PLATINUM RX Single Vision", schemas.LensCategory.SINGLE_VISION,
+                sph_min=-6.0, sph_max=4.0, cyl_min=-3.0, cyl_max=0.0,
+                treatment_band="Sun", price=6000)
+    presc = _hat_presc(db)
+    req = schemas.ProductSearchRequest(mode="automatic", use_mode="distance", customer_needs=["photo_brown"])
+    resp = product_search.search(db, presc, req)
+    assert resp.rx_count == 0
+    assert resp.stock_egypt_count == 1
+
+
 def test_blue_photo_gray_strict_and(db):
     """J. blue_photo_gray requires BOTH on the SAME row - blue-only and
     photo-gray-only must both be rejected."""
@@ -341,11 +464,16 @@ def test_blue_photo_brown_strict_and(db):
 def test_ambiguous_terms_never_match(db):
     """False-positive coverage (Phase 13): Mirror/Polarized colour values and
     an unregistered ambiguous "Blue"-containing code must never be treated as
-    proven technology."""
+    proven technology.
+
+    RECONCILED (owner-confirmed HAT fix, 2026-09-21): the Pixel "Transmatic/
+    G/B" case this test used to include here was moved to its own dedicated
+    test (test_pixel_transmatic_proves_photo_gray_and_photo_brown) - it is no
+    longer an ambiguous term, it is now a proven TR/Transition Gray+Brown
+    relationship. This test keeps only the still-genuinely-ambiguous DIVEL
+    Mirror-tint case."""
     _stock_product(db, "DIVEL ITALIA", "Mirrorish", schemas.LensCategory.SINGLE_VISION,
                     sph_min=-3.0, sph_max=0.0, color_variant="Gray/Brown/G15/Blue")
-    _stock_product(db, "Pixel", "Transmatic", schemas.LensCategory.SINGLE_VISION,
-                    sph_min=-3.0, sph_max=0.0, color_variant="Transmatic/G/B")
     presc = _tech_presc(db)
     for intent in ("blue_light", "photo_gray", "photo_brown", "blue_photo_gray", "blue_photo_brown"):
         resp = _search(db, presc, technology_intent=intent)
@@ -593,16 +721,19 @@ def test_seiko_src_screen_siblings_do_not_prove_blue_light(db):
     assert resp.exact_total == 0
 
 
-def test_pixel_transmatic_color_stays_ambiguous(db):
-    """RECONCILIATION: PIXEL's "Transmatic" IS proven photochromic (p.11
-    descriptive text), but no page defines what "G"/"B" mean - photo_gray and
-    photo_brown must stay unproven for Pixel (never guessed as Gray/Brown)."""
+def test_pixel_transmatic_proves_photo_gray_and_photo_brown(db):
+    """RECONCILED (owner-confirmed HAT fix, 2026-09-21 - supersedes the prior
+    "stays ambiguous" assertion this test name used to make): PIXEL's
+    "Transmatic" IS proven photochromic (p.11 descriptive text), and TR/
+    Transition products across these catalogs are now confirmed available in
+    Gray + Brown - an authoritative relationship, not a guess from "G"/"B".
+    See technology_evidence.py's Pixel _EVIDENCE entries for the citation."""
     _rx_product(db, "Pixel", "Astro", schemas.LensCategory.SINGLE_VISION,
                 sph_min=-3.0, sph_max=0.0, coating_code="Astro-tm",
                 color_variant="Transmatic/G/B", price=8000)
     presc = _tech_presc(db)
-    assert _search(db, presc, technology_intent="photo_gray").exact_total == 0
-    assert _search(db, presc, technology_intent="photo_brown").exact_total == 0
+    assert _search(db, presc, technology_intent="photo_gray").exact_total == 1
+    assert _search(db, presc, technology_intent="photo_brown").exact_total == 1
 
 
 def test_addon_cannot_complete_photo_intent(db):
