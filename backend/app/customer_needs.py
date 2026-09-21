@@ -14,7 +14,17 @@ LOCAL_EGYPT_MANUFACTURERS = frozenset({"SCOPE", "PLATINUM"})
 
 
 def local_manufacturing(result):
-    return (result.category in ("progressive", "bifocal")
+    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): the Special Lenses
+    # architecture (2026-09-19/20) added "anti_fatigue" as its own RX-tiered
+    # category alongside progressive/bifocal, but this category tuple was
+    # never updated to match - so a genuinely local-Egypt-manufactured
+    # Young/Anti-Fatigue RX result (e.g. SCOPE Young Shabab) could never be
+    # tagged manufacturing_location="egypt" and always fell into the generic
+    # "other RX" tier instead of its own local-manufacturing tier. Scoped
+    # narrowly to the one category this HAT proved affected; "office" and
+    # "myopia_control" were not proven to have local-Egypt RX candidates in
+    # this pass and are deliberately left untouched here.
+    return (result.category in ("progressive", "bifocal", "anti_fatigue")
             and result.pair_fulfillment.status == "rx"
             and result.company_name in LOCAL_EGYPT_MANUFACTURERS)
 
@@ -22,7 +32,14 @@ def local_manufacturing(result):
 def seller_order(result):
     """Called only after actionable(): availability, price, then score."""
     status = result.pair_fulfillment.status
-    if result.category in ("progressive", "bifocal"):
+    # RECONCILED (owner-confirmed HAT fix, 2026-09-21): same gap as
+    # local_manufacturing() above - this SEPARATE category tuple (it decides
+    # RANKING, local_manufacturing's own tuple only decides the tag/tier
+    # grouping) also never got "anti_fatigue" added, so best_match/seller_
+    # alternatives ranking silently fell back to flat availability-tier+price
+    # for Young/Anti-Fatigue, treating a local and a foreign RX candidate as
+    # equally-tiered instead of preferring the local one.
+    if result.category in ("progressive", "bifocal", "anti_fatigue"):
         tier = 0 if local_manufacturing(result) else 1
     else:
         tier = {"stock_egypt": 0, "stock_outside": 1, "rx": 2}[status]

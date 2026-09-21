@@ -95,15 +95,23 @@ OCCUPATIONAL_OFFICE_MODELS: Dict[str, FrozenSet[str]] = {
 # text - designed for ages 18-40, relieves strain/headache from heavy
 # electronic-device use and prolonged reading; improves reading/intermediate
 # vision (especially the lower lens area) while remaining usable at distance/
-# driving. Currently stored as category=SINGLE_VISION. Strict scope: ONLY
-# this proven SCOPE product - PLATINUM "Young" (bare price table, no catalog
-# description) and BBGR "Anti-Fatigue"/"Extenso" (bare price table, no
-# catalog description; owner already confirmed BBGR identity is not to be
-# changed) are deliberately excluded for insufficient evidence, and ZEISS
-# "SmartLife Young" is deliberately excluded because ZEISS's OWN catalog
-# heading classifies it as Single Vision, not a Special Lenses subtype.
+# driving. Currently stored as category=SINGLE_VISION.
+#
+# RECONCILED (owner-confirmed HAT fix, 2026-09-21): PLATINUM "Young" (15
+# RX pricing rows, indices 1.50-1.74) was previously left out here as
+# "insufficient evidence" (bare price table, no catalog description) - the
+# owner has since confirmed, from further catalog/domain review, that
+# PLATINUM's own "Young" product family IS the same Young / Anti-Fatigue /
+# pre-presbyopia purpose as SCOPE's Young Shabab, superseding that earlier
+# exclusion. BBGR "Anti-Fatigue"/"Extenso" (bare price table, no catalog
+# description; owner already confirmed BBGR identity is not to be changed)
+# remains deliberately excluded - no new evidence was supplied for BBGR in
+# this pass. ZEISS "SmartLife Young" remains deliberately excluded because
+# ZEISS's OWN catalog heading classifies it as Single Vision, not a Special
+# Lenses subtype.
 ANTI_FATIGUE_MODELS: Dict[str, FrozenSet[str]] = {
     "SCOPE": frozenset({"SCOPE Young Shabab"}),
+    "PLATINUM": frozenset({"PLATINUM Young"}),
 }
 
 # Owner clarification (2026-09-19): "Myopia Control" is ONE generic,
@@ -179,8 +187,9 @@ def corrected_category(company_name: Optional[str], model_name: Optional[str],
     OFFICE is returned unchanged.
 
     Young/Anti-Fatigue and Myopia Control (Special Lenses architecture,
-    2026-09-19): SCOPE's Young/Shabab and Myoblock/Metavision are each their
-    own proven, distinct Special Lenses subtype (see ANTI_FATIGUE_MODELS /
+    2026-09-19; PLATINUM Young added 2026-09-21): SCOPE's Young/Shabab,
+    PLATINUM's Young, and SCOPE's Myoblock/Metavision are each their own
+    proven, distinct Special Lenses subtype (see ANTI_FATIGUE_MODELS /
     MYOPIA_CONTROL_MODELS above for the exact catalog citations) - never
     folded into OFFICE or into each other, since each is a materially
     different catalog-proven purpose. Idempotent: a row already in its target

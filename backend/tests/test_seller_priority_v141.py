@@ -227,3 +227,55 @@ def test_no_range_information_respects_customer_needs(db, needs, unproven, prove
     assert [row.model_name for row in result.stock_egypt_unverified] == [proven[1]]
     assert all(row.pair_fulfillment.price_pair is None
                for row in result.stock_egypt_unverified)
+
+
+# ===================================================================
+# HAT fix (owner-confirmed, 2026-09-21): Young/Anti-Fatigue local-Egypt-
+# manufacturing tiering. Root cause: customer_needs.local_manufacturing()'s
+# category tuple never included "anti_fatigue" when the Special Lenses
+# architecture added it, so a genuinely local SCOPE/PLATINUM Young RX result
+# could never be tagged manufacturing_location="egypt" and always fell into
+# the generic "other RX" tier. Mirrors test_local_manufacturing_tier_has_no_
+# fixed_brand_order's pattern exactly, for category="anti_fatigue". No
+# add_min/add_max is set here (unlike the progressive/bifocal case above) -
+# the real SCOPE Young Shabab / PLATINUM Young rows print no ADD corridor at
+# all, and anti_fatigue's own use_mode already forces ADD-neutral matching.
+@pytest.mark.parametrize('cheaper_company', ['SCOPE', 'PLATINUM'])
+def test_anti_fatigue_local_manufacturing_tier_has_no_fixed_brand_order(db, monkeypatch, cheaper_company):
+    for company in ['SCOPE', 'PLATINUM', 'Other']:
+        name = 'Cheap' if company == cheaper_company else 'Expensive'
+        price = 1390 if company == cheaper_company else 1850
+        _rx_product(db, company, name, 'anti_fatigue', -6, 6, price=100 if company == 'Other' else price)
+    db.commit()
+    score_expensive_high(monkeypatch)
+    result = search(db, [], use='anti_fatigue')
+    assert result.best_match.company_name == cheaper_company
+    assert [r.pair_fulfillment.price_pair for r in cards(result)] == [1390, 1850, 100]
+    assert all(r.manufacturing_location == 'egypt' for r in cards(result)[:2])
+    assert result.seller_alternatives[-1].manufacturing_location is None
+    assert 'تصنيع داخل مصر' in result.best_match.seller_recommendation_reason
+
+
+def test_anti_fatigue_no_contamination_from_office_progressive_bifocal(db):
+    """Searching anti_fatigue must never surface an Office/Progressive/
+    Bifocal/plain Single Vision row, even from the same two local
+    manufacturers."""
+    _rx_product(db, 'SCOPE', 'SCOPE Young Shabab', 'anti_fatigue', -6, 6, price=1390)
+    _rx_product(db, 'PLATINUM', 'PLATINUM Young', 'anti_fatigue', -6, 6, price=1850)
+    _rx_product(db, 'SCOPE', 'SCOPE Office Doctor', 'office', -6, 6, price=1000)
+    _rx_product(db, 'PLATINUM', 'PLATINUM X-PLORE', 'progressive', -6, 6, price=1000)
+    _rx_product(db, 'PLATINUM', 'PLATINUM BI FOCAL', 'bifocal', -6, 6, price=1000)
+    _rx_product(db, 'SCOPE', 'SCOPE Single Vision', 'single_vision', -6, 6, price=1000)
+    db.commit()
+    result = search(db, [], use='anti_fatigue')
+    names = {r.model_name for g in result.groups for r in g.results}
+    assert names == {'SCOPE Young Shabab', 'PLATINUM Young'}
+    categories = {r.category for g in result.groups for r in g.results}
+    assert categories == {'anti_fatigue'}
+
+
+# NOTE: PLATINUM Young's category-reconciliation coverage lives in
+# tests/test_special_lenses_subtypes_evidence.py
+# (test_anti_fatigue_reconcile_fixes_already_persisted_platinum_young_row),
+# using the project's existing anti_fatigue_evidence.reconcile() mechanism -
+# not a new, duplicate reconciliation function.

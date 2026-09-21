@@ -29,16 +29,24 @@ availability mechanisms - catalog age/fitting text remains documentation
 only, never a search eligibility gate. This module's tests pin that down so
 the blocker is never reintroduced.
 
-Strict scope: exactly these two catalog-proven SCOPE products. PLATINUM
-"Young" and "MYO D" (bare price tables, no catalog description), BBGR
+Strict scope: SCOPE Young/Shabab and SCOPE Myoblock/Metavision (both proven
+2026-09-19), plus PLATINUM "Young" (added 2026-09-21 - see RECONCILED note
+below). PLATINUM "MYO D" (bare price table, no catalog description), BBGR
 "Anti-Fatigue"/"Extenso" (bare price table, no catalog description; owner
 already confirmed BBGR identity is not to be changed), ZEISS "SmartLife
 Young" (ZEISS's own catalog classifies it as Single Vision, not Special
 Lenses), and ZEISS "MyoCare"/"MyoCare S"/"MyoActive" (proven Myopia
 Management products, but not currently ingested at all - a separate task;
 MyoActive's own catalog page prints "Available from 1st October 2026", after
-the current project date) are all deliberately NOT touched - proven by
+the current project date) remain deliberately NOT touched - proven by
 dedicated negative tests here.
+
+RECONCILED (owner-confirmed HAT fix, 2026-09-21): PLATINUM "Young" (15 RX
+pricing rows, indices 1.50-1.74) was previously a negative here as
+"insufficient evidence" - the owner has since confirmed, from further
+catalog/domain review, that it IS the same Young/Anti-Fatigue/pre-presbyopia
+purpose as SCOPE's Young Shabab. See app/catalog_corrections.py's
+ANTI_FATIGUE_MODELS for the exact citation.
 
 Deliberately synthetic (mirrors test_occupational_office_evidence.py's own
 pattern) - no PDF parsing, no dependency on the live release_runtime.db for
@@ -98,9 +106,20 @@ def test_corrected_category_is_idempotent_for_both_new_subtypes():
     ) == models.LensCategory.MYOPIA_CONTROL
 
 
+# RECONCILED (owner-confirmed HAT fix, 2026-09-21): PLATINUM Young moved from
+# the negatives below to its own proven-positive case, mirroring SCOPE Young
+# Shabab's own test above exactly.
+def test_corrected_category_fixes_platinum_young():
+    assert catalog_corrections.corrected_category(
+        "PLATINUM", "PLATINUM Young", models.LensCategory.SINGLE_VISION
+    ) == models.LensCategory.ANTI_FATIGUE
+    assert catalog_corrections.corrected_category(
+        "PLATINUM", "PLATINUM Young", models.LensCategory.ANTI_FATIGUE
+    ) == models.LensCategory.ANTI_FATIGUE  # idempotent
+
+
 # --------------------------------------------------------------- exact scope negatives (3)
 @pytest.mark.parametrize("company,model_name", [
-    ("PLATINUM", "PLATINUM Young"),
     ("PLATINUM", "PLATINUM MYO D"),
     ("BBGR", "BBGR"),  # BBGR Anti-Fatigue/Extenso live under the generic "BBGR" model name
     ("ZEISS", "SmartLife Young"),
@@ -223,21 +242,37 @@ def test_myopia_control_reconcile_fixes_already_persisted_row_and_is_idempotent(
     assert result2["updated"] == 0
 
 
+# RECONCILED (owner-confirmed HAT fix, 2026-09-21): PLATINUM "Young" moved
+# from an untouched negative to its own proven-positive reconcile case below
+# (test_anti_fatigue_reconcile_fixes_already_persisted_platinum_young_row).
+# "PLATINUM MYO D" replaces it here as the still-genuinely-excluded negative
+# control, so this test keeps proving reconcile() never over-reaches.
 def test_reconcile_never_touches_unrelated_scope_or_other_company_rows(db):
     m_sv = _mk_persisted_model(db, "SCOPE", "SCOPE Single Vision Toric", models.LensCategory.SINGLE_VISION)
     m_young_scope = _mk_persisted_model(db, "SCOPE", "SCOPE Young Shabab", models.LensCategory.SINGLE_VISION)
-    m_platinum_young = _mk_persisted_model(db, "PLATINUM", "PLATINUM Young", models.LensCategory.SINGLE_VISION)
     m_platinum_myo = _mk_persisted_model(db, "PLATINUM", "PLATINUM MYO D", models.LensCategory.SINGLE_VISION)
     result_af = anti_fatigue_evidence.reconcile(db)
     result_mc = myopia_control_evidence.reconcile(db)
     assert result_af["updated"] == 1  # only SCOPE Young Shabab
     assert result_mc["updated"] == 0  # no Myoblock row present
-    db.refresh(m_sv); db.refresh(m_platinum_young); db.refresh(m_platinum_myo)
+    db.refresh(m_sv); db.refresh(m_platinum_myo)
     assert m_sv.category == models.LensCategory.SINGLE_VISION
-    assert m_platinum_young.category == models.LensCategory.SINGLE_VISION
     assert m_platinum_myo.category == models.LensCategory.SINGLE_VISION
     db.refresh(m_young_scope)
     assert m_young_scope.category == models.LensCategory.ANTI_FATIGUE
+
+
+def test_anti_fatigue_reconcile_fixes_already_persisted_platinum_young_row(db):
+    """Companion to the SCOPE Young Shabab reconcile test above, for the
+    2026-09-21 PLATINUM Young addition - proves reconcile() picks up the new
+    ANTI_FATIGUE_MODELS entry with no code change of its own needed."""
+    m = _mk_persisted_model(db, "PLATINUM", "PLATINUM Young", models.LensCategory.SINGLE_VISION)
+    result1 = anti_fatigue_evidence.reconcile(db)
+    assert result1["updated"] == 1
+    db.refresh(m)
+    assert m.category == models.LensCategory.ANTI_FATIGUE
+    result2 = anti_fatigue_evidence.reconcile(db)
+    assert result2["updated"] == 0
 
 
 # --------------------------------------------------------------- use_mode routing (6/7/8/9)
