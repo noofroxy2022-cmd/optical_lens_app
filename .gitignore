@@ -6,3 +6,7 @@ __pycache__/
 *.py[cod]
 dashboard/node_modules/
 dashboard/build/
+backend/build/
+backend/dist/
+backend/*.spec
+release/
