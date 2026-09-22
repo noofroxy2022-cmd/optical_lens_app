@@ -13,6 +13,17 @@
 ; only a fresh install (where no DB is present yet) copies the approved one.
 ; It also carries "uninsneveruninstall" so uninstalling the app never
 ; deletes the user's live business data.
+;
+; RUNNING-INSTANCE SAFETY (2026-09-22): AppMutex names the EXACT SAME named
+; mutex EyzonOptics.exe itself holds while running (release_runtime_guard.
+; MUTEX_NAME) - Setup detects a running current-version instance by that
+; precise identity and asks the user to close it before continuing.
+; CloseApplications (Restart Manager) is a complementary, file-level safety
+; net scoped by CloseApplicationsFilter to ONLY this app's own installed exe
+; path - it can never match, and therefore can never close, the unrelated
+; old 1.4.5 executable at a completely different path (C:\Program Files\
+; Eyzon Optics\EyzonOptics.exe). Neither mechanism ever force-kills by bare
+; process name.
 
 #define MyAppName "Eyzon Optics"
 #define MyAppVersion "1.0"
@@ -35,6 +46,10 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+AppMutex=Local\EyzonOpticsRuntimeV1
+CloseApplications=yes
+CloseApplicationsFilter={app}\{#MyAppExeName}
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

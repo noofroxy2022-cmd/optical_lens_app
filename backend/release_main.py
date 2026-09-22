@@ -13,12 +13,38 @@ All app-relative paths (release_runtime.db, uploads/temp, backups/) are
 resolved relative to the folder containing this executable/script, not the
 caller's current directory, so double-clicking the release launcher from
 anywhere still finds the approved database next to it.
+
+Runtime hardening (2026-09-22): before doing any of that, this file first
+acquires a named Windows mutex (release_runtime_guard.MUTEX_NAME) to detect
+whether an Eyzon Optics instance is already running. A second launch never
+attempts to bind the ports again - it just opens the existing instance's
+browser tab and exits. Only once this process is proven to be the sole
+instance does it pre-flight-check that ports 8000/3000 are actually free
+(a positive mutex result cannot be spoofed by an unrelated program that
+merely happens to be sitting on one of these ports); the chdir + app import
++ server startup below only happen after both checks pass, so a foreign
+port conflict is reported with a clear message instead of silently
+crashing partway through import/startup.
 """
 import asyncio
 import os
 import sys
-import threading
 import webbrowser
+
+from release_runtime_guard import (
+    MUTEX_NAME,
+    acquire_single_instance_mutex,
+    release_single_instance_mutex,
+    is_port_free,
+    wait_until_ready,
+    show_conflict_messagebox,
+    show_failure_messagebox,
+)
+
+BACKEND_PORT = 8000
+FRONTEND_PORT = 3000
+FRONTEND_URL = f"http://127.0.0.1:{FRONTEND_PORT}"
+_READY_TIMEOUT_SECONDS = 60.0
 
 
 def _release_dir() -> str:
@@ -35,55 +61,99 @@ def _bundled_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-RELEASE_DIR = _release_dir()
+async def _serve() -> None:
+    """Start both servers and wait for the frontend to become reachable
+    before opening the browser exactly once. If either server fails, the
+    other is cancelled too - never left running alone."""
+    # Must happen BEFORE importing app.main: app/routers/uploads.py creates
+    # its "uploads/temp" directory relative to CWD at import time, and the
+    # default DATABASE_URL ("sqlite:///./release_runtime.db") resolves
+    # relative to CWD at first connection.
+    os.chdir(_release_dir())
 
-# Must happen BEFORE importing app.main: app/routers/uploads.py creates its
-# "uploads/temp" directory relative to CWD at import time, and the default
-# DATABASE_URL ("sqlite:///./release_runtime.db") resolves relative to CWD
-# at first connection.
-os.chdir(RELEASE_DIR)
+    from app.main import app as backend_app  # noqa: E402 (import after chdir)
 
-from app.main import app as backend_app  # noqa: E402  (import after chdir)
+    import uvicorn  # noqa: E402
+    from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
+    from starlette.staticfiles import StaticFiles  # noqa: E402
 
-import uvicorn  # noqa: E402
-from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
-from starlette.staticfiles import StaticFiles  # noqa: E402
+    static_dir = os.path.join(_bundled_dir(), "dashboard_build")
 
-STATIC_DIR = os.path.join(_bundled_dir(), "dashboard_build")
+    class SPAStaticFiles(StaticFiles):
+        """Serves the CRA build; falls back to index.html for client-side routes."""
 
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code == 404 and not path.startswith("static/"):
+                    return await super().get_response("index.html", scope)
+                raise
 
-class SPAStaticFiles(StaticFiles):
-    """Serves the CRA build; falls back to index.html for client-side routes."""
+    frontend_app = SPAStaticFiles(directory=static_dir, html=True)
 
-    async def get_response(self, path, scope):
-        try:
-            return await super().get_response(path, scope)
-        except StarletteHTTPException as exc:
-            if exc.status_code == 404 and not path.startswith("static/"):
-                return await super().get_response("index.html", scope)
-            raise
-
-
-frontend_app = SPAStaticFiles(directory=STATIC_DIR, html=True)
-
-BACKEND_PORT = 8000
-FRONTEND_PORT = 3000
-
-
-def _open_browser():
-    webbrowser.open(f"http://127.0.0.1:{FRONTEND_PORT}")
-
-
-async def _run():
     backend_server = uvicorn.Server(
         uvicorn.Config(backend_app, host="127.0.0.1", port=BACKEND_PORT, log_level="warning")
     )
     frontend_server = uvicorn.Server(
         uvicorn.Config(frontend_app, host="127.0.0.1", port=FRONTEND_PORT, log_level="warning")
     )
-    threading.Timer(1.5, _open_browser).start()
-    await asyncio.gather(backend_server.serve(), frontend_server.serve())
+
+    backend_task = asyncio.create_task(backend_server.serve())
+    frontend_task = asyncio.create_task(frontend_server.serve())
+
+    opened = False
+
+    async def _open_browser_when_ready() -> None:
+        nonlocal opened
+        loop = asyncio.get_running_loop()
+        ready = await loop.run_in_executor(
+            None, wait_until_ready, "127.0.0.1", FRONTEND_PORT, _READY_TIMEOUT_SECONDS, 0.3
+        )
+        if ready and not opened:
+            opened = True
+            webbrowser.open(FRONTEND_URL)
+
+    readiness_task = asyncio.create_task(_open_browser_when_ready())
+
+    done, pending = await asyncio.wait(
+        {backend_task, frontend_task}, return_when=asyncio.FIRST_EXCEPTION
+    )
+    readiness_task.cancel()
+    for task in pending:
+        task.cancel()
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+
+
+def main() -> int:
+    """Entry point. Returns a process exit code - never raises."""
+    handle, already_running = acquire_single_instance_mutex(MUTEX_NAME)
+    try:
+        if already_running:
+            # A legitimate Eyzon Optics instance already owns the mutex -
+            # never bind the ports again, never kill it. Just surface it.
+            webbrowser.open(FRONTEND_URL)
+            return 0
+
+        # This process now owns the mutex, so any occupied port below is
+        # PROVABLY a foreign/unrelated conflict, not our own prior instance.
+        for port in (BACKEND_PORT, FRONTEND_PORT):
+            if not is_port_free("127.0.0.1", port):
+                show_conflict_messagebox(port)
+                return 1
+
+        try:
+            asyncio.run(_serve())
+        except Exception as exc:  # defensive: startup must never crash silently
+            show_failure_messagebox(f"Eyzon Optics failed to start:\n{exc}")
+            return 1
+        return 0
+    finally:
+        release_single_instance_mutex(handle)
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    sys.exit(main())
