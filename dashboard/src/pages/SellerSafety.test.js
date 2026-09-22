@@ -352,7 +352,7 @@ test('F5: stale-results notice appears only after a completed search is invalida
 
 // F3: the row matching the backend-proven `best_match` (by exact
 // pricing-row identity) receives the promotion tag exactly once, and only
-// that row - sellerSections/sellerRowOrder output itself is untouched.
+// that row - sellerSections' preserved-order output itself is untouched.
 test('F3: exactly one actionable result is visually promoted, matching best_match identity', async () => {
   const promoted = { ...result }; // pair_fulfillment=pf, source_pricing_ids:[1] - same identity as response.best_match
   const other = { ...result, company_name: 'OtherCo', model_name: 'Other Lens', variant_id: 2,

@@ -18,45 +18,68 @@ test.each(['distance', 'reading'])('SV sections have Egypt, OOE, RX then separat
   expect(result[3].label).toContain('غير محدد');
 });
 
+// RECONCILED (owner-confirmed business clarification, 2026-09-22): withdraws
+// the former "HAT-01" index-ascending-then-price rule these tests used to
+// lock in. Index is NOT a required priority ahead of price - a lower-index
+// lens can legitimately cost more once technology/coating/photochromic
+// capability is factored in - so the frontend must display each group's
+// results EXACTLY as the backend returns them (product_search._order_key:
+// availability/status tier -> route provenance -> price ascending ->
+// match_score, with a null/unresolved price already sorting last via its own
+// sentinel) and never re-derive a competing notion of priority.
+
 test.each([[], ['blue_light'], ['photo_gray'], ['photo_brown'], ['impact_resistant'], ['blue_light', 'photo_gray']].map((needs) => [needs]))(
-  'HAT-01: index ascending then confirmed price ascending then pending then match score tiebreak, regardless of need %j', (customer_needs) => {
-    const pending = row(4, 1.5, 1);
+  'A. frontend preserves backend result order exactly, regardless of need %j', (customer_needs) => {
+    // Deliberately NOT price/index-sorted here - mirrors a real backend
+    // response where price/match_score/provenance already decided the order;
+    // a mix of indices, a pending-price row, and a null-price row are
+    // interleaved in whatever sequence the backend produced.
+    const pending = row(4, 1.56, 1);
     pending.pair_fulfillment.price_confirmation_note = 'Confirm';
-    const unresolved = row(5, 1.5, null);
+    const unresolved = row(5, 1.53, null);
     unresolved.pair_fulfillment.technology_addon = { unit_status: 'UNIT_UNRESOLVED', base_price: 1 };
-    const rows = [row(1, 1.56, 10), row(2, 1.53, 20), pending, unresolved,
-      row(6, 1.5, 850), row(7, 1.5, 700)];
+    const rows = [row(7, 1.5, 700), row(6, 1.56, 850), pending, unresolved, row(2, 1.53, 20), row(1, 1.56, 10)];
     const input = [...rows];
-    const sorted = sellerSections({ use_mode: 'distance', customer_needs,
-      groups: [group('stock_egypt', rows)] })[0].results;
-    // index ascending (1.5, 1.53, 1.56) groups first; within index 1.5, price
-    // ascending (700, 850) then the two pending rows last, tiebroken by
-    // match_score (4 > 5); then the 1.53 and 1.56 singletons.
-    expect(sorted.map((r) => r.variant_id)).toEqual([7, 6, 4, 5, 2, 1]);
+    const sections = sellerSections({ use_mode: 'distance', customer_needs,
+      groups: [group('stock_egypt', rows)] });
+    expect(sections[0].results.map((r) => r.variant_id)).toEqual(rows.map((r) => r.variant_id));
     expect(rows).toEqual(input); // never reorder/mutate the response or prices
   });
 
-// HAT-01 (owner-approved 2026-09-21): supersedes the PRIOR fix this test used
-// to lock in (index was then the unintended PRIMARY key, fragmenting one
-// price-ordered tier into disconnected per-index runs). Index ascending is
-// now the deliberate, approved primary grouping; price still strictly
-// ascends within each index.
-test('HAT-01: index ascending then pair price ascending within each index', () => {
-  const rows = [row(1, 1.6, 2250), row(2, 1.5, 3750), row(3, 1.67, 600), row(4, 1.53, 1800)];
+// B. The real defect this fix resolves: a higher-index but CHEAPER result
+// (already ranked first by the backend) must appear before a lower-index
+// but MORE EXPENSIVE one - mirrors the real audited case (PLATINUM "BLU
+// STEEL", index 1.56, 600 EGP, ranked first by the backend ahead of a
+// Maxxee 1.50/1250 EGP row that an index-first rule would have shown first).
+test('B. higher-index cheaper result stays ahead of a lower-index pricier one when the backend returns it that way', () => {
+  const rows = [row(1, 1.56, 600), row(2, 1.56, 900), row(3, 1.56, 1100),
+    row(4, 1.6, 1200), row(5, 1.5, 1250), row(6, 1.5, 1300)];
   const sorted = sellerSections({ use_mode: 'distance', groups: [group('stock_egypt', rows)] })[0].results;
-  expect(sorted.map((r) => r.pair_fulfillment.price_pair)).toEqual([3750, 1800, 2250, 600]);
+  expect(sorted.map((r) => r.variant_id)).toEqual([1, 2, 3, 4, 5, 6]);
 });
 
-test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'])('HAT-01: local tier before other RX, index ascending then price ascending, not brand: %s', (use_mode) => {
-  const rows = [row(1, 1.5, 1, { company_name: 'HOYA' }),
-    row(2, 1.56, 100, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
+// C. The recommended row (identified elsewhere by matching best_match's
+// pricing-row identity, see SellerSafety.test.js F3) is now visually
+// consistent with the first displayed result whenever the backend's own
+// order already puts it there - the seller no longer sees a different row
+// first while the recommended badge sits further down.
+test('C. backend-recommended row (first in backend order) is also first in the displayed section', () => {
+  const rows = [row(1, 1.56, 600), row(2, 1.56, 900), row(4, 1.6, 1200), row(5, 1.5, 1250)];
+  const sorted = sellerSections({ use_mode: 'distance', groups: [group('stock_egypt', rows)] })[0].results;
+  expect(sorted[0].variant_id).toBe(1); // the backend's best_match-equivalent row
+});
+
+test.each(['progressive', 'bifocal', 'office', 'anti_fatigue', 'myopia_control'])('E. local tier before other RX, backend order preserved within each, not brand: %s', (use_mode) => {
+  // Already in backend order (index/price mixed, exactly as _order_key would
+  // return it) - the local/other split must only FILTER, never reorder.
+  const rows = [row(4, 1.5, 200, { company_name: 'PLATINUM', manufacturing_location: 'egypt' }),
     row(3, 1.5, 300, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
-    row(4, 1.5, 200, { company_name: 'PLATINUM', manufacturing_location: 'egypt' })];
+    row(2, 1.56, 100, { company_name: 'SCOPE', manufacturing_location: 'egypt' }),
+    row(1, 1.5, 1, { company_name: 'HOYA' })];
   const sections = sellerSections({ use_mode, groups: [group('stock_egypt', []), group('rx', rows)] });
   expect(sections.map((s) => s.key)).toEqual(['rx']);
   expect(sections[0].tiers.map((t) => t.key)).toEqual(['local', 'other']);
-  // full pre-filter order is index 1.5 asc-price [1,4,3] then index 1.56 [2];
-  // filtering to local (egypt) keeps relative order: 4, 3, 2. Non-local: 1.
+  // filtering to local (egypt) keeps the backend's relative order: 4, 3, 2. Non-local: 1.
   expect(sections[0].tiers[0].results.map((r) => r.variant_id)).toEqual([4, 3, 2]);
   expect(sections[0].tiers[1].results.map((r) => r.variant_id)).toEqual([1]);
 });

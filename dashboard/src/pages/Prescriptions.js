@@ -275,47 +275,21 @@ const isActionableBestMatch = (best) => (
 
 const EMPTY_FACETS = { lens_models: [], index_value: [], category: [], design_variant: [], coating: [], color_variant: [], treatment_band: [] };
 
-// Maps PairFulfillment.status to a tier rank for sellerRowOrder below -
-// mirrors backend product_search._STATUS_ORDER/_order_key exactly, so the
-// frontend never re-derives its own notion of availability priority.
-const _STATUS_TIER = { stock_egypt: 0, stock_outside: 1, stock_market_unknown: 2, rx: 3,
-  split: 4, eligibility_unknown: 5, unavailable: 5 };
-
-// Single central presentation-order rule for every seller results section:
-// availability tier, then refractive index ascending (HAT-01, owner-approved
-// 2026-09-21 - groups same-index options together so the seller scans one
-// index band at a time instead of prices jumping between indices), then the
-// confirmed final pair price ascending within that index (a pending/
-// unconfirmed price never outranks a proven one), then match_score as the
-// tiebreak - independent of selected needs. This supersedes the earlier
-// price-only rule (which existed to fix a DIFFERENT bug: index being used as
-// the ONLY/primary key and fragmenting one tier into disconnected per-index
-// price runs) - index is now the intentional, approved primary grouping, with
-// price still strictly ascending inside each index group. A missing/
-// unparseable index is never allowed to jump ahead of a known one - it always
-// sorts after every row with a real index.
-export const sellerRowOrder = (a, b) => {
-  const tier = (_STATUS_TIER[a.pair_fulfillment.status] ?? 3) - (_STATUS_TIER[b.pair_fulfillment.status] ?? 3);
-  if (tier) return tier;
-  const aIndex = Number(a.index_value);
-  const bIndex = Number(b.index_value);
-  const aIndexValid = Number.isFinite(aIndex);
-  const bIndexValid = Number.isFinite(bIndex);
-  if (aIndexValid !== bIndexValid) return aIndexValid ? -1 : 1;
-  if (aIndexValid && aIndex !== bIndex) return aIndex - bIndex;
-  const pendingA = priceNeedsConfirmation(a.pair_fulfillment);
-  const pendingB = priceNeedsConfirmation(b.pair_fulfillment);
-  if (pendingA !== pendingB) return pendingA ? 1 : -1;
-  if (!pendingA) {
-    const price = Number(a.pair_fulfillment.price_pair) - Number(b.pair_fulfillment.price_pair);
-    if (price) return price;
-  }
-  const score = Number(b.match_score) - Number(a.match_score);
-  if (score) return score;
-  const identity = (r) => `${r.company_name}|${r.lens_model_id}|${r.variant_id}|${r.coating_id}|${r.pair_fulfillment.source_pricing_ids?.join(',')}`;
-  return identity(a).localeCompare(identity(b));
-};
-
+// RECONCILED (owner-confirmed business clarification, 2026-09-22): index is
+// NOT a required priority ahead of price - a lower-index lens can legitimately
+// cost more than a higher-index one once technology/design/coating/
+// photochromic capability is factored in (e.g. a 1.50 Transition can cost
+// more than a plain 1.56). The HAT-01 index-ascending-then-price rule this
+// file used to encode here has been withdrawn: it silently outranked the
+// backend's own price/match_score-based recommendation (product_search.
+// _order_key / best_match), producing a seller-visible contradiction where
+// the "الخيار المقترح" badge could land several rows below the row the
+// seller actually saw first. The backend result order (availability/status
+// tier -> route provenance -> price ascending -> match_score, with a
+// null/unresolved price already sorting last via _order_key's own sentinel)
+// IS the seller ordering contract now - the frontend must display each
+// group's results exactly as the API returns them, never re-derive its own
+// notion of priority on top.
 export const sellerSections = (data) => {
   // Special Lenses subtypes (office/anti_fatigue/myopia_control, 2026-09-19)
   // are each proven RX-only just like bifocal/progressive - see
@@ -330,7 +304,8 @@ export const sellerSections = (data) => {
   const keys = [...order, ...groups.map((g) => g.key).filter((key) => !order.includes(key))];
   return keys.map((key) => {
     const group = groups.find((g) => g.key === key);
-    const results = [...(group?.results || [])].sort(sellerRowOrder);
+    // Preserve the backend's own order exactly - see the comment above.
+    const results = group?.results || [];
     const section = { key, label: labels[key] || group?.label, results };
     if (multi && key === 'rx') {
       section.tiers = [
