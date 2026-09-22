@@ -796,3 +796,193 @@ def test_addon_stock_powerrange_and_category_still_enforced(db):
     # single_vision identity even though it would otherwise qualify via addon
     resp2 = _search(db, _tech_presc(db), use_mode="bifocal", technology_intent="blue_light")
     assert resp2.exact_total == 0
+
+
+# ================================================ OWNER-CONFIRMED BLUE MAPPINGS
+# (owner-confirmed commercial-naming audit, 2026-09-22): DIVEL "Blue Natural"
+# and PLATINUM "BLU STEEL" are each manufacturer's OWN commercial name for
+# Blue Light Protection - the same evidentiary standard already used for
+# every other manufacturer's own named term (BBGR "Blu stop", HOYA "Long Life
+# Blue Control", Maxxee "Blue U.V", ...), not an inference from the word
+# "Blue" alone. SCOPE's commercial "Relax" line name is the same kind of
+# owner-confirmed relationship, extended here to the two "Transitions Relax
+# PhotoGray(-Brown) Surface" rows that carry no "Blue" wording in their own
+# printed name.
+
+def test_divel_blue_natural_proves_blue_light(db):
+    """DIVEL's "Blue Natural" coating is proven blue_light."""
+    _stock_product(db, "DIVEL ITALIA", "DIVEL ITALIA", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Blue Natural", price=1300)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    assert resp.exact_total == 1
+    assert resp.best_match.company_name == "DIVEL ITALIA"
+    assert resp.best_match.pair_fulfillment.price_pair == Decimal("1300")
+
+
+def test_divel_blue_natural_and_aria_blue_fotocolor_gr_both_present(db):
+    """Blue Natural (pure BLUE_LIGHT) and Aria Blue FotoColor GR (BLUE_LIGHT +
+    PHOTO_GRAY) are DISTINCT products and must both appear for a Blue-only
+    search - never collapsed, never one excluding the other."""
+    _stock_product(db, "DIVEL ITALIA", "DIVEL ITALIA", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Blue Natural", price=1300)
+    _stock_product(db, "DIVEL ITALIA", "DIVEL ITALIA", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Aria Blue FotoColor GR", price=2150)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    assert resp.exact_total == 2
+    prices = {r.pair_fulfillment.price_pair for grp in resp.groups for r in grp.results}
+    assert prices == {Decimal("1300"), Decimal("2150")}
+    # only Aria Blue FotoColor GR also satisfies blue_photo_gray
+    resp_combo = _search(db, presc, technology_intent="blue_photo_gray")
+    assert resp_combo.exact_total == 1
+    assert resp_combo.best_match.pair_fulfillment.price_pair == Decimal("2150")
+
+
+def test_platinum_blu_steel_proves_blue_light(db):
+    """PLATINUM's "BLU STEEL" treatment_band is proven blue_light - mirrors
+    the real DB's 1.56 Stock/Egypt row (price 600, sph -6/+4, cyl -2/0)."""
+    _stock_product(db, "PLATINUM", "1.56 BLU STEEL", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="BLU STEEL", price=600)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    assert resp.exact_total == 1
+    assert resp.best_match.company_name == "PLATINUM"
+    assert resp.best_match.pair_fulfillment.price_pair == Decimal("600")
+
+
+def test_scope_relax_transitions_photogray_surface_now_proves_blue_light(db):
+    """SCOPE "Transitions Relax PhotoGray Surface" carries no "Blue" wording
+    of its own, but is a genuine SCOPE "Relax"-branded product - owner
+    confirms Relax means Blue Light Protection company-wide, so this row must
+    now prove blue_light IN ADDITION TO its already-proven photo_gray."""
+    _stock_product(db, "SCOPE", "SCOPE", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Transitions Relax PhotoGray Surface", price=1000)
+    presc = _hat_presc(db)
+    assert _search(db, presc, technology_intent="blue_light").exact_total == 1
+    assert _search(db, presc, technology_intent="photo_gray").exact_total == 1
+    assert _search(db, presc, technology_intent="blue_photo_gray").exact_total == 1
+    assert _search(db, presc, technology_intent="photo_brown").exact_total == 0
+
+
+def test_scope_relax_transitions_photogray_brown_surface_now_proves_blue_light(db):
+    """Same rule, the Gray+Brown sibling row."""
+    _stock_product(db, "SCOPE", "SCOPE", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Transitions Relax PhotoGray-Brown Surface", price=1100)
+    presc = _hat_presc(db)
+    assert _search(db, presc, technology_intent="blue_light").exact_total == 1
+    assert _search(db, presc, technology_intent="blue_photo_gray").exact_total == 1
+    assert _search(db, presc, technology_intent="blue_photo_brown").exact_total == 1
+
+
+def test_scope_relax_contrast_and_night_rider_remain_excluded(db):
+    """Evidenced exception preserved: "Relax Blue+Yellow Light Contrast" and
+    "Night Rider (Blue+Yellow Light, Day/Night Driving)" both contain "Relax"
+    and/or "Blue" but are a DIFFERENT-purpose driving-contrast technology per
+    the catalog's own text - the general "SCOPE Relax = Blue Light Protection"
+    rule must NOT sweep these in. Proves the fix is exact-value evidence, not
+    a "Relax"/"Blue" substring rule."""
+    _stock_product(db, "SCOPE", "Contrast", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Relax Blue+Yellow Light Contrast", price=1000)
+    _stock_product(db, "SCOPE", "NightRider", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Night Rider (Blue+Yellow Light, Day/Night Driving)", price=1200)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    assert resp.exact_total == 0
+
+
+def test_owner_mapping_full_cross_manufacturer_matrix(db):
+    """Every owner-confirmed company-specific Blue Light Protection commercial
+    name is recognized where a corresponding catalog row exists - one Stock
+    row per company, all eleven owner-confirmed mappings in a single search."""
+    _stock_product(db, "BBGR", "BBGR", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Blu stop", price=2700)
+    _stock_product(db, "DIVEL ITALIA", "DIVEL ITALIA", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Blue Natural", price=1300)
+    _stock_product(db, "HOYA", "Hilux", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Long Life Blue Control", price=3300)
+    _stock_product(db, "Maxxee", "Maxxee", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Blue U.V", price=1250)
+    _stock_product(db, "SEIKO", "SEIKO", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="SRC - SCREEN", price=3037)
+    _stock_product(db, "Synchrony", "Synchrony", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Blue HMC+", price=2300)
+    _stock_product(db, "PLATINUM", "1.56 BLU STEEL", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="BLU STEEL", price=600)
+    _stock_product(db, "Pixel", "Pixel", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Astro+", color_variant="Clear", price=1100)
+    _stock_product(db, "Pixel", "Pixel", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Astro+B", color_variant="Clear", price=1300)
+    _stock_product(db, "ZEISS", "ClearView FSV", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="BlueGuard", price=4940)
+    _stock_product(db, "SCOPE", "SCOPE", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="Relax Blue Light", price=1500)
+    _stock_product(db, "VISALL", "1.56 BlueCut", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="BlueCut", price=1300)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    companies = {r.company_name for grp in resp.groups for r in grp.results}
+    assert companies == {"BBGR", "DIVEL ITALIA", "HOYA", "Maxxee", "SEIKO", "Synchrony",
+                          "PLATINUM", "Pixel", "ZEISS", "SCOPE", "VISALL"}
+    assert resp.exact_total == 12  # 11 companies, Pixel contributes 2 rows
+
+
+def test_owner_mapping_false_positive_guard(db):
+    """False-positive guard: generic values merely containing "Blue"/"Screen"/
+    "Relax" with NO company-specific evidence entry must never be classified
+    blue_light - proves the fix added exact-value entries, not substring
+    matching on any of these words."""
+    _stock_product(db, "BBGR", "Neva blu", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, coating_code="Neva blu", price=2400)
+    _stock_product(db, "DIVEL ITALIA", "Sun Blue", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, coating_code="Sun Lenses",
+                    color_variant="Gray/Brown/G15/Blue", price=900)
+    _stock_product(db, "PlainCo", "ScreenCo", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, coating_code="Screen Protector", price=1000)
+    _stock_product(db, "PlainCo", "RelaxCo", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, treatment_band="Relax Comfort Plus", price=1000)
+    resp = _search(db, _hat_presc(db), technology_intent="blue_light")
+    assert resp.exact_total == 0
+
+
+def test_price_ordering_already_prefers_exact_capability_match(db):
+    """Presentation-preference check (Section 3/9): within the same
+    availability/index tier, when a pure {BLUE_LIGHT} product is CHEAPER than
+    a {BLUE_LIGHT, PHOTO_GRAY} combination product - exactly the real DB's
+    1.56/Stock/Egypt shape (BLU STEEL 600 < ... < Aria Blue FotoColor GR
+    2150, the only combo option, also the most expensive) - the EXISTING
+    price-ascending sort key already places the exact match first, with no
+    dedicated capability-exactness ranking dimension needed. This test
+    documents why no ordering/ranking code was added for this fix."""
+    _stock_product(db, "PLATINUM", "1.56 BLU STEEL", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-6.0, sph_max=4.0, cyl_min=-2.0, cyl_max=0.0,
+                    treatment_band="BLU STEEL", price=600)
+    _stock_product(db, "DIVEL ITALIA", "DIVEL ITALIA", schemas.LensCategory.SINGLE_VISION,
+                    sph_min=-4.0, sph_max=0.0, cyl_min=-2.0, cyl_max=0.0,
+                    coating_code="Aria Blue FotoColor GR", price=2150)
+    presc = _hat_presc(db)
+    resp = _search(db, presc, technology_intent="blue_light")
+    assert resp.exact_total == 2
+    ordered_prices = [r.pair_fulfillment.price_pair for grp in resp.groups for r in grp.results]
+    assert ordered_prices == [Decimal("600"), Decimal("2150")]
+    assert resp.best_match.pair_fulfillment.price_pair == Decimal("600")

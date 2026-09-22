@@ -155,8 +155,15 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # No "...FotoColor BR" (Brown) value exists in the catalog, so only the
     # Gray combo is proven for DIVEL.
     ("DIVEL ITALIA", "coating", "Aria Blue FotoColor GR"): frozenset({BLUE_LIGHT, PHOTO_GRAY}),
-    # "Blue Natural" is left OUT: ambiguous, no corroborating evidence
-    # distinguishes a blue-light meaning from an unrelated tint/brand name.
+    # RECONCILED (owner-confirmed commercial-naming audit, 2026-09-22): the
+    # owner has explicitly confirmed "Blue Natural" is DIVEL's own commercial
+    # name for its Blue Light Protection line - an authoritative company-
+    # specific naming relationship, not inferred from the word "Blue" alone
+    # (the same standard already applied to every other manufacturer's own
+    # named term, e.g. BBGR's "Blu stop", HOYA's "Long Life Blue Control").
+    # Distinct from, and in addition to, "Aria Blue FotoColor GR" above -
+    # never collapsed together; a pair of pricing rows exists for each.
+    ("DIVEL ITALIA", "coating", "Blue Natural"): frozenset({BLUE_LIGHT}),
 
     # ---- PLATINUM -----------------------------------------------------------
     ("PLATINUM", "treatment_band", "BlueCut"): frozenset({BLUE_LIGHT}),
@@ -165,9 +172,13 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     # value "G2" carries no self-evident meaning, so this entry exists solely
     # because of that explicit textual catalog confirmation, not a guess.
     ("PLATINUM", "treatment_band", "G2"): frozenset({BLUE_LIGHT}),
-    # "BLU STEEL" is left OUT: sits among PLATINUM's stylistic/tier branding
-    # values (X-PERIENCE, X-TEND, Young, HD) with no corroborating note - no
-    # confirmed blue-light meaning.
+    # RECONCILED (owner-confirmed commercial-naming audit, 2026-09-22): the
+    # owner has explicitly confirmed "BLU STEEL" is PLATINUM's own commercial
+    # name for its Blue Light Protection line - an authoritative company-
+    # specific naming relationship (same standard as "Blu stop"/"Blue U.V"/
+    # "Long Life Blue Control" for other manufacturers), not an inference from
+    # the word "Blue"/"Blu" alone.
+    ("PLATINUM", "treatment_band", "BLU STEEL"): frozenset({BLUE_LIGHT}),
     # RECONCILED (owner-confirmed HAT fix, 2026-09-21): "SUN" is PLATINUM's
     # commercial "Sun Active" line, confirmed photochromic and available
     # Gray + Brown - an authoritative catalog relationship, not inferred from
@@ -217,8 +228,19 @@ _EVIDENCE: Dict[Tuple[str, str, str], FrozenSet[str]] = {
     ("SCOPE", "treatment_band", "Transitions Gray-Brown"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
     ("SCOPE", "treatment_band", "Transitions PhotoGray Surface Coloring"): frozenset({PHOTO_GRAY}),
     ("SCOPE", "treatment_band", "Transitions PhotoGray-Brown Surface Coloring"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
-    ("SCOPE", "treatment_band", "Transitions Relax PhotoGray Surface"): frozenset({PHOTO_GRAY}),
-    ("SCOPE", "treatment_band", "Transitions Relax PhotoGray-Brown Surface"): frozenset({PHOTO_GRAY, PHOTO_BROWN}),
+    # RECONCILED (owner-confirmed commercial-naming audit, 2026-09-22): the
+    # owner has explicitly confirmed SCOPE's own commercial "Relax" line name
+    # means Blue Light Protection - an authoritative company-specific naming
+    # relationship, same standard as every other manufacturer's own named
+    # term above. Applies to every genuine "Relax"-branded SCOPE product,
+    # in addition to whatever Photo/Impact capability is independently
+    # proven on that same row - never replacing it. Does NOT extend to
+    # "Relax Blue+Yellow Light Contrast" (and "Night Rider" below), which
+    # the catalog's own printed text distinguishes as a different-purpose
+    # driving-contrast technology, not blue-light screen protection - an
+    # evidenced exception, not an oversight.
+    ("SCOPE", "treatment_band", "Transitions Relax PhotoGray Surface"): frozenset({BLUE_LIGHT, PHOTO_GRAY}),
+    ("SCOPE", "treatment_band", "Transitions Relax PhotoGray-Brown Surface"): frozenset({BLUE_LIGHT, PHOTO_GRAY, PHOTO_BROWN}),
     ("SCOPE", "treatment_band", "HiFlex PhotoGray Relax Impact-Resistant Blue Light"): frozenset({BLUE_LIGHT, PHOTO_GRAY}),
     ("SCOPE", "treatment_band", "Transitions Relax Gray-Brown Blue Light"): frozenset({BLUE_LIGHT, PHOTO_GRAY, PHOTO_BROWN}),
     ("SCOPE", "treatment_band", "Transitions Relax Gray-Brown Blue Light VV"): frozenset({BLUE_LIGHT, PHOTO_GRAY, PHOTO_BROWN}),
