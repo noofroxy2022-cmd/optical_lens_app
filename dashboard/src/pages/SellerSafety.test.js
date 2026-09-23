@@ -174,7 +174,7 @@ test('blank od Axis with cylinder is blocked, explicit zero is preserved', async
 }, 30000);
 test('blank os Axis with cylinder is blocked, explicit zero is preserved', async () => {
   await verifyBlankAxisBehavior('os');
-}, 30000);
+});
 
 test('a late search response cannot restore results after criteria change', async () => {
   await mountSearch(); await click('مرشحات متقدمة');
