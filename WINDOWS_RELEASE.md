@@ -23,12 +23,15 @@ Produces `dashboard/build/`, which `backend/EyzonOptics.spec` packages as
 ## 3. PyInstaller build
 Run from `backend/`:
 ```
-python -m PyInstaller --distpath ..\release EyzonOptics.spec
+python -m PyInstaller --distpath ../release EyzonOptics.spec
 ```
 This is a one-file build. `--distpath` sends the executable directly to
-`release/EyzonOptics.exe` (confirmed a valid PyInstaller CLI option via
-`python -m PyInstaller --help` for the installed version; not yet run
-end-to-end). No manual copy step is required.
+`release/EyzonOptics.exe`. Use the forward-slash form (`../release`), not
+`..\release`: the backslash form is shell-fragile (an intervening shell
+layer can consume the backslash before PyInstaller sees it, silently
+producing a wrong output path); PyInstaller/Python accept `/` in paths on
+Windows and it resolves to the same repo-root `release/` directory
+without that risk. No manual copy step is required.
 
 ## 4. Required release files
 `release/` must contain, together, before packaging:
@@ -36,10 +39,36 @@ end-to-end). No manual copy step is required.
 - `release/Start Eyzon Optics.cmd` (tracked source:
   `installer/Start Eyzon Optics.cmd` — packaged by Inno Setup directly
   from there; keep the copy in `release/` in sync for local testing)
-- `release/release_runtime.db` (the approved/certified operational
-  database — preserve as-is; never regenerate or overwrite it here)
+- `release/release_runtime.db` (a generated/staged copy - see step 5;
+  never hand-edited)
 
-## 5. Inno Setup build
+## 5. Release DB staging
+`backend/release_runtime.db` is the **authoritative release seed
+database**. `release/release_runtime.db` is a **generated/staged copy**
+of it, used only as this build's installer input - it is not the
+authoritative file and not any installed customer's live database.
+Never move or modify `backend/release_runtime.db` itself.
+
+Run from the repository root (portable PowerShell, repository-relative
+paths only - no username or machine-specific path):
+```
+New-Item -ItemType Directory -Force -Path release | Out-Null
+Copy-Item -Path backend\release_runtime.db -Destination release\release_runtime.db -Force
+(Get-FileHash backend\release_runtime.db -Algorithm SHA256).Hash
+(Get-FileHash release\release_runtime.db -Algorithm SHA256).Hash
+python -c "import sqlite3; c = sqlite3.connect('file:release/release_runtime.db?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchone()[0])"
+```
+Require the two SHA-256 values to match exactly, and the integrity check
+to print `ok`, before proceeding to Inno Setup. The copy always overwrites
+the staged file so each release build is deterministic from the current
+authoritative source - this is safe because it only ever touches the
+build-time staging copy in `release/`, never an installed customer's
+database. Customer-installed data is protected separately, at install
+time, by Inno Setup's `onlyifdoesntexist` + `uninsneveruninstall` on this
+same file (see step 8) - overwriting the staging copy here has no effect
+on that.
+
+## 6. Inno Setup build
 Prerequisite: install the official Inno Setup 6 from JRSoftware
 (jrsoftware.org / https://jrsoftware.org/isinfo.php).
 
@@ -60,12 +89,12 @@ $ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"  # EXAMPLE ONLY -
 Run from `installer/` either way (working directory = `installer/`,
 input = `EyzonOptics.iss`).
 
-## 6. Expected installer
+## 7. Expected installer
 Per `OutputDir=..` and `OutputBaseFilename=Eyzon-Optics-Setup` in
 `EyzonOptics.iss`, this produces `Eyzon-Optics-Setup.exe` at the
 repository root.
 
-## 7. Database safety
+## 8. Database safety
 `release_runtime.db` is installed by Inno Setup with `onlyifdoesntexist`
 and `uninsneveruninstall` (`[Files]` in `EyzonOptics.iss`). An
 upgrade install must never overwrite or delete an existing operational
@@ -73,7 +102,7 @@ database, and uninstall must never remove it. Never delete/replace
 `release_runtime.db` during an upgrade unless a separately verified
 database migration procedure explicitly requires it.
 
-## 8. Verification checklist before tag/release
+## 9. Verification checklist before tag/release
 - [ ] `release/EyzonOptics.exe` starts
 - [ ] backend starts successfully (port 8000 reachable)
 - [ ] dashboard loads (port 3000 reachable)
@@ -86,13 +115,11 @@ database migration procedure explicitly requires it.
 - [ ] `installer/EyzonOptics.iss` `MyAppVersion` matches the version
       being released
 
-## 9. Tagging
+## 10. Tagging
 Tag the release (`git tag -a vX.Y.Z -m "..."`) only after every item in
 the checklist above has been verified against the built artifacts.
 
 ## Known gaps
-- `release/release_runtime.db`'s own provenance/certification process is
-  external to this procedure.
 - `ISCC.exe` is not guaranteed to be on PATH after installing Inno Setup;
-  step 5 documents resolving its actual installed location instead of
+  step 6 documents resolving its actual installed location instead of
   assuming one.
