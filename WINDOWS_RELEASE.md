@@ -40,10 +40,25 @@ end-to-end). No manual copy step is required.
   database — preserve as-is; never regenerate or overwrite it here)
 
 ## 5. Inno Setup build
-Run from `installer/`:
+Prerequisite: install the official Inno Setup 6 from JRSoftware
+(jrsoftware.org / https://jrsoftware.org/isinfo.php).
+
+Compiler resolution: if `ISCC.exe` is on PATH, invoke it directly. It is
+not on PATH by default on every machine, so otherwise locate the actual
+installed `ISCC.exe` and invoke it by its real absolute path - never
+assume a fixed location. For example, in PowerShell:
 ```
-ISCC.exe EyzonOptics.iss
+$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"  # EXAMPLE ONLY -
+                                                          # a common default
+                                                          # location, not a
+                                                          # guarantee; point
+                                                          # this at wherever
+                                                          # ISCC.exe is
+                                                          # actually installed
+& $ISCC EyzonOptics.iss
 ```
+Run from `installer/` either way (working directory = `installer/`,
+input = `EyzonOptics.iss`).
 
 ## 6. Expected installer
 Per `OutputDir=..` and `OutputBaseFilename=Eyzon-Optics-Setup` in
@@ -78,6 +93,6 @@ the checklist above has been verified against the built artifacts.
 ## Known gaps
 - `release/release_runtime.db`'s own provenance/certification process is
   external to this procedure.
-- `ISCC.exe` (Inno Setup) was not found on this machine at either default
-  install location or on PATH; it must be installed before step 5 can run
-  here.
+- `ISCC.exe` is not guaranteed to be on PATH after installing Inno Setup;
+  step 5 documents resolving its actual installed location instead of
+  assuming one.
