@@ -102,6 +102,30 @@ database, and uninstall must never remove it. Never delete/replace
 `release_runtime.db` during an upgrade unless a separately verified
 database migration procedure explicitly requires it.
 
+### Running-application gate (upgrade and uninstall)
+Setup and Uninstall never replace or remove files while the installed
+`{app}\EyzonOptics.exe` is executing, and never terminate it:
+- `AppMutex=Local\EyzonOpticsRuntimeV1` catches a fully started,
+  mutex-aware build at Setup startup (OK/Cancel prompt).
+- The `[Code]` gate (`PrepareToInstall`, `InitializeUninstall`) runs before
+  any file operation. It lists `EyzonOptics.exe` processes via WMI
+  `Win32_Process` and blocks only when a normalized `ExecutablePath` equals
+  the normalized `{app}\EyzonOptics.exe`. This also covers pre-mutex builds
+  and the PyInstaller bootloader before the mutex exists. Same-named
+  executables at other paths are ignored. A WMI failure or an unreadable
+  candidate path blocks (fail-closed). Interactive: Retry/Cancel. Silent:
+  stop before touching files.
+- `CloseApplicationsFilter` takes file-name wildcards (`EyzonOptics.exe`);
+  a full path matches nothing, so Restart Manager would check no file.
+
+Measured silent exit codes (`/VERYSILENT /SUPPRESSMSGBOXES`):
+- `1`: AppMutex found a running mutex-aware instance at startup.
+- `7`: the gate blocked (`[EYZON_GATE: RUNNING_APP]` or
+  `[EYZON_GATE: DETECTION_FAILURE]` in the `/LOG` file).
+- Uninstall blocked: `1` (`InitializeUninstall returned False; aborting.`).
+
+In every blocked case, no installed file, uninstall entry, or DB changes.
+
 ## 9. Verification checklist before tag/release
 - [ ] `release/EyzonOptics.exe` starts
 - [ ] backend starts successfully (port 8000 reachable)
