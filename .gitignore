@@ -9,6 +9,7 @@ dashboard/build/
 backend/build/
 backend/dist/
 backend/*.spec
+!backend/EyzonOptics.spec
 release/
 /Eyzon-Optics-Setup.exe
 /Eyzon-Optics-Windows-Release.zip

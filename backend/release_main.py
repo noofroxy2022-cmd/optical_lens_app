@@ -40,6 +40,7 @@ from release_runtime_guard import (
     show_conflict_messagebox,
     show_failure_messagebox,
 )
+from release_db_guard import validate_release_db
 
 BACKEND_PORT = 8000
 FRONTEND_PORT = 3000
@@ -137,6 +138,19 @@ def main() -> int:
             # never bind the ports again, never kill it. Just surface it.
             webbrowser.open(FRONTEND_URL)
             return 0
+
+        # DB validation happens before any port check, before os.chdir, and
+        # before app.main is ever imported - a missing/invalid database
+        # must never be silently auto-created by SQLite's/SQLAlchemy's
+        # default connect-on-first-query behavior in app/database.py.
+        db_path = os.path.join(_release_dir(), "release_runtime.db")
+        db_result = validate_release_db(db_path)
+        if not db_result.ok:
+            show_failure_messagebox(
+                f"تعذر تشغيل Eyzon Optics: قاعدة البيانات {db_result.reason}.\n"
+                "لم يتم تشغيل التطبيق."
+            )
+            return 1
 
         # This process now owns the mutex, so any occupied port below is
         # PROVABLY a foreign/unrelated conflict, not our own prior instance.

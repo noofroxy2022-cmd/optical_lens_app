@@ -20,7 +20,17 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 import release_runtime_guard as grd  # noqa: E402
+import release_db_guard as dbg  # noqa: E402
 import release_main  # noqa: E402
+
+
+def _ok_db(monkeypatch):
+    """release_main.main() now validates the DB before the port checks -
+    the pre-existing port/startup-flow tests below are not about DB
+    validation, so they stub it to a passing result to stay isolated from
+    whatever backend/release_runtime.db happens to contain on disk."""
+    monkeypatch.setattr(release_main, "validate_release_db",
+                         lambda path: dbg.DbValidationResult(True, None))
 
 
 # ============================================================== port helpers
@@ -208,6 +218,7 @@ def test_main_second_instance_opens_browser_once_and_skips_ports(monkeypatch):
 
 def test_main_occupied_backend_port_shows_conflict_and_exits(monkeypatch):
     """B. occupied 8000 -> conflict detected, no server start attempted."""
+    _ok_db(monkeypatch)
     monkeypatch.setattr(release_main, "acquire_single_instance_mutex",
                          lambda name: (222, False))
     released = []
@@ -231,6 +242,7 @@ def test_main_occupied_backend_port_shows_conflict_and_exits(monkeypatch):
 
 def test_main_occupied_frontend_port_shows_conflict_and_exits(monkeypatch):
     """C. occupied 3000 -> conflict detected, no server start attempted."""
+    _ok_db(monkeypatch)
     monkeypatch.setattr(release_main, "acquire_single_instance_mutex",
                          lambda name: (333, False))
     monkeypatch.setattr(release_main, "release_single_instance_mutex", lambda h: None)
@@ -250,6 +262,7 @@ def test_main_occupied_frontend_port_shows_conflict_and_exits(monkeypatch):
 def test_main_free_ports_normal_start_path_and_mutex_released(monkeypatch):
     """A. free ports -> preflight passes and startup proceeds; mutex always
     released afterward even on the success path."""
+    _ok_db(monkeypatch)
     monkeypatch.setattr(release_main, "acquire_single_instance_mutex",
                          lambda name: (444, False))
     released = []
@@ -270,9 +283,42 @@ def test_main_free_ports_normal_start_path_and_mutex_released(monkeypatch):
     assert released == [444]
 
 
+def test_main_invalid_db_blocks_port_checks_and_server_start(monkeypatch):
+    """H. an invalid/missing DB must be rejected before any port check and
+    before asyncio.run/uvicorn is ever reached - and the mutex must still
+    be released."""
+    monkeypatch.setattr(release_main, "acquire_single_instance_mutex",
+                         lambda name: (666, False))
+    released = []
+    monkeypatch.setattr(release_main, "release_single_instance_mutex",
+                         lambda h: released.append(h))
+    monkeypatch.setattr(release_main, "validate_release_db",
+                         lambda path: dbg.DbValidationResult(False, "قاعدة البيانات غير موجودة"))
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError("port check must not run when the DB is invalid")
+
+    monkeypatch.setattr(release_main, "is_port_free", _fail_if_called)
+
+    def _fail_if_run(*a, **k):
+        raise AssertionError("uvicorn must never start when the DB is invalid")
+
+    monkeypatch.setattr(release_main.asyncio, "run", _fail_if_run)
+    failures = []
+    monkeypatch.setattr(release_main, "show_failure_messagebox", failures.append)
+
+    rc = release_main.main()
+
+    assert rc == 1
+    assert len(failures) == 1
+    assert "قاعدة البيانات غير موجودة" in failures[0]
+    assert released == [666]
+
+
 def test_main_startup_failure_shows_message_exits_nonzero_and_releases_mutex(monkeypatch):
     """H. timeout/failure -> clear failure path, non-zero exit, mutex still
     released (no leaked handle on the failure branch)."""
+    _ok_db(monkeypatch)
     monkeypatch.setattr(release_main, "acquire_single_instance_mutex",
                          lambda name: (555, False))
     released = []

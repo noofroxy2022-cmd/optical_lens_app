@@ -1,8 +1,9 @@
 ; Eyzon Optics - Windows Setup
 ;
 ; Packages the already-approved, already-tested standalone release folder
-; (release\EyzonOptics.exe, release\release_runtime.db,
-; release\"Start Eyzon Optics.cmd") into a normal Windows installer.
+; (release\EyzonOptics.exe, release\release_runtime.db) together with the
+; tracked launcher source (installer\"Start Eyzon Optics.cmd") into a
+; normal Windows installer.
 ;
 ; Installs per-user (no admin required) so the app can write its own
 ; database, backups, and uploads at runtime without hitting Program Files
@@ -26,7 +27,7 @@
 ; process name.
 
 #define MyAppName "Eyzon Optics"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.5.0"
 #define MyAppExeName "EyzonOptics.exe"
 #define MyLauncherName "Start Eyzon Optics.cmd"
 #define ReleaseDir "..\release"
@@ -56,7 +57,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "{#ReleaseDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#ReleaseDir}\{#MyLauncherName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyLauncherName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\release_runtime.db"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Icons]
